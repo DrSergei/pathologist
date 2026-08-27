@@ -508,21 +508,25 @@ impl PreprocessorState {
             self.cache_frames.push(CacheFrame { skips: Vec::new() });
         }
 
-        let content = if let Some(cache) = &self.opts.source_cache {
+        let content: Arc<str> = if let Some(cache) = &self.opts.source_cache {
             let key = canonical.clone();
             if let Some(s) = cache.get(&key) {
-                s.clone()
+                Arc::clone(s)
             } else {
-                fs::read_to_string(path).map_err(|source| PreprocessError::Io {
+                fs::read_to_string(path)
+                    .map_err(|source| PreprocessError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    })?
+                    .into()
+            }
+        } else {
+            fs::read_to_string(path)
+                .map_err(|source| PreprocessError::Io {
                     path: path.to_path_buf(),
                     source,
                 })?
-            }
-        } else {
-            fs::read_to_string(path).map_err(|source| PreprocessError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?
+                .into()
         };
 
         let prev_file = self.current_file.clone();
@@ -2136,6 +2140,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
     /// output on every skip — that exponentiates. Live text stays unique;
     /// the second parent's *cache entry* still embeds the nested header
     /// so a later replay of only that parent keeps the nested declaration.
+    #[allow(clippy::manual_range_contains)]
     #[test]
     fn diamond_include_does_not_blow_up_and_cache_stays_self_contained() {
         let dir = unique_tmp_dir("diamond_inc");

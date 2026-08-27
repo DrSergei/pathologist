@@ -13,4 +13,5 @@ tree-sitter.workspace = true
 tree-sitter-c.workspace = true
 walkdir.workspace = true
 rayon.workspace = true
+rustc-hash.workspace = true
 tree-sitter-cpp = "0.23"

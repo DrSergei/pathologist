@@ -691,6 +691,7 @@ dependencies = [
  "anyhow",
  "indexmap",
  "rayon",
+ "rustc-hash",
  "thiserror",
  "trace-ir",
  "trace-preproc",

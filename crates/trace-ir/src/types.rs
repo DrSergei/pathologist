@@ -1,5 +1,6 @@
 use crate::{FieldId, TypeId};
 use indexmap::IndexMap;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -87,6 +88,13 @@ pub struct TypeTable {
     /// because lowering sees bare identifiers (`fn_t`, `SHandle`) whose
     /// pointer-ness is otherwise lost (they degrade to `Int`).
     aliases: IndexMap<String, TypeDesc>,
+    /// Named `struct` tag → richest interned [`TypeId`] (most fields).
+    struct_tags: FxHashMap<String, TypeId>,
+    /// Named `union` tag → richest interned [`TypeId`] (most fields).
+    union_tags: FxHashMap<String, TypeId>,
+    /// Set when a named struct/union is interned. [`complete_nested_tags`]
+    /// clears it after a walk so a second call with no new tags is free.
+    needs_tag_completion: bool,
 }
 
 impl Default for TypeTable {
@@ -101,6 +109,9 @@ impl TypeTable {
             types: Vec::new(),
             intern: IndexMap::new(),
             aliases: IndexMap::new(),
+            struct_tags: FxHashMap::default(),
+            union_tags: FxHashMap::default(),
+            needs_tag_completion: false,
         };
         table.intern(TypeDesc::Void);
         table.intern(TypeDesc::Char);
@@ -113,6 +124,9 @@ impl TypeTable {
 
     pub fn intern(&mut self, desc: TypeDesc) -> TypeId {
         let desc = self.canonicalize_desc(desc);
+        if desc_has_named_tag(&desc) {
+            self.needs_tag_completion = true;
+        }
         if let Some(id) = self.lookup_tag_ref(&desc) {
             return id;
         }
@@ -129,6 +143,7 @@ impl TypeTable {
             layout,
         });
         self.intern.insert(desc, id);
+        self.note_named_tag(id);
         id
     }
 
@@ -161,7 +176,13 @@ impl TypeTable {
     /// most complete layout interned so far (PCH headers are parsed in
     /// isolation; a later header may supply `IDeviceIoService` after
     /// `StreamHost { struct IDeviceIoService service; }` was interned).
+    /// Rewrite empty `struct Foo` / `union Foo` tags (and pointers to them)
+    /// to the most complete interned layout of that tag, when one exists.
+    /// No-op when no named aggregate has been interned since the last walk.
     pub fn complete_nested_tags(&mut self) {
+        if !self.needs_tag_completion {
+            return;
+        }
         let n = self.types.len();
         for i in 0..n {
             let fids: Vec<FieldId> = self.types[i].layout.fields.keys().copied().collect();
@@ -175,13 +196,14 @@ impl TypeTable {
                 }
             }
         }
+        self.needs_tag_completion = false;
     }
 
     fn complete_type_id(&mut self, id: TypeId) -> TypeId {
         match self.get(id).desc.clone() {
-            TypeDesc::Struct { name, fields } if fields.is_empty() && !name.is_empty() => self
-                .type_id_by_tag(&name, TypeKind::Struct)
-                .unwrap_or(id),
+            TypeDesc::Struct { name, fields } if fields.is_empty() && !name.is_empty() => {
+                self.type_id_by_tag(&name, TypeKind::Struct).unwrap_or(id)
+            }
             TypeDesc::Union { name, fields } if fields.is_empty() && !name.is_empty() => {
                 self.type_id_by_tag(&name, TypeKind::Union).unwrap_or(id)
             }
@@ -277,20 +299,46 @@ impl TypeTable {
     }
 
     pub fn type_id_by_tag(&self, name: &str, kind: TypeKind) -> Option<TypeId> {
-        self.types
-            .iter()
-            .filter(|t| tag_name_matches(&t.desc, name, kind))
-            .max_by_key(|t| {
-                let layout_n = t.layout.fields.len();
-                let desc_n = match &t.desc {
-                    TypeDesc::Struct { fields, .. } | TypeDesc::Union { fields, .. } => {
-                        fields.len()
-                    }
-                    _ => 0,
-                };
-                layout_n.max(desc_n)
-            })
-            .map(|t| t.id)
+        match kind {
+            TypeKind::Struct => self.struct_tags.get(name).copied(),
+            TypeKind::Union => self.union_tags.get(name).copied(),
+            _ => None,
+        }
+    }
+
+    fn note_named_tag(&mut self, id: TypeId) {
+        let (kind, name, richness) = {
+            let info = &self.types[id.0 as usize];
+            let kind = match &info.desc {
+                TypeDesc::Struct { name, .. } if !name.is_empty() => TypeKind::Struct,
+                TypeDesc::Union { name, .. } if !name.is_empty() => TypeKind::Union,
+                _ => return,
+            };
+            let name = match &info.desc {
+                TypeDesc::Struct { name, .. } | TypeDesc::Union { name, .. } => name.clone(),
+                _ => return,
+            };
+            (kind, name, tag_richness(info))
+        };
+        let old = match kind {
+            TypeKind::Struct => self.struct_tags.get(name.as_str()).copied(),
+            TypeKind::Union => self.union_tags.get(name.as_str()).copied(),
+            _ => return,
+        };
+        if let Some(old) = old {
+            if richness <= tag_richness(&self.types[old.0 as usize]) {
+                return;
+            }
+        }
+        match kind {
+            TypeKind::Struct => {
+                self.struct_tags.insert(name, id);
+            }
+            TypeKind::Union => {
+                self.union_tags.insert(name, id);
+            }
+            _ => {}
+        }
     }
 
     pub fn resolve_type_id(&self, desc: &TypeDesc) -> TypeId {
@@ -319,10 +367,22 @@ impl TypeTable {
     }
 }
 
-fn tag_name_matches(desc: &TypeDesc, name: &str, kind: TypeKind) -> bool {
-    match (desc, kind) {
-        (TypeDesc::Struct { name: n, .. }, TypeKind::Struct) => n == name,
-        (TypeDesc::Union { name: n, .. }, TypeKind::Union) => n == name,
+fn tag_richness(info: &TypeInfo) -> usize {
+    let layout_n = info.layout.fields.len();
+    let desc_n = match &info.desc {
+        TypeDesc::Struct { fields, .. } | TypeDesc::Union { fields, .. } => fields.len(),
+        _ => 0,
+    };
+    layout_n.max(desc_n)
+}
+
+fn desc_has_named_tag(desc: &TypeDesc) -> bool {
+    match desc {
+        TypeDesc::Struct { name, .. } | TypeDesc::Union { name, .. } => !name.is_empty(),
+        TypeDesc::Ptr(inner) | TypeDesc::Array { elem: inner, .. } => desc_has_named_tag(inner),
+        TypeDesc::FnPtr { ret, params } => {
+            desc_has_named_tag(ret) || params.iter().any(desc_has_named_tag)
+        }
         _ => false,
     }
 }
@@ -410,5 +470,24 @@ mod tests {
             t.field_id_by_name(service_tid, "Dispatch").is_some(),
             "embedded IDeviceIoService must expose Dispatch after completion"
         );
+    }
+
+    #[test]
+    fn type_id_by_tag_prefers_richer_layout() {
+        let mut t = TypeTable::new();
+        let empty = t.intern(TypeDesc::Struct {
+            name: "Foo".into(),
+            fields: Vec::new(),
+        });
+        assert_eq!(t.type_id_by_tag("Foo", TypeKind::Struct), Some(empty));
+        let rich = t.compute_struct_layout("Foo".into(), vec![("x".into(), TypeDesc::Int)]);
+        assert_eq!(t.type_id_by_tag("Foo", TypeKind::Struct), Some(rich));
+        assert_ne!(empty, rich);
+        let still = t.intern(TypeDesc::Struct {
+            name: "Foo".into(),
+            fields: Vec::new(),
+        });
+        assert_eq!(still, rich, "empty tag must rewrite to the complete layout");
+        assert_eq!(t.type_id_by_tag("Foo", TypeKind::Struct), Some(rich));
     }
 }

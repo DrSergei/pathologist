@@ -55,8 +55,25 @@ pub struct Diagnostic {
 /// origin (header file + position) was already merged map to the first copy.
 #[derive(Debug, Clone, Default)]
 pub struct MergeDedup {
-    pub fn_keys: FxHashMap<(FileId, String, u32), FnId>,
+    /// `(file, line) → name → FnId` so a hit does not clone the function name.
+    pub fn_keys: FxHashMap<(FileId, u32), FxHashMap<String, FnId>>,
     pub site_keys: FxHashMap<(FileId, u32, u32, String), CallSiteId>,
+}
+
+impl MergeDedup {
+    pub fn existing_fn(&self, file: FileId, name: &str, line: u32) -> Option<FnId> {
+        self.fn_keys
+            .get(&(file, line))
+            .and_then(|by_name| by_name.get(name))
+            .copied()
+    }
+
+    pub fn insert_fn(&mut self, file: FileId, name: String, line: u32, id: FnId) {
+        self.fn_keys
+            .entry((file, line))
+            .or_default()
+            .insert(name, id);
+    }
 }
 
 #[derive(Debug, Clone, Default)]

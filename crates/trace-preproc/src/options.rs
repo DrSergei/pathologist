@@ -26,7 +26,7 @@ pub struct PreprocessOptions {
     pub include_paths: Vec<PathBuf>,
     pub defines: indexmap::IndexMap<String, String>,
     /// Canonical path → raw file contents (skips disk reads during `#include` expansion).
-    pub source_cache: Option<std::sync::Arc<HashMap<PathBuf, String>>>,
+    pub source_cache: Option<std::sync::Arc<HashMap<PathBuf, std::sync::Arc<str>>>>,
     /// Shared cache of expanded `#include` bodies keyed by canonical path.
     pub include_expansion_cache: Option<Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>>>,
     /// Basename → project paths for fast include resolution.

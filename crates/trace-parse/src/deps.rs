@@ -17,7 +17,7 @@ pub struct IncludeGraph {
     /// Project files that should run through the preprocessor (have or receive `#include`s).
     pub needs_preprocess: HashSet<PathBuf>,
     /// Raw source text loaded while building the include graph (canonical paths).
-    pub source_cache: HashMap<PathBuf, String>,
+    pub source_cache: HashMap<PathBuf, std::sync::Arc<str>>,
     /// Basename → project files (for fast include resolution without tree walks).
     pub basename_index: HashMap<String, Vec<PathBuf>>,
 }
@@ -46,7 +46,7 @@ impl IncludeGraph {
         let basename_index = build_basename_index(&project_files);
 
         let mut edges: IndexMap<PathBuf, Vec<PathBuf>> = IndexMap::new();
-        let mut source_cache: HashMap<PathBuf, String> = HashMap::new();
+        let mut source_cache: HashMap<PathBuf, std::sync::Arc<str>> = HashMap::new();
         let project_list: Vec<PathBuf> = project_files.iter().cloned().collect();
         let scanned: Vec<(PathBuf, String, Vec<PathBuf>)> = project_list
             .par_iter()
@@ -71,7 +71,7 @@ impl IncludeGraph {
             })
             .collect();
         for (path, content, deps) in scanned {
-            source_cache.insert(path.clone(), content);
+            source_cache.insert(path.clone(), std::sync::Arc::<str>::from(content));
             if !deps.is_empty() {
                 edges.insert(path, deps);
             }
@@ -252,12 +252,12 @@ impl IncludeGraph {
     /// (macro-expanded includes the raw scanner misses). Used to order PCH
     /// so a header is not lowered in parallel with a nested type it needs.
     pub fn add_preprocess_includes(&mut self, from: &Path, headers: &[PathBuf]) {
-        let from = canonicalize(from);
+        let from = self.intern_path(from);
         if !self.project_files.contains(&from) {
             return;
         }
         for h in headers {
-            let to = canonicalize(h);
+            let to = self.intern_path(h);
             if to == from || !self.project_files.contains(&to) {
                 continue;
             }
@@ -268,16 +268,47 @@ impl IncludeGraph {
         }
     }
 
+    /// `path` as stored in [`Self::project_files`] when it is already a key,
+    /// otherwise [`trace_ir::canonicalize`] (syscall).
+    pub fn intern_path(&self, path: &Path) -> PathBuf {
+        if self.project_files.contains(path) {
+            return path.to_path_buf();
+        }
+        canonicalize(path)
+    }
+
+    /// Project files reachable from `start`, including `start`.
+    pub fn reachable_paths<'a>(&'a self, start: &'a Path) -> HashSet<&'a Path> {
+        let mut seen: HashSet<&Path> = HashSet::new();
+        let mut queue: VecDeque<&Path> = VecDeque::new();
+        if seen.insert(start) {
+            queue.push_back(start);
+        }
+        while let Some(node) = queue.pop_front() {
+            let Some(incs) = self.edges.get(node) else {
+                continue;
+            };
+            for inc in incs {
+                if self.project_files.contains(inc) && seen.insert(inc.as_path()) {
+                    queue.push_back(inc.as_path());
+                }
+            }
+        }
+        seen
+    }
+
     pub fn reachable_from(&self, sources: &HashSet<PathBuf>) -> HashSet<PathBuf> {
         let mut seen = HashSet::new();
-        let mut queue: VecDeque<PathBuf> = sources.iter().cloned().collect();
-        while let Some(node) = queue.pop_front() {
-            if !seen.insert(node.clone()) {
-                continue;
+        let mut queue: VecDeque<PathBuf> = VecDeque::new();
+        for s in sources {
+            if seen.insert(s.clone()) {
+                queue.push_back(s.clone());
             }
+        }
+        while let Some(node) = queue.pop_front() {
             if let Some(includes) = self.edges.get(&node) {
                 for inc in includes {
-                    if self.project_files.contains(inc) {
+                    if self.project_files.contains(inc) && seen.insert(inc.clone()) {
                         queue.push_back(inc.clone());
                     }
                 }
@@ -404,6 +435,7 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[allow(clippy::cloned_ref_to_slice_refs)]
     #[test]
     fn include_graph_resolves_local_and_orders() {
         let tmp = std::env::temp_dir().join(format!("trace_deps_{}", std::process::id()));
@@ -423,6 +455,13 @@ mod tests {
         let deps = g.edges.get(&canonicalize(&tmp.join("main.c"))).unwrap();
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0], canonicalize(&tmp.join("api.h")));
+
+        let main = canonicalize(&tmp.join("main.c"));
+        let api = canonicalize(&tmp.join("api.h"));
+        assert_eq!(g.intern_path(&main), main);
+        let reach = g.reachable_paths(&main);
+        assert!(reach.contains(main.as_path()));
+        assert!(reach.contains(api.as_path()));
 
         let all = [
             canonicalize(&tmp.join("api.h")),

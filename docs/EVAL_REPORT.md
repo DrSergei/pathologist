@@ -20,24 +20,24 @@ C++ fixture coverage (`cpp_basic`, `cpp_dispatch`, `cpp_callable`, `cpp_flow`, �
 
 | Step | Time |
 |------|-----:|
-| Index | 4.4s |
-| Analyze | 1.6s |
+| Index | 3.9s |
+| Analyze | 1.5s |
 | Export | 0.8s |
-| **Wall** | **7.0s** |
+| **Wall** | **6.2s** |
 
 | Metric | Value |
 |--------|------:|
 | Files | 1,483 |
 | Functions | 11,779 (9,399 defined / 2,380 external) |
-| Call edges | 40,337 |
-| Direct / indirect / external | 20,887 / **4,464** / 14,986 |
-| Arg-flow edges | 32,382 |
+| Call edges | 40,347 |
+| Direct / indirect / external | 20,887 / **4,474** / 14,986 |
+| Arg-flow edges | 32,391 |
 | Parse warnings | 370 |
 | `dlsym` PAG edges | 4 |
 
-Sequential warm, then **wave-parallel PCH** (626 headers). Nested merge is **types/typedefs** from **direct** includes plus this header's preprocess `included_headers` (child units already nested-merged grandchild types). Each TU merges **symbols** from every include-graph-reachable header plus preprocess `included_headers`. After warm, preprocess `included_headers` are added as include-graph edges so a header is never PCH'd in the same wave as a nested type the raw `#include` scanner missed; headers that become reachable only then move from the orphan path into PCH. Include-graph **cycles** are indexed in order, not as a parallel leftover wave. That was the `DeviceNodeExtDispatch` 73→72 drop (`DispatchToMessage`): `hdf_wifi_core.c` designated `.object.objectId = 1, .Dispatch = DispatchToMessage` needs a complete `struct HdfObject` prefix inside `IDeviceIoService`. Parallel leaves used to intern that nested tag empty; sequential path-sort happened to PCH `hdf_object.h` first. With preprocess edges, waves keep all 73 names (including `DispatchToMessage`). `pch-done` 0.2s vs 1.0s sequential.
+Sequential warm, then **wave-parallel PCH** (626 headers). Nested merge is **types/typedefs** from **direct** includes plus this header's preprocess `included_headers` (child units already nested-merged grandchild types). Each TU merges **symbols** from every include-graph-reachable header plus preprocess `included_headers`. After warm, preprocess `included_headers` are added as include-graph edges so a header is never PCH'd in the same wave as a nested type the raw `#include` scanner missed; headers that become reachable only then move from the orphan path into PCH. Include-graph **cycles** are indexed in order, not as a parallel leftover wave. That was the `DeviceNodeExtDispatch` 73→72 drop (`DispatchToMessage`): `hdf_wifi_core.c` designated `.object.objectId = 1, .Dispatch = DispatchToMessage` needs a complete `struct HdfObject` prefix inside `IDeviceIoService`. Parallel leaves used to intern that nested tag empty; sequential path-sort happened to PCH `hdf_object.h` first. With preprocess edges, waves keep all 73 names (including `DispatchToMessage`). `pch-done` 0.2s vs 1.0s sequential. Index also keeps a named-tag → richest-`TypeId` map (no scan of `types[]` on every intern), shares file/preprocessed text as `Arc<str>`, caches `canonicalize`, and builds each TU's header preamble from one PCH topo order (no per-TU Kahn sort or recanonicalize of graph keys).
 
-Hub unique-indirect counts are unchanged vs the previous correct snapshot: `DeviceNodeExtDispatch` **73** (includes `DispatchToMessage`), `HdfDeviceLaunchNode` **125**, `HdfSbufReadBuffer` **2**, `StreamDispatch` **24**, `HdfCameraDispatch` **23**, `HdfPmDriverDispatch` **19**, `HdfObjectManagerGetObject` **18**, `PlatformDumperDump` **13**, `SetOption` **13**, `DeviceDriverBind` 122 edges / **106** names, `GpioOnDevEventReceive` 13 edges / **12** names. Leftovers: `HdfDeviceUnlaunchNode` **112** names (was 116), linux `WorkEntry` **20** (was 19, extra `AlsDataWorkEntry`).
+Hub unique-indirect counts are unchanged vs the previous correct snapshot: `DeviceNodeExtDispatch` **73** (includes `DispatchToMessage`), `HdfDeviceLaunchNode` **125**, `HdfSbufReadBuffer` **2**, `StreamDispatch` **24**, `HdfCameraDispatch` **23**, `HdfPmDriverDispatch` **19**, `HdfObjectManagerGetObject` **18**, `PlatformDumperDump` **13**, `SetOption` **13**, `DeviceDriverBind` 122 edges / **106** names, `GpioOnDevEventReceive` 13 edges / **12** names. Leftovers: `HdfDeviceUnlaunchNode` **112** names (was 116), linux `WorkEntry` **20** (was 19, extra `AlsDataWorkEntry`). Global indirect is **4,474** (+10 vs the previous table; no hub names lost).
 
 ## Cases
 
@@ -1495,10 +1495,10 @@ Same 13 drivers as case 48, `Set*Disable` stores. Complete vs source.
 
 | Step | Time |
 |------|-----:|
-| Index | 3.9s |
+| Index | 3.4s |
 | Analyze | 0.1s |
 | Export | 0.4s |
-| **Wall** | **3.7s** |
+| **Wall** | **3.9s** |
 
 | Metric | Value |
 |--------|------:|
@@ -1901,10 +1901,10 @@ Hang / stack-overflow checks, not dispatch-hub evals. PCH-style header IR is wha
 
 | Step | Time |
 |------|-----:|
-| Index | 11.3s |
+| Index | 9.4s |
 | Analyze | 0.3s |
-| Export | 1.4s |
-| **Wall** | **13.0s** |
+| Export | 1.8s |
+| **Wall** | **11.5s** |
 
 | Metric | Value |
 |--------|------:|

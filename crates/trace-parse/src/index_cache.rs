@@ -35,7 +35,7 @@ impl IndexSourceCache {
         graph: &IncludeGraph,
         eff_opts: &PreprocessOptions,
     ) -> Result<Arc<PreprocessedSource>, String> {
-        let canonical = trace_ir::canonicalize(path);
+        let canonical = graph.intern_path(path);
         if let Ok(guard) = self.inner.read() {
             if let Some(src) = guard.get(&canonical) {
                 return Ok(Arc::clone(src));
@@ -44,7 +44,7 @@ impl IndexSourceCache {
 
         let (text, line_map, included) = read_index_source(path, graph, eff_opts)?;
         let src = Arc::new(PreprocessedSource {
-            text: text.into(),
+            text,
             line_map: Arc::new(line_map),
             included_headers: Arc::new(included),
         });
@@ -70,14 +70,14 @@ fn read_index_source(
     path: &Path,
     graph: &IncludeGraph,
     eff_opts: &PreprocessOptions,
-) -> Result<(String, LineMap, Vec<PathBuf>), String> {
-    let canonical = trace_ir::canonicalize(path);
+) -> Result<(Arc<str>, LineMap, Vec<PathBuf>), String> {
+    let canonical = graph.intern_path(path);
     if !should_preprocess(path, eff_opts, graph) {
         if let Some(s) = graph.source_cache.get(&canonical) {
-            return Ok((s.clone(), LineMap::new(), Vec::new()));
+            return Ok((Arc::clone(s), LineMap::new(), Vec::new()));
         }
         return std::fs::read_to_string(path)
-            .map(|s| (s, LineMap::new(), Vec::new()))
+            .map(|s| (Arc::<str>::from(s), LineMap::new(), Vec::new()))
             .map_err(|e| e.to_string());
     }
     let preproc_result = preprocess_file(&canonical, eff_opts).map_err(|e| e.to_string())?;
@@ -88,7 +88,7 @@ fn read_index_source(
     // unexpanded function-like macros, which is strictly less sound than a
     // truncated-but-consistent prefix (spans stay LineMap-mappable).
     Ok((
-        preproc_result.output,
+        Arc::from(preproc_result.output),
         preproc_result.line_map,
         preproc_result.included_headers,
     ))

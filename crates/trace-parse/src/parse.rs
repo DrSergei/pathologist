@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::sync::Arc;
 use tree_sitter::{Node, Parser, Tree};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,26 +38,26 @@ fn make_parser(lang: SourceLang) -> Parser {
 
 pub struct ParseResult {
     pub tree: Tree,
-    pub source: String,
+    pub source: Arc<str>,
 }
 
 /// Parse with the grammar matching `lang`. The C++ grammar is a superset of
 /// the C grammar's node vocabulary for everything the lowering matches on, so
 /// existing C paths are unaffected.
 pub fn parse_source_with_lang(
-    source: impl AsRef<str>,
+    source: impl Into<Arc<str>>,
     lang: SourceLang,
 ) -> Result<ParseResult, String> {
-    let source = source.as_ref().to_string();
+    let source: Arc<str> = source.into();
     let tree = match lang {
-        SourceLang::C => PARSER_C.with(|p| p.borrow_mut().parse(&source, None)),
-        SourceLang::Cpp => PARSER_CPP.with(|p| p.borrow_mut().parse(&source, None)),
+        SourceLang::C => PARSER_C.with(|p| p.borrow_mut().parse(source.as_ref(), None)),
+        SourceLang::Cpp => PARSER_CPP.with(|p| p.borrow_mut().parse(source.as_ref(), None)),
     };
     let tree = tree.ok_or_else(|| "tree-sitter returned no tree".to_string())?;
     Ok(ParseResult { tree, source })
 }
 
-pub fn parse_c_source(source: impl AsRef<str>) -> Result<ParseResult, String> {
+pub fn parse_c_source(source: impl Into<Arc<str>>) -> Result<ParseResult, String> {
     parse_source_with_lang(source, SourceLang::C)
 }
 

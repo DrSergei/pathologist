@@ -1,7 +1,7 @@
 use crate::deps::IncludeGraph;
 use crate::discover::discover_source_files;
 use crate::index_cache::IndexSourceCache;
-use crate::merge::{merge_unit_index, UnitIndex};
+use crate::merge::{merge_unit_index, merge_unit_symbols, merge_unit_types, UnitIndex};
 use crate::parse::node_text;
 use rayon::prelude::*;
 use std::cell::RefCell;
@@ -20,10 +20,21 @@ use tree_sitter::Node;
 /// Nested AST walk cap. Pathological left-deep trees (comma-operator
 /// chains of thousands of terms) would otherwise overflow the thread stack.
 const MAX_AST_WALK_DEPTH: u32 = 512;
+const INDEX_PROGRESS_EVERY: usize = 50;
 
 fn index_progress(msg: impl std::fmt::Display) {
     let _ = writeln!(std::io::stderr(), "{msg}");
     let _ = std::io::stderr().flush();
+}
+
+fn index_item_progress(i: usize, n: usize, msg: impl std::fmt::Display) {
+    if std::env::var_os("TRACE_INDEX_VERBOSE").is_some()
+        || i == 0
+        || i + 1 == n
+        || (i + 1).is_multiple_of(INDEX_PROGRESS_EVERY)
+    {
+        index_progress(msg);
+    }
 }
 
 /// A function-name reference whose resolution was deferred because the
@@ -217,7 +228,11 @@ pub fn build_program_with_jobs(
     ));
     for (i, path) in headers_for_macro_warm.iter().enumerate() {
         let t = Instant::now();
-        index_progress(format!("warm: {}/{} {}", i + 1, warm_n, path.display()));
+        index_item_progress(
+            i,
+            warm_n,
+            format!("warm: {}/{} {}", i + 1, warm_n, path.display()),
+        );
         let header_macros: Arc<std::sync::RwLock<MacroTable>> = Arc::new(std::sync::RwLock::new(
             macro_table_from_defines(&opts.defines),
         ));
@@ -242,12 +257,16 @@ pub fn build_program_with_jobs(
                 }
             }
         }
-        index_progress(format!(
-            "warm-done: {}/{} {:.1}s",
-            i + 1,
+        index_item_progress(
+            i,
             warm_n,
-            t.elapsed().as_secs_f64()
-        ));
+            format!(
+                "warm-done: {}/{} {:.1}s",
+                i + 1,
+                warm_n,
+                t.elapsed().as_secs_f64()
+            ),
+        );
     }
 
     for (from, headers) in source_cache.included_by_file() {
@@ -273,6 +292,7 @@ pub fn build_program_with_jobs(
     }
     pch_headers.sort();
     pch_headers.dedup();
+    let pch_order = Arc::new(include_graph.index_order(&pch_headers));
     let pch_set: HashSet<PathBuf> = pch_headers.iter().cloned().collect();
     let orphan_headers: Vec<PathBuf> = include_graph.index_order(
         &project_headers
@@ -311,7 +331,7 @@ pub fn build_program_with_jobs(
     // Cyclic leftovers are indexed in `index_order`, never as a parallel wave.
     let mut header_ir_map: HashMap<PathBuf, Arc<UnitIndex>> = HashMap::new();
     let (pch_waves, pch_cycles) = if jobs == 1 {
-        (vec![include_graph.index_order(&pch_headers)], Vec::new())
+        (vec![pch_order.as_ref().clone()], Vec::new())
     } else {
         include_graph.index_waves(&pch_headers)
     };
@@ -329,8 +349,9 @@ pub fn build_program_with_jobs(
                     &source_cache,
                     Some(&header_ir_map),
                     &cpp_parse,
+                    pch_order.as_ref(),
                 );
-                header_ir_map.insert(trace_ir::canonicalize(path), Arc::new(unit));
+                header_ir_map.insert(include_graph.intern_path(path), Arc::new(unit));
             }
         } else {
             let snapshot = header_ir_map.clone();
@@ -347,13 +368,14 @@ pub fn build_program_with_jobs(
                                 &source_cache,
                                 Some(&snapshot),
                                 &cpp_parse,
+                                pch_order.as_ref(),
                             ),
                         )
                     })
                     .collect()
             });
             for (path, unit) in units {
-                header_ir_map.insert(trace_ir::canonicalize(&path), Arc::new(unit));
+                header_ir_map.insert(include_graph.intern_path(&path), Arc::new(unit));
             }
         }
     }
@@ -366,8 +388,9 @@ pub fn build_program_with_jobs(
             &source_cache,
             Some(&header_ir_map),
             &cpp_parse,
+            pch_order.as_ref(),
         );
-        header_ir_map.insert(trace_ir::canonicalize(&path), Arc::new(unit));
+        header_ir_map.insert(include_graph.intern_path(&path), Arc::new(unit));
     }
     let header_ir = Arc::new(header_ir_map);
     index_progress(format!(
@@ -377,7 +400,7 @@ pub fn build_program_with_jobs(
     ));
     for path in include_graph.index_order(&header_ir.keys().cloned().collect::<Vec<_>>()) {
         if let Some(unit) = header_ir.get(&path) {
-            merge_unit_index(&mut program, unit.as_ref().clone());
+            merge_unit_index(&mut program, unit.as_ref());
         }
     }
     program.types.complete_nested_tags();
@@ -386,15 +409,19 @@ pub fn build_program_with_jobs(
         if jobs == 1 {
             for (i, path) in orphan_headers.iter().enumerate() {
                 let t = Instant::now();
-                index_progress(format!(
-                    "parse-orphan: {}/{} {}",
-                    i + 1,
+                index_item_progress(
+                    i,
                     orphan_headers.len(),
-                    path.display()
-                ));
+                    format!(
+                        "parse-orphan: {}/{} {}",
+                        i + 1,
+                        orphan_headers.len(),
+                        path.display()
+                    ),
+                );
                 merge_unit_index(
                     &mut program,
-                    index_source_file(
+                    &index_source_file(
                         path,
                         root,
                         &include_graph,
@@ -402,14 +429,19 @@ pub fn build_program_with_jobs(
                         &source_cache,
                         Some(&header_ir),
                         &cpp_parse,
+                        pch_order.as_ref(),
                     ),
                 );
-                index_progress(format!(
-                    "parse-orphan-done: {}/{} {:.1}s",
-                    i + 1,
+                index_item_progress(
+                    i,
                     orphan_headers.len(),
-                    t.elapsed().as_secs_f64()
-                ));
+                    format!(
+                        "parse-orphan-done: {}/{} {:.1}s",
+                        i + 1,
+                        orphan_headers.len(),
+                        t.elapsed().as_secs_f64()
+                    ),
+                );
             }
         } else {
             let mut header_units: HashMap<PathBuf, UnitIndex> = orphan_headers
@@ -425,13 +457,14 @@ pub fn build_program_with_jobs(
                             &source_cache,
                             Some(&header_ir),
                             &cpp_parse,
+                            pch_order.as_ref(),
                         ),
                     )
                 })
                 .collect();
             for path in &orphan_headers {
                 if let Some(unit) = header_units.remove(path) {
-                    merge_unit_index(&mut program, unit);
+                    merge_unit_index(&mut program, &unit);
                 }
             }
         }
@@ -441,15 +474,14 @@ pub fn build_program_with_jobs(
         if jobs == 1 {
             for (i, path) in file_order.iter().enumerate() {
                 let t = Instant::now();
-                index_progress(format!(
-                    "parse: {}/{} {}",
-                    i + 1,
+                index_item_progress(
+                    i,
                     file_order.len(),
-                    path.display()
-                ));
+                    format!("parse: {}/{} {}", i + 1, file_order.len(), path.display()),
+                );
                 merge_unit_index(
                     &mut program,
-                    index_source_file(
+                    &index_source_file(
                         path,
                         root,
                         &include_graph,
@@ -457,14 +489,19 @@ pub fn build_program_with_jobs(
                         &source_cache,
                         Some(&header_ir),
                         &cpp_parse,
+                        pch_order.as_ref(),
                     ),
                 );
-                index_progress(format!(
-                    "parse-done: {}/{} {:.1}s",
-                    i + 1,
+                index_item_progress(
+                    i,
                     file_order.len(),
-                    t.elapsed().as_secs_f64()
-                ));
+                    format!(
+                        "parse-done: {}/{} {:.1}s",
+                        i + 1,
+                        file_order.len(),
+                        t.elapsed().as_secs_f64()
+                    ),
+                );
             }
         } else {
             let mut units: HashMap<PathBuf, UnitIndex> = file_order
@@ -480,13 +517,14 @@ pub fn build_program_with_jobs(
                             &source_cache,
                             Some(&header_ir),
                             &cpp_parse,
+                            pch_order.as_ref(),
                         ),
                     )
                 })
                 .collect();
             for path in &file_order {
                 if let Some(unit) = units.remove(path) {
-                    merge_unit_index(&mut program, unit);
+                    merge_unit_index(&mut program, &unit);
                 }
             }
         }
@@ -710,44 +748,52 @@ fn is_index_header(path: &Path) -> bool {
 /// TUs: graph reachability so nested prototypes stay available even when a
 /// cached splice omits them from `included_headers` (direct-only dropped
 /// `DispatchToMessage` from `hdf_wifi_core.c` via `sidecar.h`).
-fn headers_to_merge(
-    graph: &IncludeGraph,
-    self_canon: &PathBuf,
-    included_headers: &[PathBuf],
+///
+/// Order follows `pch_order` (global include topo) rather than a per-file
+/// `index_order`, which would redo Kahn's algorithm for every TU.
+fn headers_to_merge<'a>(
+    graph: &'a IncludeGraph,
+    pch_order: &'a [PathBuf],
+    self_canon: &'a Path,
+    included_headers: &'a [PathBuf],
     types_only: bool,
-) -> Vec<PathBuf> {
-    let mut headers: Vec<PathBuf> = if types_only {
-        graph
-            .edges
-            .get(self_canon)
-            .into_iter()
-            .flatten()
-            .filter(|h| *h != self_canon && is_index_header(h))
-            .cloned()
-            .collect()
+) -> Vec<&'a Path> {
+    let mut wanted: HashSet<&Path> = HashSet::new();
+    if types_only {
+        if let Some(edges) = graph.edges.get(self_canon) {
+            for h in edges {
+                if h.as_path() != self_canon && is_index_header(h) {
+                    wanted.insert(h.as_path());
+                }
+            }
+        }
     } else {
-        let mut seeds = HashSet::new();
-        seeds.insert(self_canon.clone());
-        graph
-            .reachable_from(&seeds)
-            .into_iter()
-            .filter(|h| h != self_canon && is_index_header(h))
-            .collect()
-    };
-    for h in included_headers {
-        if h != self_canon && is_index_header(h) {
-            headers.push(h.clone());
+        for p in graph.reachable_paths(self_canon) {
+            if p != self_canon && is_index_header(p) {
+                wanted.insert(p);
+            }
         }
     }
-    headers.sort();
-    headers.dedup();
-    graph.index_order(&headers)
+    for h in included_headers {
+        if h.as_path() != self_canon && is_index_header(h) {
+            wanted.insert(h.as_path());
+        }
+    }
+    let mut out = Vec::with_capacity(wanted.len());
+    for h in pch_order {
+        if wanted.remove(h.as_path()) {
+            out.push(h.as_path());
+        }
+    }
+    let mut rest: Vec<&Path> = wanted.into_iter().collect();
+    rest.sort();
+    out.extend(rest);
+    out
 }
 
 fn index_lang(path: &Path, cpp_parse: &HashSet<PathBuf>) -> crate::parse::SourceLang {
-    let canon = trace_ir::canonicalize(path);
-    if crate::parse::SourceLang::from_path(&canon) == crate::parse::SourceLang::Cpp
-        || cpp_parse.contains(&canon)
+    if crate::parse::SourceLang::from_path(path) == crate::parse::SourceLang::Cpp
+        || cpp_parse.contains(path)
     {
         crate::parse::SourceLang::Cpp
     } else {
@@ -755,6 +801,7 @@ fn index_lang(path: &Path, cpp_parse: &HashSet<PathBuf>) -> crate::parse::Source
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn index_source_file(
     path: &Path,
     root: &Path,
@@ -763,6 +810,7 @@ fn index_source_file(
     source_cache: &IndexSourceCache,
     header_ir: Option<&HashMap<PathBuf, Arc<UnitIndex>>>,
     cpp_parse: &HashSet<PathBuf>,
+    pch_order: &[PathBuf],
 ) -> UnitIndex {
     let mut program = Program::new(root.to_path_buf());
     match process_indexed_file(
@@ -773,6 +821,7 @@ fn index_source_file(
         source_cache,
         header_ir,
         cpp_parse,
+        pch_order,
     ) {
         Ok(()) => {
             if std::env::var_os("TRACE_DEBUG_UNIT").is_some() {
@@ -811,6 +860,7 @@ fn index_source_file(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_indexed_file(
     program: &mut Program,
     path: &Path,
@@ -819,10 +869,11 @@ fn process_indexed_file(
     source_cache: &IndexSourceCache,
     header_ir: Option<&HashMap<PathBuf, Arc<UnitIndex>>>,
     cpp_parse: &HashSet<PathBuf>,
+    pch_order: &[PathBuf],
 ) -> Result<(), String> {
     let pre = source_cache.get_or_preprocess(path, graph, index_opts)?;
-    let self_canon = trace_ir::canonicalize(path);
-    let file_id = program.symbols.add_file_interned(self_canon.clone());
+    let self_canon = graph.intern_path(path);
+    let file_id = program.symbols.add_file_interned(&self_canon);
     if let Some(ir) = header_ir {
         // Nested PCH copies types/typedefs only so ancestor units stay small.
         // TUs merge prototypes from every reachable header (the defining
@@ -830,18 +881,22 @@ fn process_indexed_file(
         // to miss `sidecar.h` for `hdf_wifi_core.c`, dropping
         // `DispatchToMessage` from `DeviceNodeExtDispatch`.
         let types_only = is_index_header(path);
-        let headers = headers_to_merge(graph, &self_canon, &pre.included_headers, types_only);
+        let headers = headers_to_merge(
+            graph,
+            pch_order,
+            &self_canon,
+            &pre.included_headers,
+            types_only,
+        );
         for h in headers {
-            let key = trace_ir::canonicalize(&h);
-            if let Some(unit) = ir.get(&key) {
-                let slice = if types_only {
-                    unit.clone_types_only()
+            if let Some(unit) = ir.get(h) {
+                if types_only {
+                    merge_unit_types(program, unit);
                 } else {
-                    unit.clone_symbols_only()
-                };
-                merge_unit_index(program, slice);
+                    merge_unit_symbols(program, unit);
+                }
             }
-            let hid = program.symbols.add_file_interned(key);
+            let hid = program.symbols.add_file_interned(h);
             if hid != file_id {
                 program.symbols.register_included_header(file_id, hid);
             }
@@ -856,7 +911,7 @@ fn process_indexed_file(
         let _ = std::fs::write(std::path::Path::new(&dir).join(fname), pre.text.as_ref());
     }
     let lang = index_lang(path, cpp_parse);
-    let parsed = crate::parse::parse_source_with_lang(pre.text.as_ref(), lang)?;
+    let parsed = crate::parse::parse_source_with_lang(Arc::clone(&pre.text), lang)?;
     if crate::parse::has_parse_errors(&parsed.tree) {
         program.add_diagnostic(Diagnostic {
             severity: DiagnosticSeverity::Warning,
@@ -872,7 +927,7 @@ fn process_indexed_file(
         current_file: file_id,
         locals: HashMap::new(),
         line_map: Some(std::sync::Arc::clone(&pre.line_map)),
-        primary_path: trace_ir::canonicalize(path),
+        primary_path: self_canon,
         pending: RefCell::new(Vec::new()),
         ns_stack: Vec::new(),
         using_nss: Vec::new(),
@@ -884,7 +939,12 @@ fn process_indexed_file(
         ast_depth: 0,
         ast_depth_warned: false,
     };
-    lower_tree(program, &mut ctx, &parsed.source, parsed.tree.root_node());
+    lower_tree(
+        program,
+        &mut ctx,
+        parsed.source.as_ref(),
+        parsed.tree.root_node(),
+    );
     resolve_pending_fn_refs(program, &ctx);
     program.types.complete_nested_tags();
     Ok(())
@@ -4815,7 +4875,7 @@ fn node_span(program: &mut Program, ctx: &LowerContext, node: Node) -> Span {
             // (pre-expansion) line/col, so reported lines match what a
             // user sees in their editor (AGENTS.md LineMap invariant).
             let fid = if origin != ctx.primary_path {
-                program.symbols.add_file_interned(origin.to_path_buf())
+                program.symbols.add_file_interned(origin)
             } else {
                 ctx.current_file
             };

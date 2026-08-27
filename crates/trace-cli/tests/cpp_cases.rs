@@ -1,4 +1,5 @@
 //! C++ lowering integration tests (first-step C++ support).
+#![allow(clippy::needless_borrow)]
 
 mod common;
 

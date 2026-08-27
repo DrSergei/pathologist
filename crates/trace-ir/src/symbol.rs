@@ -137,10 +137,12 @@ impl SymbolTable {
 
     /// Intern a file by path: repeated origins (the same header reached
     /// through many TUs) map to one [`FileId`].
-    pub fn add_file_interned(&mut self, path: PathBuf) -> FileId {
-        if let Some(&id) = self.file_by_path.get(&path) {
+    pub fn add_file_interned(&mut self, path: impl AsRef<Path>) -> FileId {
+        let path = path.as_ref();
+        if let Some(&id) = self.file_by_path.get(path) {
             return id;
         }
+        let path = path.to_path_buf();
         let id = self.add_file(path.clone());
         self.file_by_path.insert(path, id);
         id
