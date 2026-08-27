@@ -51,4 +51,6 @@ pub enum FlowConstraint {
     /// `dst = new T(...)` — allocate a fresh heap location and point `dst` to
     /// it, so the constructor's implicit `this` has concrete pointees.
     NewHeap { dst: VarId },
+    /// `dst` points at the given string literal (interned; copies propagate).
+    StringConst { dst: VarId, value: String },
 }

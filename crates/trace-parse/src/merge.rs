@@ -192,6 +192,7 @@ pub fn merge_unit_index(program: &mut Program, unit: UnitIndex) {
             .into_iter()
             .filter_map(|(i, f)| fn_map.get(&f).map(|nf| (i, *nf)))
             .collect();
+        site.return_dst = site.return_dst.and_then(|v| var_map.get(&v).copied());
         site.span.file = span_file;
         program.symbols.call_sites.push(site);
         program.dedup.site_keys.insert(key, new_id);
@@ -237,6 +238,7 @@ fn flow_vars(flow: &FlowConstraint) -> impl Iterator<Item = VarId> + '_ {
         FlowConstraint::CallReturn { dst, .. } => vec![*dst],
         FlowConstraint::CallReturnIndirect { dst, callee_var } => vec![*dst, *callee_var],
         FlowConstraint::NewHeap { dst, .. } => vec![*dst],
+        FlowConstraint::StringConst { dst, .. } => vec![*dst],
     }
     .into_iter()
 }
@@ -262,10 +264,10 @@ fn merge_types(
     for info in src.all() {
         let new_id = match &info.desc {
             TypeDesc::Struct { name, fields } if !fields.is_empty() => {
-                dst.compute_struct_layout(name.clone(), fields.clone())
+                dst.compute_struct_layout(name.clone(), fields_from_layout(src, info))
             }
             TypeDesc::Union { name, fields } if !fields.is_empty() => {
-                dst.compute_union_layout(name.clone(), fields.clone())
+                dst.compute_union_layout(name.clone(), fields_from_layout(src, info))
             }
             other => dst.intern(other.clone()),
         };
@@ -278,7 +280,22 @@ fn merge_types(
             dst.register_alias(alias, desc.clone());
         }
     }
+    dst.complete_nested_tags();
     map
+}
+
+/// Prefer layout field types over the interned `TypeDesc` field list: PCH
+/// intern may have rewritten nested empty tags (`struct IDeviceIoService`)
+/// in the layout while the desc still stores the incomplete tag.
+fn fields_from_layout(
+    src: &trace_ir::TypeTable,
+    info: &trace_ir::TypeInfo,
+) -> Vec<(String, TypeDesc)> {
+    info.layout
+        .fields
+        .iter()
+        .map(|(_, fl)| (fl.name.clone(), src.get(fl.type_id).desc.clone()))
+        .collect()
 }
 
 fn remap_flow(
@@ -309,7 +326,12 @@ fn remap_flow(
             dst: rv(dst),
             src: rv(src),
         },
-        FlowConstraint::GepField { dst, base, field, field_name } => FlowConstraint::GepField {
+        FlowConstraint::GepField {
+            dst,
+            base,
+            field,
+            field_name,
+        } => FlowConstraint::GepField {
             dst: rv(dst),
             base: rv(base),
             field,
@@ -323,11 +345,17 @@ fn remap_flow(
             dst: rv(dst),
             callee_name,
         },
-        FlowConstraint::CallReturnIndirect { dst, callee_var } => FlowConstraint::CallReturnIndirect {
-            dst: rv(dst),
-            callee_var: rv(callee_var),
-        },
+        FlowConstraint::CallReturnIndirect { dst, callee_var } => {
+            FlowConstraint::CallReturnIndirect {
+                dst: rv(dst),
+                callee_var: rv(callee_var),
+            }
+        }
         FlowConstraint::NewHeap { dst } => FlowConstraint::NewHeap { dst: rv(dst) },
+        FlowConstraint::StringConst { dst, value } => FlowConstraint::StringConst {
+            dst: rv(dst),
+            value,
+        },
     }
 }
 

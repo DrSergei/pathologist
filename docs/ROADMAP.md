@@ -101,8 +101,9 @@ C1→C11 there with fixtures.
 
 | Corpus | Index | Analyze | Export (minimal) |
 |--------|-------|---------|------------------|
-| HDF `drivers_hdf_core` | ~7s | ~1s | ~0.6s |
-| Hiview `hiviewdfx_hiview` | ~10s | ~0.6s | ~1s |
+| HDF `drivers_hdf_core` | ~3.3s | ~1.5s | ~0.8s |
+| Hiview `hiviewdfx_hiview` | ~3.4s | ~0.2s | ~0.4s |
+| Camera `multimedia_camera_framework` | ~8s | ~0.3s | ~1.4s |
 
 Further index-time wins: smarter header/preprocess skipping, incremental TU cache.
 

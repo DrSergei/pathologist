@@ -93,6 +93,12 @@ impl LineMap {
         out
     }
 
+    /// Drop mappings whose output offset is at or after `at`.
+    pub fn truncate_at(&mut self, at: usize) {
+        let at = at as u32;
+        self.entries.retain(|e| e.output_offset < at);
+    }
+
     /// Append `other`'s entries shifted by `offset`, renumbering its file
     /// indices through `remap` (indexed by `other`'s file table).
     pub fn splice(&mut self, other: &LineMap, offset: usize, remap: &[u32]) {

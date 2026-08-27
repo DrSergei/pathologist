@@ -15,10 +15,20 @@ pub const TU_EXTENSIONS: &[&str] = &["c", "cpp", "cc", "cxx", "c++"];
 /// Header extensions pulled in via `#include` (and macro-warmed).
 pub const HEADER_EXTENSIONS: &[&str] = &["h", "hpp", "hh", "hxx", "H", "inl", "ipp"];
 
+/// C++ translation-unit extensions (not headers).
 pub fn is_cpp_path(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
         Some("cpp" | "cc" | "cxx" | "c++")
+    )
+}
+
+/// C++ header extensions. `.h` is ambiguous and is *not* included: a `.h`
+/// is parsed as C++ only when the include graph reaches it from a C++ TU.
+pub fn is_cpp_header_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("hpp" | "hh" | "hxx" | "inl" | "ipp")
     )
 }
 
@@ -73,4 +83,19 @@ fn discover_by_extension(root: &Path, ext: &str) -> Vec<PathBuf> {
         .collect();
     paths.sort();
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn cpp_header_extensions_are_cpp() {
+        assert!(is_cpp_header_path(Path::new("util.hpp")));
+        assert!(is_cpp_header_path(Path::new("util.hh")));
+        assert!(!is_cpp_header_path(Path::new("plugin.h")));
+        assert!(!is_cpp_path(Path::new("plugin.h")));
+        assert!(is_cpp_path(Path::new("plugin.cpp")));
+    }
 }

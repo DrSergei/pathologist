@@ -25,6 +25,9 @@ pub enum Effect {
     /// Terminator: memory reachable via `param[param]` is zeroed by this
     /// call. Introduces no values; kills are not modeled (flow-insensitive).
     Clears { param: u32 },
+    /// Return value may be the address of an in-tree function whose name
+    /// equals a string constant in `param[name_param]` (`dlsym` family).
+    Dlsym { name_param: u32 },
 }
 
 /// A per-function summary.
@@ -72,14 +75,36 @@ impl FnModelSet {
         for n in ["memset", "memset_s"] {
             reg(n, vec![Effect::Clears { param: 0 }]);
         }
-        for n in ["malloc", "calloc", "zalloc", "kmalloc", "OsalMemAlloc", "OsalMemCalloc"] {
+        for n in [
+            "malloc",
+            "calloc",
+            "zalloc",
+            "kmalloc",
+            "OsalMemAlloc",
+            "OsalMemCalloc",
+        ] {
             reg(n, vec![Effect::ReturnHeap]);
         }
         reg(
             "realloc",
             vec![Effect::ReturnAlias { param: 0 }, Effect::ReturnHeap],
         );
+        for n in ["dlsym", "dlvsym", "GetProcAddress"] {
+            reg(n, vec![Effect::Dlsym { name_param: 1 }]);
+        }
         set
+    }
+
+    /// Look up a model by call-site / callee name. Exact match first, then
+    /// the last `::` segment so `::dlsym` / `ns::dlsym` share the POSIX model.
+    pub fn get_for_callee(&self, name: &str) -> Option<&FnModel> {
+        if let Some(m) = self.by_name.get(name) {
+            return Some(m);
+        }
+        name.rsplit("::")
+            .next()
+            .filter(|s| !s.is_empty() && *s != name)
+            .and_then(|s| self.by_name.get(s))
     }
 
     pub fn register(&mut self, model: FnModel) {
@@ -180,9 +205,12 @@ fn effect_from_toml(raw: &RawEffect) -> Result<Effect, String> {
         "clears" => Ok(Effect::Clears {
             param: need(raw.param, "param", "clears")?,
         }),
+        "dlsym" => Ok(Effect::Dlsym {
+            name_param: need(raw.param, "param", "dlsym")?,
+        }),
         other => Err(format!(
             "unknown effect kind {other:?} (expected alias, mem_copy, content_store, \
-             return_alias, return_heap, clears)"
+             return_alias, return_heap, clears, dlsym)"
         )),
     }
 }
@@ -207,6 +235,14 @@ mod tests {
             vec![Effect::Clears { param: 0 }]
         );
         assert!(m.get("realloc").is_some());
+        assert_eq!(
+            m.get("dlsym").unwrap().effects,
+            vec![Effect::Dlsym { name_param: 1 }]
+        );
+        assert_eq!(
+            m.get_for_callee("::dlsym").unwrap().effects,
+            vec![Effect::Dlsym { name_param: 1 }]
+        );
         assert!(m.get("nope").is_none());
     }
 
@@ -225,6 +261,10 @@ effects = [
     { kind = "mem_copy", dst = 1, src = 0 },
     { kind = "content_store", ptr = 2, value = 3 },
 ]
+
+[[model]]
+name = "MyDlsym"
+effects = [ { kind = "dlsym", param = 1 } ]
 "#;
         let m = FnModelSet::from_toml_str(cfg).unwrap();
         assert_eq!(
@@ -238,6 +278,10 @@ effects = [
                 Effect::MemCopy { dst: 1, src: 0 },
                 Effect::ContentStore { ptr: 2, value: 3 }
             ]
+        );
+        assert_eq!(
+            m.get("MyDlsym").unwrap().effects,
+            vec![Effect::Dlsym { name_param: 1 }]
         );
         // Untouched built-ins survive.
         assert_eq!(

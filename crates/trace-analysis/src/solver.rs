@@ -46,7 +46,13 @@ pub fn analyze(program: &Program) -> (Pag, AnalysisResult) {
 
 pub fn analyze_with_options(program: &Program, opts: AnalyzeOptions) -> (Pag, AnalysisResult) {
     let mut pag = Pag::build_with_models(program, &opts.models);
-    let mut result = solve(&mut pag, program, opts.retain_points_to, &opts.models, opts.solve_budget);
+    let mut result = solve(
+        &mut pag,
+        program,
+        opts.retain_points_to,
+        &opts.models,
+        opts.solve_budget,
+    );
     let call_edges = result.call_edges.clone();
     let wired = result.wired_arg_flow.clone();
     extract_arg_flow(program, &call_edges, &wired, &mut result);
@@ -133,11 +139,7 @@ impl SolverState {
     /// them skip, so the location is appended to their delta explicitly
     /// (deduped).  Pushing ALL holders was the dominant budget burn on large
     /// trees — copy-only holders re-popped with no effect.
-    fn touch_loc_holders(
-        &mut self,
-        loc: LocId,
-        load_src: &FxHashMap<PagNodeId, Vec<usize>>,
-    ) {
+    fn touch_loc_holders(&mut self, loc: LocId, load_src: &FxHashMap<PagNodeId, Vec<usize>>) {
         if let Some(nodes) = self.loc_nodes.get(&loc).cloned() {
             for n in nodes {
                 if !load_src.contains_key(&n) {
@@ -654,6 +656,26 @@ fn solve(
             }
         }
 
+        if let Some(idxs) = pag.indices.dlsym_src.get(&node) {
+            for &idx in idxs {
+                let dst = pag.constraints[idx].dst;
+                for &loc in delta.iter() {
+                    let abstract_loc = &pag.locations[loc.0 as usize];
+                    if abstract_loc.kind != LocKind::StringLit {
+                        continue;
+                    }
+                    let name = abstract_loc.desc.clone();
+                    for func in &program.symbols.functions {
+                        if func.name == name {
+                            if let Some(&fn_loc) = pag.fn_locations.get(&func.id) {
+                                add_pts(&mut st, dst, fn_loc);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(call_sites) = pag.indices.indirect_by_target.get(&node).cloned() {
             for cs_id in call_sites {
                 let cs = program
@@ -705,7 +727,11 @@ fn solve(
                                 let constraint_before = pag.constraints.len();
                                 let mut visited = FxHashSet::default();
                                 pag.expand_return_flows(
-                                    program, dst_n, callee, models, &mut visited,
+                                    program,
+                                    dst_n,
+                                    callee,
+                                    models,
+                                    &mut visited,
                                 );
                                 // Index any new constraints added by expand_return_flows
                                 // and push their sources onto the worklist so the solver
@@ -870,7 +896,7 @@ fn apply_fn_model(
                     }
                 }
             }
-            Effect::ReturnAlias { .. } | Effect::ReturnHeap => {}
+            Effect::ReturnAlias { .. } | Effect::ReturnHeap | Effect::Dlsym { .. } => {}
         }
     }
 }
@@ -1239,6 +1265,7 @@ mod tests {
             },
             is_direct,
             receiver_class: None,
+            return_dst: None,
         };
         assert!(direct_by_name(&mk("OsalMemCalloc", None, false)));
         assert!(direct_by_name(&mk("f", None, true)));

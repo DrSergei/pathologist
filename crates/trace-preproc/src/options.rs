@@ -21,7 +21,7 @@ pub struct IncludeExpansion {
     pub macros: Arc<Vec<(String, crate::MacroDef)>>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PreprocessOptions {
     pub include_paths: Vec<PathBuf>,
     pub defines: indexmap::IndexMap<String, String>,
@@ -42,6 +42,38 @@ pub struct PreprocessOptions {
     pub frozen_expansion_cache: bool,
     /// When false, skip `LineMap` updates (faster indexing; spans are not remapped yet).
     pub track_line_map: bool,
+    /// Stop expanding a file once live output exceeds this many bytes.
+    pub max_output_bytes: usize,
+    /// Nested `#include` stack cap (`include_stack.len()` at `process_file`).
+    pub max_include_depth: usize,
+    /// Token-loop iterations (including macro rescan) per preprocess run.
+    pub max_expanded_tokens: u64,
+    /// When false, `#include` of a cacheable header replays macros/guards
+    /// but does not copy the header body into live output. Indexing uses
+    /// this so each file's preprocessed text stays file-local (PCH-style
+    /// header IR is merged later). Default true keeps standalone
+    /// `preprocess_file` self-contained.
+    pub inline_include_bodies: bool,
+}
+
+impl Default for PreprocessOptions {
+    fn default() -> Self {
+        Self {
+            include_paths: Vec::new(),
+            defines: indexmap::IndexMap::new(),
+            source_cache: None,
+            include_expansion_cache: None,
+            basename_index: None,
+            shared_macros: None,
+            accumulate_macros: false,
+            frozen_expansion_cache: false,
+            track_line_map: false,
+            max_output_bytes: 32 * 1024 * 1024,
+            max_include_depth: 64,
+            max_expanded_tokens: 8_000_000,
+            inline_include_bodies: true,
+        }
+    }
 }
 
 impl PreprocessOptions {
@@ -94,6 +126,26 @@ impl PreprocessOptions {
 
     pub fn with_define(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.defines.insert(name.into(), value.into());
+        self
+    }
+
+    pub fn with_max_output_bytes(mut self, n: usize) -> Self {
+        self.max_output_bytes = n;
+        self
+    }
+
+    pub fn with_max_include_depth(mut self, n: usize) -> Self {
+        self.max_include_depth = n;
+        self
+    }
+
+    pub fn with_max_expanded_tokens(mut self, n: u64) -> Self {
+        self.max_expanded_tokens = n;
+        self
+    }
+
+    pub fn with_inline_include_bodies(mut self, inline_bodies: bool) -> Self {
+        self.inline_include_bodies = inline_bodies;
         self
     }
 }

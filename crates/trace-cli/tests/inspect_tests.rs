@@ -382,10 +382,7 @@ fn direct_fixture_still_resolves() {
 #[test]
 fn inspect_calls_matches_cpp_qualified_suffix() {
     let bin = env!("CARGO_BIN_EXE_trace");
-    let tmp = std::env::temp_dir().join(format!(
-        "trace_inspect_suffix_{}.db",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("trace_inspect_suffix_{}.db", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let out = Command::new(bin)
         .args([
@@ -449,10 +446,7 @@ fn inspect_calls_matches_cpp_qualified_suffix() {
 #[test]
 fn inspect_calls_like_wildcards_are_literal() {
     let bin = env!("CARGO_BIN_EXE_trace");
-    let tmp = std::env::temp_dir().join(format!(
-        "trace_inspect_like_{}.db",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("trace_inspect_like_{}.db", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let out = Command::new(bin)
         .args([
@@ -470,13 +464,7 @@ fn inspect_calls_like_wildcards_are_literal() {
     );
 
     let out = Command::new(bin)
-        .args([
-            "inspect",
-            tmp.to_str().unwrap(),
-            "calls",
-            "--from",
-            "f_o",
-        ])
+        .args(["inspect", tmp.to_str().unwrap(), "calls", "--from", "f_o"])
         .output()
         .expect("inspect --from f_o");
     assert!(

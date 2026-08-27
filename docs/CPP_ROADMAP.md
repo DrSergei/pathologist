@@ -292,6 +292,12 @@ stray `.c` TU includes the same header (HDF interop). Fixture: `.c` +
 
 ## C11 — `dlopen` / `dlsym` (and `GetProcAddress`)
 
+**Landed** as a POSIX function model (`Effect::Dlsym`) next to `memcpy`
+summaries. String literals (and variables that receive them) in the name
+argument become `AddrOf` of matching in-tree functions; unknown names add
+nothing. Fixture: `tests/fixtures/dlsym/`. Handle / DSO path is ignored.
+ELF parsing of prebuilt `.so` files remains out of scope.
+
 Today function-pointer resolution is name/linkage inside the indexed
 tree. `dlsym` is explicitly unmodeled ([ANALYSIS.md](ANALYSIS.md)
 imprecision). Both corpora use it as a **second factory**, next to

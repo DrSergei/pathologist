@@ -7,6 +7,8 @@ pub enum ConstraintKind {
     Load,
     Store,
     Gep,
+    /// `pts(dst)` gains function locations named by string constants in `pts(src)`.
+    Dlsym,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +60,8 @@ pub enum LocKind {
     FieldSummary,
     ArraySummary,
     Function,
+    /// Interned C string literal (value in `AbstractLocation.desc`).
+    StringLit,
 }
 
 #[derive(Debug, Clone)]

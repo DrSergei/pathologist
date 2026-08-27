@@ -52,6 +52,7 @@ Lowered from C during parse. Mapped to PAG in `Pag::build_flow_constraints`.
 | `CallReturn { dst, callee_name }` | `dst = callee()` | `p = GetOps()` |
 | `CallReturnIndirect { dst, callee_var }` | `dst = *callee_var()` | `sbuf->impl->readBuffer(...)` (indirect return) |
 | `NewHeap { dst }` | heap allocation | `new T(...)` (C++ ctor result) |
+| `StringConst { dst, value }` | `dst` points at a string literal | `p = "target"`; `dlsym(h, "target")` |
 
 ### Return-value flow
 
@@ -78,6 +79,12 @@ subDev.subDevOps->setConfig(subDev);
 **`CallReturnIndirect`** is the indirect-call analogue of `CallReturn`. The callee is resolved by the solver when indirect call targets are known (via function-pointer analysis). The `callee_var` is a synthetic load variable that holds the resolved function pointer; the solver wires return flows from each resolved target into `dst`.
 
 **`NewHeap`** represents C++ `new T(...)` allocations. The PAG allocates a heap location typed to the allocated struct and adds an `AddrOf` edge from `dst` to the heap location. The solver then propagates into the struct's fields, enabling resolution of function pointers stored by constructors (e.g., `MParcelImplInterfaceAssign` writing into `HdfSBufImpl.readBuffer`).
+
+**`StringConst`** intern a C string literal as an abstract location (`LocKind::StringLit`). Assignments (`const char *n = "foo"`), copies, and call arguments intern the same way, so a later `dlsym(h, n)` still sees `"foo"`. Concatenated literals (`"ta" "rget"`) are folded. No `sprintf` / buffer writes.
+
+### `dlsym` / `GetProcAddress`
+
+Built-in models treat `dlsym` / `dlvsym` / `GetProcAddress` as **symbol lookup**: the return destination of a call (the `CallSite.return_dst` of `f = dlsym(...)`, including `return dlsym(...)` via a temp) may point to every **in-tree** function whose exact name matches a string constant in the name argument (parameter 1). Out-of-tree names add no pointees (true external). The handle / DSO path is ignored (whole-program search). Non-literal names that never receive a string constant stay unresolved — they do **not** fan out to every exported function.
 
 ## Program Assignment Graph (PAG)
 
@@ -295,6 +302,7 @@ defined in-tree, so project-specific wrappers can be described too.
 | `return_alias { param }` | returned pointer may be `param[param]` | addr/copy edges into the `CallReturn` destination |
 | `return_heap` | returns a fresh storage location | fresh `Heap` loc per call site into the destination |
 | `clears { param }` | **terminator**: memory reachable via `param[param]` is zeroed by this call | no value introduction; terminator event exported |
+| `dlsym { param }` | return value may be the address of the in-tree function named by string constants in `param[param]` | `Dlsym` PAG constraint; unknown names add nothing |
 
 Effects attach to parameter positions (0-based) of the *actual arguments* recorded at
 the call site. Arguments that are not IR variables or functions (literals like
@@ -327,6 +335,7 @@ entries:
 | `memset`, `memset_s` | `clears param=0` |
 | `malloc`, `calloc`, `zalloc`, `kmalloc` | `return_heap` |
 | `realloc` | `return_alias param=0`, `return_heap` |
+| `dlsym`, `dlvsym`, `GetProcAddress` | `dlsym param=1` (symbol-name argument) |
 
 ### Configuration format
 
@@ -351,6 +360,10 @@ effects = [
 [[model]]
 name = "MyPoolAlloc"
 effects = [ { kind = "return_heap" } ]
+
+[[model]]
+name = "MyDlsym"
+effects = [ { kind = "dlsym", param = 1 } ]
 
 # An explicitly empty effect list overrides (disables) a same-name built-in.
 [[model]]
@@ -382,11 +395,14 @@ C++-aware only where it must be — everything else reuses the C machinery.
 - **Namespaces**: `ns_stack` qualifies declarations (`ns::f`). Anonymous
   namespaces get internal linkage. `using` directives are recorded but not
   used for base-name qualification.
-- **Overloads**: same-name entries are kept apart when arity differs
-  (arity-gated merge in `add_function`; `externals_by_name` bucket). Calls
-  resolve over the candidate set filtered by argument count; an empty
-  arity-filtered set falls back to all candidates (varargs). Ties emit one
-  direct site per candidate.
+- **Overloads**: same-name entries are kept apart when **both** sides are C++
+  and arity (or same-arity param types) differ (`add_function`;
+  `externals_by_name` bucket). A C `.c` body still merges with a C++-parsed
+  `.h` prototype of the same arity — otherwise callers bind to the undefined
+  prototype (HDF `GpioSetIrq` / `gpio->func`). Calls resolve over the
+  candidate set filtered by argument count; an empty arity-filtered set
+  falls back to all candidates (varargs). Ties emit one direct site per
+  candidate.
 - **Classes**: layouts intern under the fully qualified tag
   (`gfx::Shape`). Inheritance facts (`Program.inheritance`) drive member
   resolution: a call walks upward to the nearest declaring base. **Non-virtual**
@@ -483,12 +499,7 @@ Next slices (hiview-grounded): [docs/CPP_ROADMAP.md](CPP_ROADMAP.md).
 - **`memcpy` / `memmove`**: modeled through function models (see above);
   unmodeled copier names remain invisible.
 - Macro-generated identifiers may be skipped when classified as macro-like callees.
-- Function pointer resolution is name/linkage based; dynamic `dlsym` /
-  `dlopen` is **not** modeled (future: [CPP_ROADMAP.md](CPP_ROADMAP.md) C11).
-  Literal-name `dlsym(h, "SbufObtainIpc")` / `dlsym(h, "GetInstance")` should
-  eventually behave like taking the address of that in-tree symbol; out-of-tree
-  DSOs stay external. `dlopen` that only runs `REGISTER` static constructors
-  is the C3 factory path, not a separate points-to problem.
+- Function pointer resolution is name/linkage based. **`dlsym` / `GetProcAddress`**: a string constant in the name argument (literal or a variable that receives one) is looked up among indexed functions of that exact name; missing symbols stay unresolved. `dlopen` that only runs `REGISTER` static constructors is the C3 factory path, not modeled here. The DSO handle is not used to restrict candidates. `sprintf` into a name buffer is unmodeled.
 
 ## Performance notes
 

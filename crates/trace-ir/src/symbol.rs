@@ -59,6 +59,8 @@ pub struct Function {
     /// Entry may coexist with same-name externals of a different signature
     /// (C++ overloads). When neither side sets this, name merges behave
     /// exactly as in C (prototype + definition collapse into one entry).
+    /// A C `.c` definition merging into a C++-parsed `.h` prototype clears
+    /// this flag so a later TU merge does not treat the pair as overloads.
     pub is_cpp: bool,
 }
 
@@ -86,6 +88,9 @@ pub struct CallSite {
     /// Post-merge virtual expansion uses this so `final` types are not
     /// re-expanded from the declaring base.
     pub receiver_class: Option<String>,
+    /// LHS of `dst = callee(...)` when the call's value is used (`CallReturn`
+    /// destination). `dlsym` models write function addresses here.
+    pub return_dst: Option<VarId>,
 }
 
 #[derive(Debug, Clone)]
@@ -166,20 +171,39 @@ impl SymbolTable {
                 // Merge only compatible redeclarations (prototype + definition).
                 // Distinct arities mean C++ overloads — and only then: keep
                 // both entries so call-site resolution can pick between them.
+                //
+                // Overload splitting requires *both* sides to be C++. A `.h`
+                // reached from a C++ TU is parsed as C++ (`is_cpp`), but the
+                // `.c` definition is not. Treating that as an overload (the
+                // old `||`) left callers bound to the undefined prototype —
+                // HDF `GpioSetIrq` never reached `GpioRegListener`, so
+                // `gpio->func` stayed empty. Mixed-language same-name entries
+                // still require matching arity when both sides have params,
+                // so a coincidental C++ overload is not swallowed.
                 let existing_fn = self.functions.iter().find(|f| f.id == existing_id);
-                let overload_split = func.is_cpp || existing_fn.map(|e| e.is_cpp).unwrap_or(false);
+                let both_cpp = func.is_cpp && existing_fn.map(|e| e.is_cpp).unwrap_or(false);
                 let mergeable = existing_fn
                     .map(|existing| {
-                        if !overload_split {
+                        if !func.is_cpp && !existing.is_cpp {
+                            // Pure C: prototype + definition always collapse.
                             return true;
+                        }
+                        let arity_ok = existing.params.is_empty()
+                            || func.params.is_empty()
+                            || existing.params.len() == func.params.len();
+                        if !both_cpp {
+                            // Header parsed as C++ vs `.c` body: merge by
+                            // arity and ignore param-type mismatch (typedef
+                            // `GpioIrqFunc` vs decayed `Int`).
+                            return arity_ok;
                         }
                         // C++: prototypes and definitions of the *same*
                         // function merge; distinct same-arity overloads
                         // must stay apart. Parameter types disambiguate.
-                        existing.params.is_empty()
-                            || func.params.is_empty()
-                            || (existing.params.len() == func.params.len()
-                                && existing
+                        arity_ok
+                            && (existing.params.is_empty()
+                                || func.params.is_empty()
+                                || existing
                                     .params
                                     .iter()
                                     .zip(func.params.iter())
@@ -206,6 +230,12 @@ impl SymbolTable {
                         if func.is_final {
                             existing.is_final = true;
                         }
+                        // A C definition merging into a C++-parsed header
+                        // prototype must drop `is_cpp`. Otherwise a later
+                        // TU merge sees both_cpp and refuses the body
+                        // (param TypeIds are still unit-local, so the
+                        // overload type-check always fails).
+                        existing.is_cpp = existing.is_cpp && func.is_cpp;
                     }
                     let bucket = self.externals_by_name.entry(func.name.clone()).or_default();
                     if !bucket.contains(&existing_id) {
@@ -228,7 +258,8 @@ impl SymbolTable {
             // (is_defined=false) and the solver never expands its body.
             if let Some(scope_map) = self.fn_by_scope.get(&func.file) {
                 if let Some(&existing_id) = scope_map.get(&func.name) {
-                    if let Some(existing) = self.functions.iter_mut().find(|f| f.id == existing_id) {
+                    if let Some(existing) = self.functions.iter_mut().find(|f| f.id == existing_id)
+                    {
                         if func.is_defined && !existing.is_defined {
                             existing.is_defined = true;
                             existing.file = func.file;
@@ -237,7 +268,10 @@ impl SymbolTable {
                             if !func.params.is_empty() {
                                 existing.params = func.params.clone();
                             }
-                        } else if !func.is_defined && existing.params.is_empty() && !func.params.is_empty() {
+                        } else if !func.is_defined
+                            && existing.params.is_empty()
+                            && !func.params.is_empty()
+                        {
                             existing.params = func.params.clone();
                         }
                         if func.is_virtual {

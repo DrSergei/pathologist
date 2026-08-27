@@ -12,6 +12,8 @@ pub struct PreprocessedSource {
     /// Empty when the file was not preprocessed (raw source: tree-sitter
     /// positions already refer to original locations).
     pub line_map: Arc<LineMap>,
+    /// Canonical `#include` closure from this preprocess run.
+    pub included_headers: Arc<Vec<PathBuf>>,
 }
 
 /// Preprocessed source text for indexing (one entry per canonical file path).
@@ -40,10 +42,11 @@ impl IndexSourceCache {
             }
         }
 
-        let (text, line_map) = read_index_source(path, graph, eff_opts)?;
+        let (text, line_map, included) = read_index_source(path, graph, eff_opts)?;
         let src = Arc::new(PreprocessedSource {
             text: text.into(),
             line_map: Arc::new(line_map),
+            included_headers: Arc::new(included),
         });
         if let Ok(mut guard) = self.inner.write() {
             guard.entry(canonical).or_insert_with(|| Arc::clone(&src));
@@ -56,14 +59,14 @@ fn read_index_source(
     path: &Path,
     graph: &IncludeGraph,
     eff_opts: &PreprocessOptions,
-) -> Result<(String, LineMap), String> {
+) -> Result<(String, LineMap, Vec<PathBuf>), String> {
     let canonical = trace_ir::canonicalize(path);
     if !should_preprocess(path, eff_opts, graph) {
         if let Some(s) = graph.source_cache.get(&canonical) {
-            return Ok((s.clone(), LineMap::new()));
+            return Ok((s.clone(), LineMap::new(), Vec::new()));
         }
         return std::fs::read_to_string(path)
-            .map(|s| (s, LineMap::new()))
+            .map(|s| (s, LineMap::new(), Vec::new()))
             .map_err(|e| e.to_string());
     }
     let preproc_result = preprocess_file(&canonical, eff_opts).map_err(|e| e.to_string())?;
@@ -73,7 +76,11 @@ fn read_index_source(
     // from the unit (328/440 TUs on a real HDF tree) and feeds the parser
     // unexpanded function-like macros, which is strictly less sound than a
     // truncated-but-consistent prefix (spans stay LineMap-mappable).
-    Ok((preproc_result.output, preproc_result.line_map))
+    Ok((
+        preproc_result.output,
+        preproc_result.line_map,
+        preproc_result.included_headers,
+    ))
 }
 
 fn should_preprocess(path: &Path, opts: &PreprocessOptions, graph: &IncludeGraph) -> bool {

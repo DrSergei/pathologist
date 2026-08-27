@@ -47,6 +47,7 @@ flowchart LR
 | Macro rescanning | Function-like macros invoked inside another macro's expansion are expanded too (C11 6.10.3.4); uninvoked function-like names are emitted verbatim |
 | Macro hide set | Replacement-list tokens are painted with the macro name (and the invoking token's hide set) so self-referential macros such as `#define FOO FOO, BAR` terminate; nested `MIN(MIN(a,b),c)` still expands because argument tokens are not painted |
 | Expansion depth cap | 256 nested expansions; further expansion is skipped with a warning (backstop if hide-set does not apply) |
+| Runaway caps | Per-file limits (defaults): 64 nested `#include`s, 32 MiB live output, 8M token-loop iterations (macro rescan included). Exceeding output/token budget stops that file with an error diagnostic; include-depth skips the nested include. CLI `--timeout-secs N` aborts the whole process. |
 | `##` token pasting | In macro bodies after argument substitution |
 | Conditionals | `#ifdef`, `#ifndef`, `#if` / `#elif` (macro-expanded), `#else`, `#endif` |
 | `#line` | Location tracking in `LineMap` |
@@ -89,9 +90,9 @@ Only **project-local** files under the analysis root are linked; system headers 
 |----------|-------|
 | `needs_preprocess` set | Files with `#include` edges (or included by another) run through the preprocessor |
 | `source_cache` | Reuse file text while scanning `#include` edges |
-| Reachable headers | Headers transitively `#include`d from any `.c` are expanded into that TU; not indexed as separate units |
+| Reachable headers | Preprocessed file-locally, parsed/lowered **once** (PCH-style header IR), then merged into TUs |
 | Orphan headers | Project `.h` never reached from any `.c` are indexed as their own units (may contain calls) |
-| Parallel index | Orphan headers and `.c` TUs: parallel parse/lower, sequential merge |
+| Parallel index | Header IR, orphan headers, and `.c` TUs: parallel parse/lower, sequential merge |
 
 ### Determinism
 
@@ -102,6 +103,18 @@ Indexing output must be identical across runs of the same tree. Two mechanisms g
 
 Translation units inherit the **union** of all warm-pass macro states: cached expansions replay without executing their `#define` directives, so TU-local code still needs those macros.
 
+### Header IR (PCH-style)
+
+Indexing sets `inline_include_bodies = false`. Nested cacheable `#include`s replay **macros and include-once state** but do not copy header tokens into the consumer's live output. Each header's preprocessed text is therefore file-local.
+
+After the warm pass, reachable headers are parsed and lowered **once**, in include-graph order (a header is lowered only after the headers it includes). Nested `#include` IR is merged into that header before lower so `struct StreamHost { struct IDeviceIoService service; }` sees `Dispatch`, and `GpioIrqFunc func` sees the typedef. Parallel isolation interned those as empty tags / `Int` and dropped field stores (`DeviceNodeExtDispatch`, `GpioOnDevEventReceive`).
+
+Translation units parse only their own remainder and merge already-built header `UnitIndex`es for **direct includes** plus preprocessor `included_headers` (a cached splice can omit a nested path from the graph edge). Nested types/typedefs are already inside those units from sequential PCH. Merge also rewrites leftover incomplete nested tags. That is the analogue of a PCH / clangd preamble.
+
+Grammar follows the including language, not the extension alone: `.hpp`/`.hh`/`.hxx`/`.inl`/`.ipp` always use the C++ parser; a `.h` uses C++ if any C++ TU can reach it via the include graph, otherwise C. (Before PCH, header tokens were spliced into the TU and parsed with that TU's grammar, so `plugin.h` included from `plugin.cpp` was already C++.)
+
+Standalone `preprocess_file` still inlines by default so a single-file expansion remains self-contained.
+
 ### Macro deltas in cached entries
 
 A cached expansion replays its text **without** executing the `#define`s it contains, so a header whose body *invokes* macros defined by an earlier-included header would starve: at warm time the dependency was processed inline (fine), but a consumer warmed later splices the dependency's cached body and never learns its macros. Therefore each `IncludeExpansion` also records a **macro delta**: every macro *name* that is new relative to the snapshot taken when entry construction began (`IncludeExpansion.macros`). `splice_cached` re-applies these into the current table first-wins (`or_insert_with`), so later headers warm with the definitions they were built against.
@@ -110,7 +123,9 @@ Limitation: the delta captures new names only. `#undef` of an inherited name, or
 
 ### Cache self-containment
 
-Cached expansions are flat text — nested `#include`s inside an entry were already resolved when the entry was built. An entry built while a nested header was guard-skipped would otherwise freeze *without* that header's content, permanently hiding its definitions from every consumer routed through the entry. Therefore, while entries are being constructed (non-frozen phases), a guard-skip whose file has a cached expansion **re-splices** the cached text (`splice_cached`): every entry is self-contained. In frozen phases nothing is cached and every replayed entry is already self-contained, so guard-skips stay silent there — splicing would only duplicate parse/lower work (measured +48% index time). Duplicate definitions this introduces are harmless downstream (merge deduplicates same-origin entities; re-declarations remain valid C).
+Cached expansions are flat text — nested `#include`s inside an entry were already resolved when the entry was built. An entry built while a nested header was already in this run's include-once set would otherwise freeze *without* that header's content, permanently hiding its definitions from every consumer routed through the entry.
+
+Re-splicing the nested cached blob into **live output** on every such skip exponentiates on diamond include graphs (each copy contains previous copies). Instead, the skip is recorded on the in-progress cache frame and the nested expansion is **embedded only into that frame's cache entry** at the `#include` site. Live output stays unique per file; frozen-phase guard-skips stay silent as before. Duplicate definitions inside a cache entry are still harmless downstream (merge deduplicates same-origin entities; re-declarations remain valid C).
 
 Entries also record which files they claim (`IncludeExpansion.files`); files whose expansion emitted nothing are not claimed, so symbol-scope registration (`headers_of`) does not attribute phantom contributions. A cached-header include whose entire body was skipped emits a visible Warning during non-frozen phases ("resolved include expanded to nothing") — silence here is how starvation bugs historically went unnoticed.
 

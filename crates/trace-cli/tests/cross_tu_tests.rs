@@ -408,6 +408,93 @@ fn cross_tu_no_proto_call_recovers_definition() {
     assert!(helpers[0].is_defined);
 }
 
+/// HDF-shaped: struct in a header, designated `.Init = fn` in one TU, load
+/// `entry->Init()` in another. PCH-style header IR must still connect them
+/// through the field summary (HdfDeviceLaunchNode / DeviceDriverBind).
+#[test]
+fn cross_tu_designated_init_resolves_indirect() {
+    let root = fixture("cross_tu_designated");
+    let program = build_program(&root, &default_opts(&root)).expect("build");
+    let (_pag, analysis) = analyze(&program);
+
+    assert!(
+        has_edge(
+            &program,
+            &analysis,
+            "launch",
+            "my_init",
+            ResolutionKind::Indirect
+        ),
+        "launch -> g_entry.Init must reach my_init stored in the other TU"
+    );
+    assert!(
+        has_edge(
+            &program,
+            &analysis,
+            "launch",
+            "my_bind",
+            ResolutionKind::Indirect
+        ),
+        "launch -> g_entry.Bind must reach my_bind stored in the other TU"
+    );
+}
+
+/// HDF `DeviceNodeExtDispatch`: nested `host->service.Dispatch = Fn` where
+/// `IDeviceIoService` lives in a different header than `StreamHost`. PCH
+/// isolation used to intern `service` as an empty tag, so the Dispatch
+/// store was dropped.
+#[test]
+fn nested_header_struct_field_store_resolves() {
+    let root = fixture("nested_host_dispatch");
+    let program = build_program(&root, &default_opts(&root)).expect("build");
+    let (_pag, analysis) = analyze(&program);
+
+    assert!(
+        has_edge(
+            &program,
+            &analysis,
+            "launch",
+            "StreamDispatch",
+            ResolutionKind::Indirect
+        ),
+        "launch -> s->Dispatch must see StreamDispatch stored via host->service.Dispatch"
+    );
+}
+
+/// HDF `GpioOnDevEventReceive`: `GpioIrqFunc` typedef in one header, field
+/// `func` on a struct in another. PCH isolation typed the field as `Int`
+/// and dropped fn-ptr arg-flow into `set_irq`.
+#[test]
+fn typedef_fnptr_field_store_resolves() {
+    let root = fixture("typedef_fnptr_field");
+    let program = build_program(&root, &default_opts(&root)).expect("build");
+    let (_pag, analysis) = analyze(&program);
+
+    assert!(
+        has_edge(
+            &program,
+            &analysis,
+            "fire",
+            "Handler",
+            ResolutionKind::Indirect
+        ),
+        "fire -> p->func must see Handler stored through GpioIrqFunc"
+    );
+
+    // C++-parsed header prototype must collapse into the C definition so
+    // `register_it` (in register.cpp) actually reaches `set_irq`'s body.
+    let set_irq: Vec<_> = program
+        .symbols
+        .functions
+        .iter()
+        .filter(|f| f.name == "set_irq")
+        .collect();
+    assert!(
+        set_irq.iter().any(|f| f.is_defined),
+        "set_irq prototype must merge with the C definition"
+    );
+}
+
 /// Different struct types with function pointers at the same positional index
 /// (FieldId) but different field names must NOT leak across structs. Before
 /// the field_name guard in the solver, GEP accesses into struct A would
@@ -484,12 +571,7 @@ fn cross_struct_field_id_no_pollution() {
         .call_edges
         .iter()
         .filter(|e| e.resolution == ResolutionKind::Indirect)
-        .map(|e| {
-            (
-                fn_name(&program, e.caller),
-                fn_name(&program, e.callee),
-            )
-        })
+        .map(|e| (fn_name(&program, e.caller), fn_name(&program, e.callee)))
         .collect();
     assert_eq!(
         all_indirect.len(),

@@ -6,14 +6,25 @@ use crate::parse::node_text;
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 use trace_ir::{
     CallSite, Diagnostic, DiagnosticSeverity, FieldId, FlowConstraint, FnId, Function, Linkage,
     Program, ReturnFlow, Span, StorageClass, TypeDesc, VarId, Variable,
 };
 use trace_preproc::{macro_table_from_defines, MacroTable, PreprocessOptions};
 use tree_sitter::Node;
+
+/// Nested AST walk cap. Pathological left-deep trees (comma-operator
+/// chains of thousands of terms) would otherwise overflow the thread stack.
+const MAX_AST_WALK_DEPTH: u32 = 512;
+
+fn index_progress(msg: impl std::fmt::Display) {
+    let _ = writeln!(std::io::stderr(), "{msg}");
+    let _ = std::io::stderr().flush();
+}
 
 /// A function-name reference whose resolution was deferred because the
 /// function is only defined later in the translation unit. C requires no
@@ -55,7 +66,8 @@ struct LowerContext {
     using_nss: Vec<String>,
     /// Enclosing class while lowering in-class member definitions.
     class_ctx: Option<ClassCtx>,
-    /// True for .cpp/.cc/.cxx TUs — gates the C++-specific lowering paths.
+    /// Gates C++-specific lowering (qualified members, CHA, namespaces).
+    /// True for C++ TUs/headers and for `.h` files reached from a C++ TU.
     is_cpp: bool,
     /// `new_expression` node IDs already handled by `expr_to_rhs_flow` so
     /// `walk_function_body` skips them (avoids duplicate call sites with
@@ -68,6 +80,14 @@ struct LowerContext {
     /// would create *two different* load variables for the same expression,
     /// breaking the `CallReturnIndirect` → `indirect_return_dst` mapping.
     callee_load_cache: RefCell<HashMap<usize, Option<VarId>>>,
+    /// `call_expression` node id → `CallReturn` destination, so the matching
+    /// `CallSite` can carry `return_dst` for `dlsym` models.
+    call_return_dst: RefCell<HashMap<usize, VarId>>,
+    /// Recursion depth of `lower_tree` (comma-operator chains in
+    /// `clang/test/Sema/deep_recursion.c` are thousands of nested
+    /// `binary_expression` nodes).
+    ast_depth: u32,
+    ast_depth_warned: bool,
 }
 
 /// C++ class scope during member lowering.
@@ -120,6 +140,12 @@ pub fn build_program_with_jobs(
     let (files, headers) = discover_source_files(root);
     let files = normalize_discovered_paths(files);
     let headers = normalize_discovered_paths(headers);
+    index_progress(format!(
+        "discover: {} TUs, {} headers under {}",
+        files.len(),
+        headers.len(),
+        root.display()
+    ));
     if files.is_empty() && headers.is_empty() {
         return Err(format!(
             "no C/C++ source files found under {}",
@@ -128,6 +154,11 @@ pub fn build_program_with_jobs(
     }
 
     let include_graph = IncludeGraph::build(root, &files, &headers);
+    index_progress(format!(
+        "include-graph: {} files, {} include edges",
+        include_graph.project_files.len(),
+        include_graph.edges.values().map(|v| v.len()).sum::<usize>()
+    ));
     let file_order = include_graph.index_order(&files);
 
     let basename_index = Arc::new(include_graph.basename_index.clone());
@@ -135,7 +166,8 @@ pub fn build_program_with_jobs(
     let eff_opts = project_preprocess_opts(root, opts, &include_graph)
         .for_indexing()
         .with_include_expansion_cache(Arc::clone(&include_expansion_cache))
-        .with_basename_index(basename_index);
+        .with_basename_index(basename_index)
+        .with_inline_include_bodies(false);
 
     // Warm each header under a FRESH macro environment seeded only from the
     // command-line defines. Sharing one accumulating table across headers let
@@ -181,8 +213,29 @@ pub fn build_program_with_jobs(
             .collect::<Vec<_>>(),
     );
 
+    // `.h` is language-ambiguous. Parse it as C++ when a C++ TU can reach it
+    // (the pre-PCH behavior: header tokens were spliced into that TU).
+    // `.hpp`/`.hh`/… are always C++ via `SourceLang::from_path`.
+    let cpp_tus: HashSet<PathBuf> = files
+        .iter()
+        .filter(|p| crate::discover::is_cpp_path(p))
+        .cloned()
+        .collect();
+    let cpp_parse: Arc<HashSet<PathBuf>> = Arc::new(include_graph.reachable_from(&cpp_tus));
+
     let source_cache = IndexSourceCache::new();
-    for path in &headers_for_macro_warm {
+    let warm_n = headers_for_macro_warm.len();
+    index_progress(format!(
+        "warm: {warm_n} reachable headers (jobs={jobs} after this sequential pass)"
+    ));
+    for (i, path) in headers_for_macro_warm.iter().enumerate() {
+        let t = Instant::now();
+        index_progress(format!(
+            "warm: {}/{} {}",
+            i + 1,
+            warm_n,
+            path.display()
+        ));
         let header_macros: Arc<std::sync::RwLock<MacroTable>> = Arc::new(std::sync::RwLock::new(
             macro_table_from_defines(&opts.defines),
         ));
@@ -207,6 +260,12 @@ pub fn build_program_with_jobs(
                 }
             }
         }
+        index_progress(format!(
+            "warm-done: {}/{} {:.1}s",
+            i + 1,
+            warm_n,
+            t.elapsed().as_secs_f64()
+        ));
     }
 
     // Parallel phases must treat the expansion cache as read-only: warm-pass
@@ -217,35 +276,132 @@ pub fn build_program_with_jobs(
         .with_shared_macros(union_macros)
         .with_frozen_expansion_cache(true);
 
+    index_progress(format!(
+        "parse: {} orphan headers, {} TUs (jobs={jobs})",
+        orphan_headers.len(),
+        file_order.len()
+    ));
+
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs)
+        .stack_size(16 * 1024 * 1024)
         .build()
         .map_err(|e| e.to_string())?;
 
+    let pch_t = Instant::now();
+    index_progress(format!("pch: parse {warm_n} warmed headers once"));
+    // Sequential in `index_order` (included files before includers) so a
+    // header that embeds `struct IDeviceIoService service` sees that type's
+    // layout, and a header that uses `GpioIrqFunc` sees the typedef. Parallel
+    // isolation interned those as empty tags / `Int` and dropped field stores.
+    let mut header_ir_map: HashMap<PathBuf, Arc<UnitIndex>> = HashMap::new();
+    for path in &headers_for_macro_warm {
+        let unit = index_source_file(
+            path,
+            root,
+            &include_graph,
+            &index_opts,
+            &source_cache,
+            Some(&header_ir_map),
+            &cpp_parse,
+        );
+        header_ir_map.insert(trace_ir::canonicalize(path), Arc::new(unit));
+    }
+    let header_ir = Arc::new(header_ir_map);
+    index_progress(format!(
+        "pch-done: {:.1}s ({} units)",
+        pch_t.elapsed().as_secs_f64(),
+        header_ir.len()
+    ));
+    for path in &headers_for_macro_warm {
+        if let Some(unit) = header_ir.get(path) {
+            merge_unit_index(&mut program, unit.as_ref().clone());
+        }
+    }
+
     pool.install(|| {
-        let mut header_units: HashMap<PathBuf, UnitIndex> = orphan_headers
-            .par_iter()
-            .map(|path| {
-                (
-                    path.clone(),
-                    index_source_file(path, root, &include_graph, &index_opts, &source_cache),
-                )
-            })
-            .collect();
-        for path in &orphan_headers {
-            if let Some(unit) = header_units.remove(path) {
-                merge_unit_index(&mut program, unit);
+        if jobs == 1 {
+            for (i, path) in orphan_headers.iter().enumerate() {
+                let t = Instant::now();
+                index_progress(format!(
+                    "parse-orphan: {}/{} {}",
+                    i + 1,
+                    orphan_headers.len(),
+                    path.display()
+                ));
+                merge_unit_index(
+                    &mut program,
+                    index_source_file(
+                        path,
+                        root,
+                        &include_graph,
+                        &index_opts,
+                        &source_cache,
+                        Some(&header_ir),
+                        &cpp_parse,
+                    ),
+                );
+                index_progress(format!(
+                    "parse-orphan-done: {}/{} {:.1}s",
+                    i + 1,
+                    orphan_headers.len(),
+                    t.elapsed().as_secs_f64()
+                ));
+            }
+        } else {
+            let mut header_units: HashMap<PathBuf, UnitIndex> = orphan_headers
+                .par_iter()
+                .map(|path| {
+                    (
+                        path.clone(),
+                        index_source_file(
+                            path,
+                            root,
+                            &include_graph,
+                            &index_opts,
+                            &source_cache,
+                            Some(&header_ir),
+                            &cpp_parse,
+                        ),
+                    )
+                })
+                .collect();
+            for path in &orphan_headers {
+                if let Some(unit) = header_units.remove(path) {
+                    merge_unit_index(&mut program, unit);
+                }
             }
         }
     });
 
     pool.install(|| {
         if jobs == 1 {
-            for path in &file_order {
+            for (i, path) in file_order.iter().enumerate() {
+                let t = Instant::now();
+                index_progress(format!(
+                    "parse: {}/{} {}",
+                    i + 1,
+                    file_order.len(),
+                    path.display()
+                ));
                 merge_unit_index(
                     &mut program,
-                    index_source_file(path, root, &include_graph, &index_opts, &source_cache),
+                    index_source_file(
+                        path,
+                        root,
+                        &include_graph,
+                        &index_opts,
+                        &source_cache,
+                        Some(&header_ir),
+                        &cpp_parse,
+                    ),
                 );
+                index_progress(format!(
+                    "parse-done: {}/{} {:.1}s",
+                    i + 1,
+                    file_order.len(),
+                    t.elapsed().as_secs_f64()
+                ));
             }
         } else {
             let mut units: HashMap<PathBuf, UnitIndex> = file_order
@@ -253,7 +409,15 @@ pub fn build_program_with_jobs(
                 .map(|path| {
                     (
                         path.clone(),
-                        index_source_file(path, root, &include_graph, &index_opts, &source_cache),
+                        index_source_file(
+                            path,
+                            root,
+                            &include_graph,
+                            &index_opts,
+                            &source_cache,
+                            Some(&header_ir),
+                            &cpp_parse,
+                        ),
                     )
                 })
                 .collect();
@@ -416,6 +580,7 @@ fn expand_virtual_overrides(program: &mut Program) {
                 span: cs.span,
                 is_direct: true,
                 receiver_class: cs.receiver_class.clone(),
+                return_dst: cs.return_dst,
             });
         }
     }
@@ -464,15 +629,36 @@ fn project_preprocess_opts(
     eff
 }
 
+fn index_lang(path: &Path, cpp_parse: &HashSet<PathBuf>) -> crate::parse::SourceLang {
+    let canon = trace_ir::canonicalize(path);
+    if crate::parse::SourceLang::from_path(&canon) == crate::parse::SourceLang::Cpp
+        || cpp_parse.contains(&canon)
+    {
+        crate::parse::SourceLang::Cpp
+    } else {
+        crate::parse::SourceLang::C
+    }
+}
+
 fn index_source_file(
     path: &Path,
     root: &Path,
     graph: &IncludeGraph,
     index_opts: &PreprocessOptions,
     source_cache: &IndexSourceCache,
+    header_ir: Option<&HashMap<PathBuf, Arc<UnitIndex>>>,
+    cpp_parse: &HashSet<PathBuf>,
 ) -> UnitIndex {
     let mut program = Program::new(root.to_path_buf());
-    match process_indexed_file(&mut program, path, graph, index_opts, source_cache) {
+    match process_indexed_file(
+        &mut program,
+        path,
+        graph,
+        index_opts,
+        source_cache,
+        header_ir,
+        cpp_parse,
+    ) {
         Ok(()) => {
             if std::env::var_os("TRACE_DEBUG_UNIT").is_some() {
                 let hdr = program
@@ -520,8 +706,49 @@ fn process_indexed_file(
     graph: &IncludeGraph,
     index_opts: &PreprocessOptions,
     source_cache: &IndexSourceCache,
+    header_ir: Option<&HashMap<PathBuf, Arc<UnitIndex>>>,
+    cpp_parse: &HashSet<PathBuf>,
 ) -> Result<(), String> {
     let pre = source_cache.get_or_preprocess(path, graph, index_opts)?;
+    let self_canon = trace_ir::canonicalize(path);
+    let file_id = program.symbols.add_file_interned(self_canon.clone());
+    if let Some(ir) = header_ir {
+        // Sequential PCH already nested-merged types/typedefs into each
+        // header's UnitIndex, so TUs only need direct includes plus the
+        // preprocessor's `included_headers` (a cached splice can omit a
+        // nested path from the graph edge). Full include-graph closure
+        // re-merged hundreds of units per TU and blew up index time.
+        let mut headers: Vec<PathBuf> = graph
+            .edges
+            .get(&self_canon)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .chain(pre.included_headers.iter().cloned())
+            .filter(|h| h != &self_canon)
+            .collect();
+        headers.sort();
+        headers.dedup();
+        // Include-graph order so leftover incomplete tags intern after
+        // the headers that define them (`complete_nested_tags` follows).
+        let headers = graph.index_order(&headers);
+        for h in headers {
+            let key = trace_ir::canonicalize(&h);
+            if let Some(unit) = ir.get(&key) {
+                let mut unit = unit.as_ref().clone();
+                // Headers are already merged (with diagnostics) into the
+                // global program; repeating their parse warnings per TU
+                // would multiply counts by the number of includers.
+                unit.diagnostics.clear();
+                merge_unit_index(program, unit);
+            }
+            let hid = program.symbols.add_file_interned(key);
+            if hid != file_id {
+                program.symbols.register_included_header(file_id, hid);
+            }
+        }
+        program.types.complete_nested_tags();
+    }
     if let Some(dir) = std::env::var_os("TRACE_DUMP_TU_DIR") {
         let fname = format!(
             "tu_{}.i",
@@ -529,7 +756,7 @@ fn process_indexed_file(
         );
         let _ = std::fs::write(std::path::Path::new(&dir).join(fname), pre.text.as_ref());
     }
-    let lang = crate::parse::SourceLang::from_path(path);
+    let lang = index_lang(path, cpp_parse);
     let parsed = crate::parse::parse_source_with_lang(pre.text.as_ref(), lang)?;
     if crate::parse::has_parse_errors(&parsed.tree) {
         program.add_diagnostic(Diagnostic {
@@ -541,7 +768,6 @@ fn process_indexed_file(
         });
     }
 
-    let file_id = program.symbols.add_file(path.to_path_buf());
     let mut ctx = LowerContext {
         current_fn: None,
         current_file: file_id,
@@ -552,9 +778,12 @@ fn process_indexed_file(
         ns_stack: Vec::new(),
         using_nss: Vec::new(),
         class_ctx: None,
-        is_cpp: crate::parse::SourceLang::from_path(path) == crate::parse::SourceLang::Cpp,
+        is_cpp: lang == crate::parse::SourceLang::Cpp,
         handled_new_exprs: RefCell::new(std::collections::HashSet::new()),
         callee_load_cache: RefCell::new(HashMap::new()),
+        call_return_dst: RefCell::new(HashMap::new()),
+        ast_depth: 0,
+        ast_depth_warned: false,
     };
     lower_tree(program, &mut ctx, &parsed.source, parsed.tree.root_node());
     resolve_pending_fn_refs(program, &ctx);
@@ -681,6 +910,22 @@ fn lower_typedef(program: &mut Program, ctx: &mut LowerContext, source: &str, no
 }
 
 fn lower_tree(program: &mut Program, ctx: &mut LowerContext, source: &str, node: Node) {
+    if ctx.ast_depth >= MAX_AST_WALK_DEPTH {
+        if !ctx.ast_depth_warned {
+            program.add_diagnostic(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                file: None,
+                line: 0,
+                message: format!(
+                    "AST walk depth exceeded ({MAX_AST_WALK_DEPTH}); skipping deeper nodes"
+                ),
+                stage: "parse".into(),
+            });
+            ctx.ast_depth_warned = true;
+        }
+        return;
+    }
+    ctx.ast_depth += 1;
     match node.kind() {
         "function_definition" => lower_function(program, ctx, source, node),
         "declaration" => lower_declaration(program, ctx, source, node, None),
@@ -689,8 +934,7 @@ fn lower_tree(program: &mut Program, ctx: &mut LowerContext, source: &str, node:
             // In C++, `struct` is identical to `class` except for default
             // visibility — structs may have constructors, destructors, and
             // member functions that must be lowered just like classes.
-            if node.kind() == "class_specifier"
-                || (ctx.is_cpp && node.kind() == "struct_specifier")
+            if node.kind() == "class_specifier" || (ctx.is_cpp && node.kind() == "struct_specifier")
             {
                 lower_class_members(program, ctx, source, node, &tag);
             }
@@ -717,6 +961,7 @@ fn lower_tree(program: &mut Program, ctx: &mut LowerContext, source: &str, node:
             }
         }
     }
+    ctx.ast_depth = ctx.ast_depth.saturating_sub(1);
 }
 
 fn lower_namespace(program: &mut Program, ctx: &mut LowerContext, source: &str, node: Node) {
@@ -825,9 +1070,8 @@ fn virtual_flags(source: &str, node: Node) -> VirtualFlags {
 }
 
 fn class_specifier_is_final(source: &str, node: Node) -> bool {
-    node.children(&mut node.walk()).any(|c| {
-        c.kind() == "virtual_specifier" && node_text(source, &c).contains("final")
-    })
+    node.children(&mut node.walk())
+        .any(|c| c.kind() == "virtual_specifier" && node_text(source, &c).contains("final"))
 }
 
 fn lower_struct_specifier(
@@ -861,8 +1105,7 @@ fn lower_struct_specifier(
     // Classes (and C++ structs, which are classes with different defaults)
     // register under their fully qualified tag so type references, owner-class
     // derivation and member resolution all agree on one name.
-    let is_cpp_class = ctx.is_cpp
-        && matches!(node.kind(), "class_specifier" | "struct_specifier");
+    let is_cpp_class = ctx.is_cpp && matches!(node.kind(), "class_specifier" | "struct_specifier");
     let reg_name = if is_cpp_class && !name.contains("::") {
         ctx.qualify(&name)
     } else {
@@ -1468,7 +1711,7 @@ fn lower_one_declarator(
                 Some(name)
             }
             _ => None,
-        }         {
+        } {
             let span = node_span(program, ctx, span_node);
             let mut call_args = collect_call_args(program, ctx, source, ctor_args);
             // The implicit `this` (param 0) points to the object being
@@ -1692,6 +1935,22 @@ fn walk_function_body(
     node: Node,
     caller: FnId,
 ) {
+    if ctx.ast_depth >= MAX_AST_WALK_DEPTH {
+        if !ctx.ast_depth_warned {
+            program.add_diagnostic(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                file: None,
+                line: 0,
+                message: format!(
+                    "AST walk depth exceeded ({MAX_AST_WALK_DEPTH}); skipping deeper nodes"
+                ),
+                stage: "parse".into(),
+            });
+            ctx.ast_depth_warned = true;
+        }
+        return;
+    }
+    ctx.ast_depth += 1;
     match node.kind() {
         "declaration" => lower_declaration(program, ctx, source, node, None),
         "assignment_expression" => {
@@ -1700,6 +1959,7 @@ fn walk_function_body(
         "call_expression" => collect_call_at_node(program, ctx, source, node, caller),
         "lambda_expression" if ctx.is_cpp => {
             let _ = lower_lambda_expression(program, ctx, source, node);
+            ctx.ast_depth = ctx.ast_depth.saturating_sub(1);
             return;
         }
         "return_statement" => collect_return_statement(program, ctx, source, node, caller),
@@ -1760,6 +2020,7 @@ fn walk_function_body(
     for child in node.children(&mut cursor) {
         walk_function_body(program, ctx, source, child, caller);
     }
+    ctx.ast_depth = ctx.ast_depth.saturating_sub(1);
 }
 
 fn collect_call_at_node(
@@ -1774,6 +2035,7 @@ fn collect_call_at_node(
         None => return,
     };
     let span = node_span(program, ctx, node);
+    let return_dst = ctx.call_return_dst.borrow().get(&node.id()).copied();
 
     // ---- C++ member calls with statically-typed receivers ----
     // `recv.method(args)` / `p->method(args)` / explicit `x.~T()` /
@@ -1799,9 +2061,9 @@ fn collect_call_at_node(
                                     &normalize_qualified(node_text(source, &field)),
                                 ))
                             };
-                            let field_name = strip_template_args(&normalize_qualified(
-                                node_text(source, &field),
-                            ));
+                            let field_name = strip_template_args(&normalize_qualified(node_text(
+                                source, &field,
+                            )));
                             let has_method =
                                 !member_targets_upward(program, &cls, &kind).is_empty();
                             if has_method {
@@ -1811,24 +2073,15 @@ fn collect_call_at_node(
                                     source,
                                     node.child_by_field_name("arguments"),
                                 );
-                                emit_member_sites(
-                                    program,
-                                    caller,
-                                    &cls,
-                                    &kind,
-                                    call_args,
-                                    span,
-                                );
+                                emit_member_sites(program, caller, &cls, &kind, call_args, span);
                                 return;
                             }
                             // Functor field: `h->cb()` where `cb` is a class
                             // with `operator()`, not a method named `cb`.
-                            if let Some(field_cls) =
-                                infer_static_class(program, ctx, source, func)
+                            if let Some(field_cls) = infer_static_class(program, ctx, source, func)
                             {
                                 let op = trace_ir::MethodKind::Named("operator()".to_string());
-                                if !member_targets_upward(program, &field_cls, &op).is_empty()
-                                {
+                                if !member_targets_upward(program, &field_cls, &op).is_empty() {
                                     let call_args = collect_call_args(
                                         program,
                                         ctx,
@@ -1836,12 +2089,7 @@ fn collect_call_at_node(
                                         node.child_by_field_name("arguments"),
                                     );
                                     emit_member_sites(
-                                        program,
-                                        caller,
-                                        &field_cls,
-                                        &op,
-                                        call_args,
-                                        span,
+                                        program, caller, &field_cls, &op, call_args, span,
                                     );
                                     return;
                                 }
@@ -1857,14 +2105,7 @@ fn collect_call_at_node(
                                     source,
                                     node.child_by_field_name("arguments"),
                                 );
-                                emit_member_sites(
-                                    program,
-                                    caller,
-                                    &cls,
-                                    &kind,
-                                    call_args,
-                                    span,
-                                );
+                                emit_member_sites(program, caller, &cls, &kind, call_args, span);
                                 return;
                             }
                         }
@@ -1928,8 +2169,7 @@ fn collect_call_at_node(
     if !is_direct && is_likely_macro_callee(&callee_name) {
         return;
     }
-    let collected =
-        collect_call_args(program, ctx, source, node.child_by_field_name("arguments"));
+    let collected = collect_call_args(program, ctx, source, node.child_by_field_name("arguments"));
     let argc = collected.argc as usize;
     let CallArgs {
         var_args,
@@ -1982,6 +2222,7 @@ fn collect_call_at_node(
                 span,
                 is_direct,
                 receiver_class: None,
+                return_dst,
             });
         }
         1 => {
@@ -1998,6 +2239,7 @@ fn collect_call_at_node(
                 span,
                 is_direct: true,
                 receiver_class: None,
+                return_dst,
             });
         }
         n => {
@@ -2021,6 +2263,7 @@ fn collect_call_at_node(
                     span,
                     is_direct: true,
                     receiver_class: None,
+                    return_dst,
                 });
             }
         }
@@ -2092,6 +2335,13 @@ fn collect_call_args(
                     if is_addr_of_member(source, arg) {
                         addr_of_member_args.push(arg_index);
                     }
+                } else if let Some(s) = string_literal_value(source, arg) {
+                    let temp = alloc_ret_temp(program, ctx, arg);
+                    program.flow.push(FlowConstraint::StringConst {
+                        dst: temp,
+                        value: s,
+                    });
+                    var_args.push((arg_index, temp));
                 } else if let Some(gep) = addr_of_field_path(program, ctx, source, arg) {
                     var_args.push((arg_index, gep));
                 } else if let Some(fn_id) = resolve_call_fn_arg(program, ctx, source, arg) {
@@ -2148,6 +2398,7 @@ fn emit_member_sites(
             span,
             is_direct: false,
             receiver_class: Some(cls.to_string()),
+            return_dst: None,
         });
         return;
     }
@@ -2169,6 +2420,7 @@ fn emit_member_sites(
             span,
             is_direct: true,
             receiver_class: Some(cls.to_string()),
+            return_dst: None,
         });
     }
 }
@@ -2323,10 +2575,9 @@ fn lower_lambda_expression(
         .map(|f| program.symbols.function(f).name.clone())
         .unwrap_or_else(|| "<tu>".to_string());
     let name = format!("{owner}::$lambda{}:{}", span.line, span.col);
-    if let Some(existing) =
-        program
-            .symbols
-            .resolve_function_in_scope(&name, Some(ctx.current_file))
+    if let Some(existing) = program
+        .symbols
+        .resolve_function_in_scope(&name, Some(ctx.current_file))
     {
         return Some(existing);
     }
@@ -2561,10 +2812,7 @@ fn extract_flow_from_expr(
                     } else if rhs.kind() == "call_expression" {
                         if let Some(callee_name) = resolve_direct_call(program, ctx, source, rhs) {
                             let ret_temp = alloc_ret_temp(program, ctx, node);
-                            program.flow.push(FlowConstraint::CallReturn {
-                                dst: ret_temp,
-                                callee_name,
-                            });
+                            emit_call_return(program, ctx, rhs, ret_temp, callee_name);
                             program.flow.push(FlowConstraint::Store {
                                 dst: ptr,
                                 src: ret_temp,
@@ -2747,7 +2995,16 @@ fn lower_designated_initializer(
         field_ids.push(fid);
         type_id = program.types.get(type_id).layout.fields[&fid].type_id;
     }
-    emit_field_value_store(program, ctx, source, node, base, &field_ids, &field_names, value_node);
+    emit_field_value_store(
+        program,
+        ctx,
+        source,
+        node,
+        base,
+        &field_ids,
+        &field_names,
+        value_node,
+    );
 }
 
 fn peel_expression(mut node: Node) -> Node {
@@ -2757,6 +3014,103 @@ fn peel_expression(mut node: Node) -> Node {
     node
 }
 
+fn peel_casts(mut node: Node) -> Node {
+    loop {
+        node = peel_expression(node);
+        if node.kind() != "cast_expression" {
+            break;
+        }
+        let Some(inner) = node
+            .child_by_field_name("value")
+            .or_else(|| node.child_by_field_name("expression"))
+            .or_else(|| node.named_child(1))
+        else {
+            break;
+        };
+        node = inner;
+    }
+    node
+}
+
+fn emit_call_return(
+    program: &mut Program,
+    ctx: &LowerContext,
+    call_node: Node,
+    dst: VarId,
+    callee_name: String,
+) {
+    program
+        .flow
+        .push(FlowConstraint::CallReturn { dst, callee_name });
+    ctx.call_return_dst.borrow_mut().insert(call_node.id(), dst);
+}
+
+fn is_symbol_lookup_callee(name: &str) -> bool {
+    matches!(
+        name.rsplit("::").next().unwrap_or(name),
+        "dlsym" | "dlvsym" | "GetProcAddress"
+    )
+}
+
+/// Decode a C/C++ string literal or concatenated string into its contents.
+fn string_literal_value(source: &str, node: Node) -> Option<String> {
+    let node = peel_casts(node);
+    match node.kind() {
+        "string_literal" => decode_c_string_literal(node_text(source, &node)),
+        "concatenated_string" => {
+            let mut out = String::new();
+            let mut any = false;
+            for child in node.children(&mut node.walk()) {
+                if child.kind() == "string_literal" {
+                    out.push_str(&decode_c_string_literal(node_text(source, &child))?);
+                    any = true;
+                }
+            }
+            any.then_some(out)
+        }
+        _ => None,
+    }
+}
+
+fn decode_c_string_literal(raw: &str) -> Option<String> {
+    let mut s = raw.trim();
+    for prefix in ["u8", "u", "U", "L"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest.trim_start();
+            break;
+        }
+    }
+    let inner = s.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(inner.len());
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 1;
+            match bytes[i] {
+                b'n' => out.push('\n'),
+                b't' => out.push('\t'),
+                b'r' => out.push('\r'),
+                b'0' => out.push('\0'),
+                b'\\' => out.push('\\'),
+                b'\'' => out.push('\''),
+                b'"' => out.push('"'),
+                b'?' => out.push('?'),
+                b'a' => out.push('\u{0007}'),
+                b'b' => out.push('\u{0008}'),
+                b'f' => out.push('\u{000c}'),
+                b'v' => out.push('\u{000b}'),
+                other => out.push(other as char),
+            }
+            i += 1;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    Some(out)
+}
+
 fn emit_field_store(
     program: &mut Program,
     ctx: &mut LowerContext,
@@ -2764,13 +3118,23 @@ fn emit_field_store(
     lhs: Node,
     rhs: Node,
 ) {
-    let Some((base, field_ids, field_names)) = decompose_field_path(program, ctx, source, lhs) else {
+    let Some((base, field_ids, field_names)) = decompose_field_path(program, ctx, source, lhs)
+    else {
         return;
     };
     if field_ids.is_empty() {
         return;
     }
-    emit_field_value_store(program, ctx, source, lhs, base, &field_ids, &field_names, rhs);
+    emit_field_value_store(
+        program,
+        ctx,
+        source,
+        lhs,
+        base,
+        &field_ids,
+        &field_names,
+        rhs,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2787,7 +3151,14 @@ fn emit_field_value_store(
     let mut current = base;
     for (i, fid) in field_ids.iter().enumerate() {
         if i + 1 == field_ids.len() {
-            let gep = alloc_gep_temp(program, ctx, span_node, current, *fid, field_names[i].clone());
+            let gep = alloc_gep_temp(
+                program,
+                ctx,
+                span_node,
+                current,
+                *fid,
+                field_names[i].clone(),
+            );
             if let Some(src) = expr_to_store_src(program, ctx, source, value_node) {
                 program.flow.push(FlowConstraint::Store { dst: gep, src });
             } else if value_node.kind() == "identifier" {
@@ -2828,10 +3199,7 @@ fn emit_field_value_store(
                 let emitted = if value_node.kind() == "call_expression" {
                     if let Some(callee_name) = resolve_direct_call(program, ctx, source, value_node)
                     {
-                        program.flow.push(FlowConstraint::CallReturn {
-                            dst: ret_temp,
-                            callee_name,
-                        });
+                        emit_call_return(program, ctx, value_node, ret_temp, callee_name);
                         true
                     } else if let Some(callee_var) =
                         resolve_callee_var(program, ctx, source, value_node)
@@ -2859,7 +3227,14 @@ fn emit_field_value_store(
                 }
             }
         } else {
-            current = alloc_gep_temp(program, ctx, span_node, current, *fid, field_names[i].clone());
+            current = alloc_gep_temp(
+                program,
+                ctx,
+                span_node,
+                current,
+                *fid,
+                field_names[i].clone(),
+            );
         }
     }
 }
@@ -2936,7 +3311,7 @@ fn peel_ptr_to_struct(program: &mut Program, type_id: trace_ir::TypeId) -> trace
 fn struct_type_for_var(program: &mut Program, var: VarId) -> Option<trace_ir::TypeId> {
     let mut type_id = variable_type_id(program, var)?;
     for _ in 0..4 {
-        match &program.types.get(type_id).desc {
+        match &program.types.get(type_id).desc.clone() {
             TypeDesc::Ptr(inner) => {
                 type_id = program.types.resolve_type_id(inner);
             }
@@ -2946,7 +3321,30 @@ fn struct_type_for_var(program: &mut Program, var: VarId) -> Option<trace_ir::Ty
                 let inner = (**elem).clone();
                 type_id = program.types.intern(inner);
             }
-            TypeDesc::Struct { .. } | TypeDesc::Union { .. } => return Some(type_id),
+            TypeDesc::Struct { name, fields } => {
+                // Prefer the complete layout interned from a header (PCH)
+                // over an empty tag interned from `struct Foo g = { ... }`.
+                if fields.is_empty() && !name.is_empty() {
+                    if let Some(full) = program
+                        .types
+                        .type_id_by_tag(name, trace_ir::TypeKind::Struct)
+                    {
+                        return Some(full);
+                    }
+                }
+                return Some(type_id);
+            }
+            TypeDesc::Union { name, fields } => {
+                if fields.is_empty() && !name.is_empty() {
+                    if let Some(full) = program
+                        .types
+                        .type_id_by_tag(name, trace_ir::TypeKind::Union)
+                    {
+                        return Some(full);
+                    }
+                }
+                return Some(type_id);
+            }
             _ => return Some(type_id),
         }
     }
@@ -2997,12 +3395,21 @@ fn resolve_implicit_this_member(
     }
     let cls = ctx.class_ctx.as_ref()?;
     let cls_name = &cls.qual_name;
-    let struct_tid = program.types.type_id_by_tag(cls_name, trace_ir::TypeKind::Struct)?;
+    let struct_tid = program
+        .types
+        .type_id_by_tag(cls_name, trace_ir::TypeKind::Struct)?;
     let field_name = node_text(source, &node);
     let field_id = program.types.field_id_by_name(struct_tid, field_name)?;
     let fn_id = ctx.current_fn?;
     let this_var = *program.symbols.function(fn_id).params.first()?;
-    Some(alloc_gep_temp(program, ctx, node, this_var, field_id, field_name.to_string()))
+    Some(alloc_gep_temp(
+        program,
+        ctx,
+        node,
+        this_var,
+        field_id,
+        field_name.to_string(),
+    ))
 }
 
 /// Lower `&base.f1.f2` into a gep-temp chain so the resulting pointer
@@ -3031,9 +3438,7 @@ fn addr_of_field_path(
         }
     }
     // &ptr_expr → peel through pointer_expression with &
-    if peeled.kind() == "pointer_expression"
-        && pointer_op(source, peeled).as_deref() == Some("&")
-    {
+    if peeled.kind() == "pointer_expression" && pointer_op(source, peeled).as_deref() == Some("&") {
         if let Some(inner) = pointer_arg(peeled) {
             return addr_of_field_path(program, ctx, source, inner);
         }
@@ -3129,11 +3534,11 @@ fn expr_to_rhs_flow(
             let callee = lower_lambda_expression(program, ctx, source, node)?;
             Some(FlowConstraint::AddrOfFn { dst, callee })
         }
+        "string_literal" | "concatenated_string" => string_literal_value(source, node)
+            .map(|value| FlowConstraint::StringConst { dst, value }),
         "call_expression" => {
             if let Some(callee_name) = resolve_direct_call(program, ctx, source, node) {
-                program
-                    .flow
-                    .push(FlowConstraint::CallReturn { dst, callee_name });
+                emit_call_return(program, ctx, node, dst, callee_name);
             }
             None
         }
@@ -3142,7 +3547,8 @@ fn expr_to_rhs_flow(
             let mut current = base;
             for (i, fid) in field_ids.iter().enumerate() {
                 if i + 1 == field_ids.len() {
-                    let tmp = alloc_gep_temp(program, ctx, node, current, *fid, field_names[i].clone());
+                    let tmp =
+                        alloc_gep_temp(program, ctx, node, current, *fid, field_names[i].clone());
                     return Some(FlowConstraint::Load { dst, src: tmp });
                 }
                 current = alloc_gep_temp(program, ctx, node, current, *fid, field_names[i].clone());
@@ -3157,8 +3563,9 @@ fn expr_to_rhs_flow(
                 let alloc_tmp = alloc_ret_temp(program, ctx, node);
                 // Give alloc_tmp the class pointer type so the heap location
                 // created by NewHeap carries the correct struct type.
-                if let Some(struct_tid) =
-                    program.types.type_id_by_tag(&cls, trace_ir::TypeKind::Struct)
+                if let Some(struct_tid) = program
+                    .types
+                    .type_id_by_tag(&cls, trace_ir::TypeKind::Struct)
                 {
                     program.symbols.variable_mut(alloc_tmp).type_id = struct_tid;
                 }
@@ -3278,8 +3685,18 @@ fn return_flow_from_expr(
                 None
             }
         }
-        "call_expression" => resolve_direct_call_name(source, node)
-            .map(|callee_name| ReturnFlow::Call { callee_name }),
+        "call_expression" => {
+            let callee_name = resolve_direct_call_name(source, node)?;
+            if is_symbol_lookup_callee(&callee_name) {
+                // Materialize a temp so the inner CallSite gets a return_dst
+                // for the dlsym model; the wrapper then copies that temp.
+                let temp = alloc_ret_temp(program, ctx, node);
+                emit_call_return(program, ctx, node, temp, callee_name);
+                Some(ReturnFlow::Copy { src: temp })
+            } else {
+                Some(ReturnFlow::Call { callee_name })
+            }
+        }
         "cast_expression" => node
             .child_by_field_name("expression")
             .or_else(|| node.named_child(1))
@@ -3519,7 +3936,9 @@ fn resolve_callee_with_loads(
 ) -> (String, bool, Option<VarId>) {
     let node = peel_expression(node);
     if node.kind() == "field_expression" {
-        if let Some((base, field_ids, field_names)) = decompose_field_path(program, ctx, source, node) {
+        if let Some((base, field_ids, field_names)) =
+            decompose_field_path(program, ctx, source, node)
+        {
             let text = field_callee_text(source, node);
             // Return a cached load var if we already created one for this
             // node (avoids duplicate loads that break CallReturnIndirect
@@ -3531,7 +3950,9 @@ fn resolve_callee_with_loads(
             if let Some(load_var) =
                 emit_field_fn_ptr_load(program, ctx, source, node, base, &field_ids, &field_names)
             {
-                ctx.callee_load_cache.borrow_mut().insert(node.id(), Some(load_var));
+                ctx.callee_load_cache
+                    .borrow_mut()
+                    .insert(node.id(), Some(load_var));
                 return (text, false, Some(load_var));
             }
             ctx.callee_load_cache.borrow_mut().insert(node.id(), None);
@@ -3573,7 +3994,14 @@ fn emit_field_fn_ptr_load(
     let mut type_id = struct_type_for_var(program, base)?;
     let mut current = base;
     for (i, fid) in field_ids.iter().enumerate() {
-        let gep = alloc_gep_temp(program, ctx, span_node, current, *fid, field_names[i].clone());
+        let gep = alloc_gep_temp(
+            program,
+            ctx,
+            span_node,
+            current,
+            *fid,
+            field_names[i].clone(),
+        );
         let field_type_id = program.types.get(type_id).layout.fields.get(fid)?.type_id;
         type_id = field_type_id;
         if i + 1 == field_ids.len() {
@@ -3669,6 +4097,12 @@ fn resolve_callee(
             .named_child(0)
             .map(|inner| resolve_callee(program, ctx, source, inner))
             .unwrap_or(("<indirect>".into(), false, None)),
+        "cast_expression" => node
+            .child_by_field_name("value")
+            .or_else(|| node.child_by_field_name("expression"))
+            .or_else(|| node.named_child(1))
+            .map(|inner| resolve_callee(program, ctx, source, inner))
+            .unwrap_or(("<indirect>".into(), false, None)),
         "field_expression" => {
             let field = node
                 .child_by_field_name("field")
@@ -3719,6 +4153,11 @@ fn resolve_expr_var(
             .and_then(|n| resolve_expr_var(program, ctx, source, n)),
         "parenthesized_expression" => node
             .named_child(0)
+            .and_then(|n| resolve_expr_var(program, ctx, source, n)),
+        "cast_expression" => node
+            .child_by_field_name("value")
+            .or_else(|| node.child_by_field_name("expression"))
+            .or_else(|| node.named_child(1))
             .and_then(|n| resolve_expr_var(program, ctx, source, n)),
         _ => None,
     }
@@ -4249,10 +4688,7 @@ fn sanitize_type_name(arg: &str) -> String {
         }
         break;
     }
-    s.trim()
-        .trim_end_matches(['*', '&'])
-        .trim()
-        .to_string()
+    s.trim().trim_end_matches(['*', '&']).trim().to_string()
 }
 
 fn find_params(decl: Node) -> Option<Node> {

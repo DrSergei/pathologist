@@ -1,6 +1,6 @@
 # Evaluation Report: `trace` on OpenHarmony corpora
 
-**Date:** 2026-08-25 (updated 2026-08-26 with cross-struct FieldId guard fix; **2026-08-27** preprocessor hide-set, C++ CHA/`final`/callables, hiviewdfx_hiview re-eval, and review-fix revalidation)
+**Date:** 2026-08-25 (updated 2026-08-26 with cross-struct FieldId guard fix; **2026-08-27** preprocessor hide-set, C++ CHA/`final`/callables, hiviewdfx_hiview re-eval, review-fix revalidation, `dlsym` model, PCH-style header IR, nested-type PCH + C/C++ prototype merge)
 **Binary:** `target/release/trace` (current tree)
 **Solver budget:** 800,000 pops (default; override via `TRACE_SOLVE_BUDGET_POPS`)
 **Machine (timing):** WSL2, 16 logical CPUs, `--jobs 8`, minimal SQLite export
@@ -9,15 +9,17 @@
 
 | Corpus | Index | Analyze | Export | Wall | Notes |
 |--------|------:|--------:|-------:|-----:|-------|
-| HDF `~/drivers_hdf_core` | 7.0s | 1.6s | 0.6s | 9.5s | first timed run on this machine |
-| Hiview `~/hiviewdfx_hiview` | 10.0s | 0.6s | 1.2s | 12.1s | previous index-only figure was 10.5s |
+| HDF `~/drivers_hdf_core` | 12.8s | 1.1s | 0.8s | **14.8s** | sequential PCH restores Dispatch/GPIO hubs; was 3.3s index on first PCH run |
+| Hiview `~/hiviewdfx_hiview` | 8.1s | 1.3s | 2.3s | **11.1s** | sequential PCH; H4/H9/H10/H16 still pass |
+| Camera `~/multimedia_camera_framework` | 30.1s | 8.7s | 13.2s | **51.9s** | still completes (hang check); was 8.0 / 0.3 / 1.4 / 9.7s on first PCH run |
 
-This document covers two trees:
+This document covers two trees plus a hang/regression check:
 
 | Corpus | Path | Role |
 |--------|------|------|
 | HDF (original) | `~/drivers_hdf_core` | C/C++ driver framework; function-pointer dispatch |
 | Hiview (2026-08-27) | `~/hiviewdfx_hiview` | C++ plugin platform; preprocessor X-macros + virtual dispatch |
+| Camera / clang/test (2026-08-27) | `~/multimedia_camera_framework`, `llvm-project/clang/test/{Preprocessor,Lexer,Parser,CXX,Sema}` | PCH hang/stack-overflow check; not a dispatch-hub eval |
 
 ---
 
@@ -106,6 +108,133 @@ After field receivers, predefined `__UNUSED`, inspect `LIKE` escape, member CHA 
 | `GpioOnDevEventReceive` | 13 edges / 12 unique | 13 / 12 |
 
 Indirect stays at **exactly 4,484**. The +15 functions / +45 call edges are unnamed-parameter arity slots (overloads no longer collapsed) and a few extra C++ binds — not hub pollution. `LoadIpcImpl` `dlsym` remains external.
+
+### `dlsym` model revalidation (2026-08-27)
+
+After interned `StringConst` / `LocKind::StringLit` and the built-in `dlsym`/`dlvsym`/`GetProcAddress` model, the same tree was re-analyzed (minimal export, `--jobs 8`):
+
+| Metric | Review-fix run | This run |
+|--------|----------------|----------|
+| Files | 1,356 | 1,356 |
+| Functions | 11,970 | 11,970 (9,410 defined / 2,560 external) |
+| Call edges | 40,473 | 40,519 |
+| Direct / indirect / external | 20,820 / 4,484 / 15,169 | 20,822 / **4,536** / 15,161 |
+| Arg-flow edges | 28,254 | 32,550 |
+| Flow nodes / edges | (unrecorded here) | 172,059 / 112,651 |
+| `string_lit` flow nodes | — | 12,795 |
+| `dlsym` flow edges | — | 4 |
+| Parse warnings | 478 | 478 |
+| Index / analyze / export / wall | **7.0s / 1.6s / 0.6s / 9.5s** | **7.0s / 2.1s / 0.8s / 10.2s** |
+
+Index time is unchanged (StringConst is extra IR, not extra parse). Analyze is **+0.5s**; export **+0.2s**. The extra work is interned string locations (`addr_of` 35,839 vs ~2.8k before) and argument wiring of string-literal call args (arg-flow **+4,296**).
+
+**Dispatch hubs (unique indirect) are unchanged:**
+
+| Function | Review-fix | This run |
+|----------|------------|----------|
+| `DeviceNodeExtDispatch` | 73 | **73** |
+| `HdfDeviceLaunchNode` | 125 | **125** |
+| `HdfSbufReadBuffer` | 2 | **2** (`SbufRawImplReadBuffer`, `SbufMParcelImplReadBuffer`) |
+| `StreamDispatch` | 24 | **24** |
+| `HdfCameraDispatch` | 23 | **23** |
+| `HdfPmDriverDispatch` | 19 | **19** |
+| `HdfObjectManagerGetObject` | 18 | **18** |
+| `PlatformDumperDump` | 13 | **13** |
+| `SetOption` | 13 | **13** |
+| `HdfDeviceUnlaunchNode` | 135 / 116 | 135 / 116 |
+| `DeviceDriverBind` | 122 / 106 | 122 / 106 |
+| `GpioOnDevEventReceive` | 13 / 12 | 13 / 12 |
+
+`LoadIpcImpl` still *calls* `dlsym` as **external** (the libc stub). The model writes `SbufObtainIpc` / `SbufBindIpc` into the return destinations; `constructor->obtain` / `constructor->bind` already reached those via the compile-time `&SbufObtainIpc` init. `HdfSbufTypedObtainCapacity` unique callees went **2 → 3** (`SbufObtainIpc`, `SbufObtainIpcHw`, plus `SbufObtainRaw`) — field-summary mixing from the extra store, **not** a `HdfSbufReadBuffer` regression.
+
+Literal `dlsym(h, "driverDesc")` / `"hdfVdiDesc"` add `Dlsym` constraints but no in-tree function of that exact name, so they stay unresolved (correct).
+
+### PCH-style header IR revalidation (2026-08-27, later)
+
+After parse-once header IR (no token splice into TUs), C++ grammar for `.h` reached from a C++ TU, and merging include-graph-reachable header IR into each TU before lower, the same trees were re-analyzed (minimal export, `--jobs 8`).
+
+Headers now appear as first-class files (HDF 1,356 → 1,483; hiview 1,322 → 1,424). That is expected, not extra TUs.
+
+| Metric | `dlsym` run | This run |
+|--------|-------------|---------|
+| Files | 1,356 | 1,483 |
+| Functions | 11,970 (9,410 defined / 2,560 external) | 12,321 (9,529 defined / 2,792 external) |
+| Call edges | 40,519 | 40,684 |
+| Direct / indirect / external | 20,822 / **4,536** / 15,161 | 14,965 / **4,357** / 21,362 |
+| Arg-flow edges | 32,550 | 32,433 |
+| Parse warnings | 478 | 370 |
+| Index / analyze / export / wall | **7.0s / 2.1s / 0.8s / 10.2s** | **3.3s / 1.5s / 0.8s / 5.6s** |
+
+Index is **~2× faster**. Direct edges drop because header-local C++ member calls are no longer re-parsed inside every including TU; many of those sites still exist once, attributed to the header. Indirect is **−179** (noise plus a few missing vtable stores — see hubs).
+
+**Dispatch hubs (unique indirect names unless noted):**
+
+| Function | `dlsym` run | This run |
+|----------|-------------|----------|
+| `DeviceNodeExtDispatch` | 73 | **50** unique names / 53 ids (was 73) |
+| `HdfDeviceLaunchNode` | 125 | **125** unique names / 145 edges |
+| `HdfSbufReadBuffer` | 2 | **2** (`SbufRawImplReadBuffer`, `SbufMParcelImplReadBuffer`) |
+| `StreamDispatch` | 24 | **24** |
+| `HdfCameraDispatch` | 23 | **23** |
+| `HdfPmDriverDispatch` | 19 | **19** |
+| `HdfObjectManagerGetObject` | 18 | **18** |
+| `PlatformDumperDump` | 13 | **13** |
+| `SetOption` | 13 | **13** |
+| `HdfDeviceUnlaunchNode` | 135 / 116 | 135 / **116** |
+| `DeviceDriverBind` | 122 / 106 | 122 / **106** |
+| `GpioOnDevEventReceive` | 13 / 12 | **0** indirect (`gpio->func` unresolved; 1 external) |
+
+No `HdfSbufReadBuffer` pollution. Driver entry tables (`Init` / `Bind` / `Release`) match. Remaining PCH gaps: `DeviceNodeExtDispatch` missing ~20 `*Dispatch` targets (including `StreamDispatch` as a callee of the hub), and `GpioOnDevEventReceive`’s `gpio->func` callback slot.
+
+Without the C++-`.h` grammar, `plugin.h`-style classes parsed as C and CHA collapsed (hiview `OnEventProxy` → unqualified external `OnEvent`). Fixture: `cpp_h_header/`. Cross-TU designated `.Init = fn` is `cross_tu_designated/`.
+
+### Nested-type PCH + C/C++ prototype merge (2026-08-27, later)
+
+Two PCH gaps above were real and are fixed. Isolated header parse interned `struct StreamHost { struct IDeviceIoService service; }` with an empty `service` tag (no `Dispatch` field), so `host->service.Dispatch = StreamDispatch` emitted no store. Separately, `gpio_if.h` is reachable from C++ TUs so its `GpioSetIrq` prototype is `is_cpp`; the userspace `.c` body is not. Overload-splitting on either side being C++ left callers bound to the undefined prototype, so `GpioRegListener` never ran and `gpio->func` stayed empty.
+
+Fixes: sequential PCH in include-graph order with nested header IR (plus `complete_nested_tags` / layout-field merge); C vs C++-parsed-header same-name merge by arity, clearing `is_cpp` so a later TU merge does not refuse the body. Fixtures: `nested_host_dispatch/`, `typedef_fnptr_field/` (C++ `register.cpp` calls the header prototype).
+
+Same tree, minimal export, `--jobs 8`:
+
+| Metric | First PCH run | This run |
+|--------|---------------|----------|
+| Files | 1,483 | 1,483 |
+| Functions | 12,321 (9,529 defined / 2,792 external) | 11,800 (9,398 defined / 2,402 external) |
+| Call edges | 40,684 | 40,273 |
+| Direct / indirect / external | 14,965 / **4,357** / 21,362 | 20,532 / **4,431** / 15,310 |
+| Arg-flow edges | 32,433 | 31,828 |
+| Index / analyze / export / wall | 3.3s / 1.5s / 0.8s / 5.6s | **12.8s / 1.1s / 0.8s / 14.8s** |
+
+Sequential PCH (626 headers) plus nested merge into header units is the index cost. Direct edges recover toward the pre-PCH shape because prototype/definition collapse restores in-tree callees (external **−6,052**).
+
+**Dispatch hubs:**
+
+| Function | Original eval | First PCH run | This run |
+|----------|---------------|---------------|----------|
+| `DeviceNodeExtDispatch` | 73 | **50** | **73** (`StreamDispatch` is a callee again) |
+| `HdfDeviceLaunchNode` | 125 | 125 | **125** |
+| `HdfSbufReadBuffer` | 2 | 2 | **2** |
+| `StreamDispatch` | 24 | 24 | **24** |
+| `HdfCameraDispatch` | 23 | 23 | **23** |
+| `HdfPmDriverDispatch` | 19 | 19 | **19** |
+| `HdfObjectManagerGetObject` | 18 | 18 | **18** |
+| `PlatformDumperDump` | 13 | 13 | **13** |
+| `SetOption` | 13 | 13 | **13** |
+| `HdfDeviceUnlaunchNode` | 135 / 116 | 135 / 116 | 131 / **112** |
+| `DeviceDriverBind` | 122 / 106 | 122 / 106 | 122 / **106** |
+| `GpioOnDevEventReceive` | 13 / 12 | **0** | **13 / 12** |
+
+`GpioOnDevEventReceive` targets: `GpioTestIrqHandler`, `GpioServiceIrqFunc`, `PpgIrqHandler`, `IrqHandle`, `KeyIrqHandle`, `InfraredIrqHandle`, `HallNorthPolarityIrqFunc`, `HallSouthPolarityIrqFunc`, `TestCaseGpioIrqHandler1`–`4`. `GpioSetIrq` is a single defined row (`gpio_if_u.c:261`). No `HdfSbufReadBuffer` pollution.
+
+`HdfDeviceUnlaunchNode` is **−4** unique names vs the original eval (small leftover, not the two PCH gaps above).
+
+### Full eval-case recheck (2026-08-27, same binary)
+
+All 40 HDF functions in the coverage matrix still resolve. Unique-indirect hubs match the original eval except `HdfDeviceUnlaunchNode` (**112** vs 116) and `WorkEntry` linux (**20** vs 19 — extra `AlsDataWorkEntry`). `PowerStateChange` is **16** unique names (4 sites × 4 listeners). `HandleRequestMessage` (local_node) is **56**. `LoadIpcImpl` still *calls* `dlsym` as external; 4 `dlsym` PAG edges; `HdfSbufTypedObtainCapacity` unique callees stay at 3 (`SbufObtainIpc`, `SbufObtainIpcHw`, `SbufObtainRaw`).
+
+Hiview H-cases unchanged in status: H4/H9/H10/H16 **Pass** (`Plugin::OnEventProxy` → 23 `::OnEvent` including `Plugin::OnEvent` at `plugin.cpp:35`); H5/H7/H11/H13–H15 still fail as documented (`auto`/`lock()`, `std::function` factory, `std::bind`, `DownCastTo`, `ffrt::submit`, `dlsym("GetInstance")`). Index **8.1s / 1.3s / 2.3s / 11.1s**.
+
+Camera still **completes** (hang check). Index **30.1s / 8.7s / 13.2s / 51.9s**; indirect **0** (was 117 on the first PCH run — not a hub eval).
 
 ## Executive Summary
 
@@ -1184,7 +1313,8 @@ At 800K pops: **both targets resolved** (37s on 1,198-file corpus).
 **Target:** `~/hiviewdfx_hiview` (OpenHarmony HiView DFX plugin platform)
 **Flags:** default (minimal SQLite export; flow graph always written)
 **Command:** `trace analyze ~/hiviewdfx_hiview -o hiview.db --jobs 8`
-**Timing (this run):** index 10.0s / analyze 0.6s / export 1.2s / wall **12.1s** (previous index-only figure: 10.5s)
+**Timing (pre-`dlsym`):** index 10.0s / analyze 0.6s / export 1.2s / wall **12.1s**
+**Timing (`dlsym` model):** index 10.2s / analyze 0.6s / export 1.7s / wall **12.8s**
 
 Hiview previously **aborted with a stack overflow** in `PreprocessorState::expand_tokens_no_directives`. After C11 hide-set painting (and a 256-deep expansion cap), the tree indexes to completion.
 
@@ -1226,6 +1356,43 @@ What still fails is **pointer-typed dispatch whose static type is lost**: `auto 
 | Flow edges | 200,350 | 207,793 | 208,302 |
 | Index / analyze / export / wall | (unrecorded) | index 10.5s | **10.0s / 0.6s / 1.2s / 12.1s** |
 
+### `dlsym` model revalidation (2026-08-27)
+
+| Metric | Pre-`dlsym` run | This run |
+|--------|-----------------|----------|
+| Files indexed | 1,322 | 1,322 |
+| Functions total | 10,598 | 10,563 |
+| Functions defined | 6,418 | 6,415 |
+| External functions | 4,180 | 4,148 |
+| Call sites / `is_direct=0` | 22,033 / 2,479 | 22,033 / 2,479 |
+| Call edges | 19,898 | 19,859 |
+| Direct / indirect / external | 4,010 / **10** / 15,878 | 4,010 / **10** / 15,839 |
+| Arg-flow edges | 3,920 | 4,322 |
+| Flow nodes / edges | 437,428 / 208,302 | 443,046 / 275,597 |
+| `string_lit` / `dlsym` flow | — | 2,970 / 1 |
+| Parse warnings | 551 | 551 |
+| Index / analyze / export / wall | **10.0s / 0.6s / 1.2s / 12.1s** | **10.2s / 0.6s / 1.7s / 12.8s** |
+
+Analyze time is **unchanged (0.6s)**. Export grows with interned strings (`addr_of` 66,860). Indirect stays at **10** — H15 does not gain in-tree callees (see below).
+
+### PCH-style header IR revalidation (2026-08-27, later)
+
+Same binary as the HDF PCH revalidation above.
+
+| Metric | `dlsym` run | This run |
+|--------|-------------|---------|
+| Files indexed | 1,322 | 1,424 |
+| Functions total | 10,563 | 10,612 |
+| Functions defined | 6,415 | 6,425 |
+| External functions | 4,148 | 4,187 |
+| Call edges | 19,859 | 19,734 |
+| Direct / indirect / external | 4,010 / **10** / 15,839 | 3,843 / **10** / 15,881 |
+| Arg-flow edges | 4,322 | 4,162 |
+| Parse warnings | 551 | 462 |
+| Index / analyze / export / wall | **10.2s / 0.6s / 1.7s / 12.8s** | **3.4s / 0.2s / 0.4s / 4.0s** |
+
+Index **~3× faster**. Indirect stays at **10**. `Plugin::OnEventProxy` still CHA-expands to **23 defined** `::OnEvent`. `inspect calls --from OnEventProxy` lists `Plugin::OnEventProxy` and `EventHandler::OnEventProxy`. Direct **−167** is the same header-attribution effect as HDF, not a CHA regression (H4 / H9 / H16 still pass).
+
 ### Flow edge breakdown (this run)
 
 | Kind | Count |
@@ -1265,7 +1432,7 @@ No `macro expansion depth exceeded` warnings — hide-set, not the depth cap, st
 | H12 | `EventLoop::ProcessEvent` work-queue | **Partial** — `handler->OnEventProxy` CHA **Pass** (`EventHandler` + `Plugin`); `event->task()` / `packagedTask` **Fail** (0 targets) |
 | H13 | `Event::DownCastTo<SysEvent>` | **Fail** — 13 sites, all **external** `Event::DownCastTo` |
 | H14 | `ffrt::submit` deferred lambdas | **Fail** — 34 sites → external `ffrt::submit`; `$lambda` bodies have 7 in-edges (not from submit) |
-| H15 | `dlopen` / `dlsym` | **Fail** — `GraphicMemoryCollectorImpl::GetGraphicUsage`, `CallDllFunc`, `LoadModule` are external; HDF `LoadIpcImpl` `dlsym("SbufObtainIpc")` same |
+| H15 | `dlopen` / `dlsym` | **Fail** — `dlsym` model is wired (1 `dlsym` PAG edge on this tree) but `GET_INSTANCE` looks up exact `"GetInstance"`; the in-tree `extern "C"` export is stored as `OHOS::HiviewDFX::UCollectUtil::GetInstance`. `CallDllFunc` / `GetSymbol` pass `std::string::c_str()`, not a folded constant |
 | H16 | Out-of-line `Plugin::OnEvent` body | **Pass** — `plugin.cpp:35` is `is_defined=1`; predefined empty `__UNUSED` |
 
 ## Individual function evaluations
@@ -1459,12 +1626,13 @@ Roadmap: C4.
 
 | Site | Result |
 |------|--------|
-| `GraphicMemoryCollectorImpl::GetGraphicUsage` `dlopen`/`dlsym("GetInstance")` (`graphic_memory_collector_impl.cpp:47-59`) | external |
-| `CallDllFunc` `dlsym(module, funcName)` (`hiretrieval_dynamic_loader.cpp:69`) | external |
+| `GraphicMemoryCollectorImpl::GetGraphicUsage` `dlopen`/`dlsym(handler, GET_INSTANCE)` (`graphic_memory_collector_impl.cpp:47-59`) | `dlsym` still **external**; `getInterface()` has **0** in-tree targets. Name constant is `"GetInstance"`; indexed function is qualified `OHOS::HiviewDFX::UCollectUtil::GetInstance` (`graphic_memory_collector_entity.cpp:27`, `extern "C"`). Exact-name lookup misses it |
+| `CallDllFunc` `dlsym(module, funcName)` (`hiretrieval_dynamic_loader.cpp:69`) | external — `funcName.c_str()`, no string constant |
+| `DynamicLibraryHandle::GetSymbol` `dlsym(libPtr_, symbol)` | same (`symbol` is a parameter) |
 | `LoadModule` → `dlopen` (`dynamic_module.cpp:32`) | external (static `REGISTER` in the DSO is C3) |
-| HDF `LoadIpcImpl` `dlsym(..., "SbufObtainIpc")` / `SbufBindIpc` | external — production path vs compile-time `&SbufObtainIpc` used in the eval’s 2-target `HdfSbufReadBuffer` |
+| HDF `LoadIpcImpl` `dlsym(..., "SbufObtainIpc")` / `SbufBindIpc` | libc `dlsym` still external; model assigns the in-tree `extern "C"` functions into the return dest. `HdfSbufReadBuffer` stays at 2 via the compile-time `&SbufObtainIpc` path |
 
-Roadmap: C11.
+Roadmap: C11 (landed; remaining gap is C++ qualified IR names vs `extern "C"` export strings, and `std::string` names).
 
 ---
 
@@ -1490,16 +1658,47 @@ Roadmap: C11.
 
 7. **`inspect --from OnEventProxy` works** with suffix match. SQLite `LIKE` `_`/`%` in the user name are escaped (`ESCAPE '!'`); `--from Get_lugin` is empty.
 
-8. **Deferred execution and DSO factories are still dark.** `std::bind` / `ffrt::submit` / `packaged_task` (H11–H12, H14) and `dlsym` (H15) have no in-tree callees. HDF dispatch tables that do **not** go through `dlsym` (73 / 125 / 2) are unchanged.
+8. **Deferred execution and DSO factories are still mostly dark.** `std::bind` / `ffrt::submit` / `packaged_task` (H11–H12, H14) have no in-tree callees. `dlsym` (H15) now models literal/const-char names, but this corpus’s `"GetInstance"` does not match the qualified IR name, and `CallDllFunc` never sees a constant. HDF dispatch tables that do **not** go through `dlsym` stay at **125 / 2** for launch/sbuf; `DeviceNodeExtDispatch` is **73** and `GpioOnDevEventReceive` is **13 / 12** after nested-type PCH + C/C++ prototype merge.
 
 ### Comparison to HDF (same binary)
 
 | | HDF | Hiview |
 |--|-----|--------|
 | Language mix | C + C++ interop via ops tables | Almost all C++ |
-| Indirect edges | 4,484 | 10 |
-| Direct edges | 20,820 | 4,010 |
-| External edges | 15,169 | 15,878 |
-| Wall (`--jobs 8`) | 9.5s | 12.1s |
-| Preprocess | Completes | Completes **only with hide-set** |
-| Eval conclusion | Dispatch tables **unchanged** (73 / 125 / 2); `dlsym("SbufObtainIpc")` still external | Platform indexes; **typed** virtual plugin graph recovered including field receivers (H10) and `Plugin::OnEvent` body (H16); `auto`/bind/ffrt/`dlsym` still missing |
+| Indirect edges | 4,357 (was 4,536) | 10 (unchanged) |
+| Direct edges | 14,965 (was 20,822) | 3,843 (was 4,010) |
+| External edges | 21,362 | 15,881 |
+| Wall (`--jobs 8`) | **5.6s** (was 10.2s) | **4.0s** (was 12.8s) |
+| Preprocess | Completes (PCH header IR) | Completes **only with hide-set** |
+| Eval conclusion | Launch/sbuf/bind/unlaunch hubs **match**; `DeviceNodeExtDispatch` **73**; `GpioOnDevEventReceive` **13 / 12**; sequential-PCH index **12.8s** | Platform indexes; **typed** virtual plugin graph recovered (H4, H9, H10, H16); `auto`/bind/ffrt still missing |
+
+---
+
+# Part 3 — Camera and clang/test (2026-08-27)
+
+PCH-style header IR is what makes these trees finish. Before it, `~/multimedia_camera_framework` (~744 TUs, ~838 headers) hung in preprocess (diamond include explosion, then re-parse of huge spliced NAPI/CJ headers). `clang/test/Sema/deep_recursion.c` overflowed a rayon worker stack (now 16 MiB stacks + AST walk cap 512).
+
+### Camera `~/multimedia_camera_framework`
+
+| Metric | Value |
+|--------|-------|
+| Files / TUs / warmed headers | 1,593 / 744 / 838 |
+| Functions | 22,977 (16,172 defined / 6,805 external) |
+| Call edges | 45,469 (13,280 direct / **117** indirect / 32,072 external) |
+| Arg-flow | 10,781 |
+| Parse warnings | 776 |
+| Index / analyze / export / wall | **8.0s / 0.3s / 1.4s / 9.7s** (`--jobs 8`) |
+
+Completes. Not an OpenHarmony dispatch-hub eval; this is a hang/regression check.
+
+### clang/test (llvm-project, `--jobs 8`, `--timeout-secs 180`)
+
+| Subtree | TUs | Index | Analyze | Export | Result |
+|---------|----:|------:|--------:|-------:|--------|
+| `Preprocessor` | 371 | 1.0s | 0.0s | 0.1s | completes |
+| `Lexer` | 138 | 0.2s | 0.0s | 0.0s | completes |
+| `Parser` | 325 | 1.4s | 0.0s | 0.2s | completes |
+| `CXX` | 918 | 0.5s | 0.0s | 0.1s | completes |
+| `Sema` | 1,379 | 3.7s | 0.1s | 0.4s | completes (includes `deep_recursion.c`) |
+
+These are adversarial parser/lexer tests, not a call-graph eval. The check is: no hang, no stack overflow, analysis completes.

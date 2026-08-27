@@ -28,6 +28,7 @@ pub struct SolverIndices {
     pub store_dst: FxHashMap<PagNodeId, Vec<usize>>,
     pub store_src: FxHashMap<PagNodeId, Vec<usize>>,
     pub gep_src: FxHashMap<PagNodeId, Vec<usize>>,
+    pub dlsym_src: FxHashMap<PagNodeId, Vec<usize>>,
     pub indirect_by_target: FxHashMap<PagNodeId, Vec<trace_ir::CallSiteId>>,
 }
 
@@ -45,6 +46,8 @@ pub struct Pag {
     pub call_targets: IndexMap<trace_ir::CallSiteId, PagNodeId>,
     pub fn_locations: IndexMap<FnId, LocId>,
     pub var_location: IndexMap<VarId, LocId>,
+    /// Interned `StringConst` locations keyed by literal contents.
+    pub string_locs: FxHashMap<String, LocId>,
     /// Field abstract locations keyed by (parent object location, field id).
     pub field_loc: IndexMap<(LocId, FieldId), LocId>,
     /// Nesting depth of each synthesized field location (var-rooted = 0
@@ -73,6 +76,7 @@ impl Pag {
         pag.build_variables(program);
         pag.build_function_locations(program);
         pag.build_flow_constraints(program, models);
+        pag.build_dlsym_constraints(program, models);
         pag.build_call_constraints(program);
         pag.build_indices(program);
         pag
@@ -174,6 +178,9 @@ impl Pag {
                 ConstraintKind::Gep => {
                     self.indices.gep_src.entry(c.src).or_default().push(i);
                 }
+                ConstraintKind::Dlsym => {
+                    self.indices.dlsym_src.entry(c.src).or_default().push(i);
+                }
             }
         }
         for cs in &program.symbols.call_sites {
@@ -217,6 +224,10 @@ impl Pag {
                 }
                 ConstraintKind::Gep => {
                     self.indices.gep_src.entry(c.src).or_default().push(i);
+                    srcs.push(c.src);
+                }
+                ConstraintKind::Dlsym => {
+                    self.indices.dlsym_src.entry(c.src).or_default().push(i);
                     srcs.push(c.src);
                 }
             }
@@ -418,7 +429,12 @@ impl Pag {
                     let src_n = self.var_node_id(*src);
                     self.add_store(dst_n, src_n);
                 }
-                FlowConstraint::GepField { dst, base, field, field_name } => {
+                FlowConstraint::GepField {
+                    dst,
+                    base,
+                    field,
+                    field_name,
+                } => {
                     let dst_n = self.var_node_id(*dst);
                     let base_n = self.var_node_id(*base);
                     self.add_gep(dst_n, base_n, *field, field_name.clone());
@@ -488,7 +504,64 @@ impl Pag {
                     self.locations[loc.0 as usize].type_id = type_id;
                     self.add_addr_of(dst_n, loc_n);
                 }
+                FlowConstraint::StringConst { dst, value } => {
+                    let dst_n = self.var_node_id(*dst);
+                    let loc = self.intern_string_loc(program, value);
+                    let loc_n = self.loc_node[&loc];
+                    self.add_addr_of(dst_n, loc_n);
+                }
             }
+        }
+    }
+
+    fn intern_string_loc(&mut self, program: &Program, value: &str) -> LocId {
+        if let Some(&loc) = self.string_locs.get(value) {
+            return loc;
+        }
+        let type_id = program
+            .types
+            .all()
+            .iter()
+            .find(|t| matches!(t.desc, trace_ir::TypeDesc::Char))
+            .map(|t| t.id)
+            .unwrap_or_else(|| program.types.void());
+        let loc_id = LocId(self.locations.len() as u32);
+        self.alloc_loc(AbstractLocation {
+            id: loc_id,
+            kind: LocKind::StringLit,
+            var: None,
+            fn_id: None,
+            field: None,
+            type_id,
+            desc: value.to_string(),
+        });
+        self.string_locs.insert(value.to_string(), loc_id);
+        loc_id
+    }
+
+    /// Persistent `Dlsym` edges: `pts(return_dst)` gains function locations
+    /// named by string constants in the name-argument node. Wired here
+    /// (not in `apply_fn_model`) so later-arriving string constants still fire.
+    fn build_dlsym_constraints(&mut self, program: &Program, models: &FnModelSet) {
+        for cs in &program.symbols.call_sites {
+            let Some(model) = models.get_for_callee(&cs.callee_name) else {
+                continue;
+            };
+            let Some(name_param) = model.effects.iter().find_map(|e| match e {
+                Effect::Dlsym { name_param } => Some(*name_param),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let Some(dst_var) = cs.return_dst else {
+                continue;
+            };
+            let Some((_, name_var)) = cs.var_args.iter().find(|(i, _)| *i == name_param) else {
+                continue;
+            };
+            let dst_n = self.var_node_id(dst_var);
+            let src_n = self.var_node_id(*name_var);
+            self.add_dlsym(dst_n, src_n);
         }
     }
 
@@ -699,9 +772,23 @@ impl Pag {
             field_name: Some(field_name),
         });
     }
+
+    fn add_dlsym(&mut self, dst: PagNodeId, src: PagNodeId) {
+        self.constraints.push(Constraint {
+            kind: crate::constraints::ConstraintKind::Dlsym,
+            dst,
+            src,
+            field: None,
+            field_name: None,
+        });
+    }
 }
 
-pub(crate) fn struct_type_for_loc(pag: &Pag, program: &Program, loc: LocId) -> Option<trace_ir::TypeId> {
+pub(crate) fn struct_type_for_loc(
+    pag: &Pag,
+    program: &Program,
+    loc: LocId,
+) -> Option<trace_ir::TypeId> {
     if let Some(var) = pag.locations[loc.0 as usize].var {
         let mut type_id = program.symbols.variable_by_id(var)?.type_id;
         for _ in 0..4 {

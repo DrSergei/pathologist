@@ -54,6 +54,7 @@ trace analyze [OPTIONS] <TARGET>
 | `-D <NAME>` | Define preprocessor macro `NAME=1`. Repeatable. |
 | `-D <NAME=VALUE>` | Define macro with explicit value. Repeatable. |
 | `--jobs <N>` | Parallel jobs for indexing (parse + lower). Default: logical CPU count. |
+| `--timeout-secs <N>` | Watchdog: abort the process after N seconds (exit 124). Useful when probing hang-prone trees. |
 | `--full-export` | Export full IR detail: all types, all variables, PAG `locations`. Slower and produces a larger database. |
 | `--debug-points-to` | Retain points-to sets during analysis and export the `points_to` debug table (requires PAG in memory). Implies keeping location data needed for export. |
 | `--models <FILE>` | Load a TOML function-model file (interprocedural summaries for bodyless callees, e.g. `memcpy_s`). Repeatable; later files override earlier entries and built-ins. See `docs/ANALYSIS.md`. |
@@ -61,6 +62,10 @@ trace analyze [OPTIONS] <TARGET>
 **Progress output** (stderr):
 
 ```text
+discover: 618 TUs, 200 headers under /path
+include-graph: 818 files, 1200 include edges
+warm: 1/90 /path/foo.h
+parse: 0 orphan headers, 618 TUs (jobs=8)
 index: 24.2s (618 files, 11442 functions, 48406 flow)
 analyze: 0.3s (25478 edges, 3468 indirect)
 export: 0.1s
@@ -362,7 +367,7 @@ Directed value-flow edges (value flows src → dst). Always exported.
 | `id` | INTEGER PK | Edge id. |
 | `src_node` | INTEGER FK → `flow_nodes` | Source node. |
 | `dst_node` | INTEGER FK → `flow_nodes` | Destination node. |
-| `kind` | TEXT | `copy`, `addr_of`, `load`, `store`, `gep`, `points_to`, `call_arg`, or `terminates` (function-model clears event). |
+| `kind` | TEXT | `copy`, `addr_of`, `load`, `store`, `gep`, `dlsym`, `points_to`, `call_arg`, or `terminates` (function-model clears event). |
 
 **Indexes:** `flow_edges(src_node)`, `flow_edges(dst_node)`.
 
@@ -385,7 +390,7 @@ PAG abstract memory locations. Exported with `--full-export`.
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | INTEGER PK | Location id. |
-| `kind` | TEXT | e.g. `Global`, `Local`, `FieldSummary`, `Function`. |
+| `kind` | TEXT | e.g. `global`, `local`, `field_summary`, `function`, `string_lit`. |
 | `desc` | TEXT | Human-readable description. |
 | `type_id` | INTEGER FK → `types` | Optional type. |
 

@@ -36,6 +36,9 @@ enum Commands {
         /// Number of parallel jobs for indexing (parse/lower).
         #[arg(long)]
         jobs: Option<usize>,
+        /// Abort the whole analyze process after N seconds (watchdog).
+        #[arg(long)]
+        timeout_secs: Option<u64>,
         /// Include points-to debug table in output (also retains points-to in memory during analysis).
         #[arg(long)]
         debug_points_to: bool,
@@ -122,6 +125,7 @@ fn main() -> Result<()> {
             includes,
             defines,
             jobs,
+            timeout_secs,
             debug_points_to,
             full_export,
             models,
@@ -131,6 +135,7 @@ fn main() -> Result<()> {
             includes,
             defines,
             jobs,
+            timeout_secs,
             debug_points_to,
             full_export,
             models,
@@ -146,10 +151,18 @@ fn run_analyze(
     includes: Vec<PathBuf>,
     defines: Vec<String>,
     jobs: Option<usize>,
+    timeout_secs: Option<u64>,
     debug_points_to: bool,
     full_export: bool,
     model_files: Vec<PathBuf>,
 ) -> Result<()> {
+    if let Some(secs) = timeout_secs {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            eprintln!("error: timed out after {secs}s");
+            std::process::exit(124);
+        });
+    }
     let jobs = jobs.unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(|n| n.get())

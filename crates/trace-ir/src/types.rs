@@ -112,6 +112,7 @@ impl TypeTable {
     }
 
     pub fn intern(&mut self, desc: TypeDesc) -> TypeId {
+        let desc = self.canonicalize_desc(desc);
         if let Some(id) = self.lookup_tag_ref(&desc) {
             return id;
         }
@@ -129,6 +130,77 @@ impl TypeTable {
         });
         self.intern.insert(desc, id);
         id
+    }
+
+    /// Rewrite empty `struct Foo` / `union Foo` tags (and pointers to them)
+    /// to the most complete interned layout of that tag, when one exists.
+    fn canonicalize_desc(&self, desc: TypeDesc) -> TypeDesc {
+        match desc {
+            TypeDesc::Ptr(inner) => TypeDesc::Ptr(Box::new(self.canonicalize_desc(*inner))),
+            TypeDesc::Array { elem, size } => TypeDesc::Array {
+                elem: Box::new(self.canonicalize_desc(*elem)),
+                size,
+            },
+            TypeDesc::Struct { name, fields } if fields.is_empty() && !name.is_empty() => {
+                if let Some(id) = self.type_id_by_tag(&name, TypeKind::Struct) {
+                    return self.get(id).desc.clone();
+                }
+                TypeDesc::Struct { name, fields }
+            }
+            TypeDesc::Union { name, fields } if fields.is_empty() && !name.is_empty() => {
+                if let Some(id) = self.type_id_by_tag(&name, TypeKind::Union) {
+                    return self.get(id).desc.clone();
+                }
+                TypeDesc::Union { name, fields }
+            }
+            other => other,
+        }
+    }
+
+    /// After merging another unit, point nested incomplete tag fields at the
+    /// most complete layout interned so far (PCH headers are parsed in
+    /// isolation; a later header may supply `IDeviceIoService` after
+    /// `StreamHost { struct IDeviceIoService service; }` was interned).
+    pub fn complete_nested_tags(&mut self) {
+        let n = self.types.len();
+        for i in 0..n {
+            let fids: Vec<FieldId> = self.types[i].layout.fields.keys().copied().collect();
+            for fid in fids {
+                let old = self.types[i].layout.fields[&fid].type_id;
+                let new_id = self.complete_type_id(old);
+                if new_id != old {
+                    if let Some(fl) = self.types[i].layout.fields.get_mut(&fid) {
+                        fl.type_id = new_id;
+                    }
+                }
+            }
+        }
+    }
+
+    fn complete_type_id(&mut self, id: TypeId) -> TypeId {
+        match self.get(id).desc.clone() {
+            TypeDesc::Struct { name, fields } if fields.is_empty() && !name.is_empty() => self
+                .type_id_by_tag(&name, TypeKind::Struct)
+                .unwrap_or(id),
+            TypeDesc::Union { name, fields } if fields.is_empty() && !name.is_empty() => {
+                self.type_id_by_tag(&name, TypeKind::Union).unwrap_or(id)
+            }
+            TypeDesc::Ptr(inner) => {
+                let completed = self.canonicalize_desc(*inner);
+                let richer = match &completed {
+                    TypeDesc::Struct { fields, .. } | TypeDesc::Union { fields, .. } => {
+                        !fields.is_empty()
+                    }
+                    _ => false,
+                };
+                if richer {
+                    self.intern(TypeDesc::Ptr(Box::new(completed)))
+                } else {
+                    id
+                }
+            }
+            _ => id,
+        }
     }
 
     pub fn get(&self, id: TypeId) -> &TypeInfo {
@@ -303,4 +375,40 @@ fn align_up(value: u64, align: u64) -> u64 {
         return value;
     }
     value.div_ceil(align) * align
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complete_nested_tags_rewrites_empty_embedded_struct() {
+        let mut t = TypeTable::new();
+        let host = t.compute_struct_layout(
+            "StreamHost".into(),
+            vec![(
+                "service".into(),
+                TypeDesc::Struct {
+                    name: "IDeviceIoService".into(),
+                    fields: Vec::new(),
+                },
+            )],
+        );
+        t.compute_struct_layout(
+            "IDeviceIoService".into(),
+            vec![(
+                "Dispatch".into(),
+                TypeDesc::FnPtr {
+                    ret: Box::new(TypeDesc::Int),
+                    params: Vec::new(),
+                },
+            )],
+        );
+        t.complete_nested_tags();
+        let service_tid = t.get(host).layout.fields.get(&FieldId(0)).unwrap().type_id;
+        assert!(
+            t.field_id_by_name(service_tid, "Dispatch").is_some(),
+            "embedded IDeviceIoService must expose Dispatch after completion"
+        );
+    }
 }

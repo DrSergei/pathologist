@@ -298,15 +298,30 @@ fn memcpy_s_member_field_resolves_fnptrs() {
     let program = build_program(&root, &default_opts(&root)).expect("build");
     let (_pag, analysis) = analyze(&program);
     assert!(
-        has_any_edge(&program, &analysis, "test_indirect_through_memcpy_s", "SetPpgEnable"),
+        has_any_edge(
+            &program,
+            &analysis,
+            "test_indirect_through_memcpy_s",
+            "SetPpgEnable"
+        ),
         "Enable op should resolve through memcpy_s into sub-field"
     );
     assert!(
-        has_any_edge(&program, &analysis, "test_indirect_through_memcpy_s", "SetPpgDisable"),
+        has_any_edge(
+            &program,
+            &analysis,
+            "test_indirect_through_memcpy_s",
+            "SetPpgDisable"
+        ),
         "Disable op should resolve through memcpy_s into sub-field"
     );
     assert!(
-        has_any_edge(&program, &analysis, "test_indirect_through_memcpy_s", "SetPpgReadData"),
+        has_any_edge(
+            &program,
+            &analysis,
+            "test_indirect_through_memcpy_s",
+            "SetPpgReadData"
+        ),
         "ReadData op should resolve through memcpy_s into sub-field"
     );
 }

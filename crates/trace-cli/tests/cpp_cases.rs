@@ -74,6 +74,41 @@ fn cpp_header_inline_method_dedups_with_out_of_class_uses() {
     assert_eq!(hits, 1, "header-inline method should dedup across TUs");
 }
 
+/// A C++ class in a `.h` (not `.hpp`) must be parsed with the C++ grammar
+/// under PCH-style header IR. Extension-only language would lower it as C
+/// and drop CHA for out-of-line `Plugin::OnEventProxy`.
+#[test]
+fn cpp_dot_h_header_virtual_call_expands() {
+    let root = fixture("cpp_h_header");
+    let program = build_program(&root, &default_opts(&root)).expect("build");
+    let (_pag, analysis) = analyze(&program);
+
+    assert!(
+        has_direct(
+            &program,
+            &analysis,
+            "Plugin::OnEventProxy",
+            "Plugin::OnEvent"
+        ),
+        "implicit this->OnEvent from .h-declared Plugin"
+    );
+    assert!(
+        has_direct(
+            &program,
+            &analysis,
+            "Plugin::OnEventProxy",
+            "Derived::OnEvent"
+        ),
+        "CHA must see Derived::OnEvent declared in plugin.h"
+    );
+    assert!(has_direct(
+        &program,
+        &analysis,
+        "drive",
+        "Plugin::OnEventProxy"
+    ));
+}
+
 #[test]
 fn cpp_ctor_and_dtor_sites() {
     let root = fixture("cpp_basic");
@@ -273,8 +308,7 @@ fn cpp_implicit_this_virtual_call_expands() {
         .call_edges
         .iter()
         .filter(|e| {
-            fn_name(&program, e.caller) == "Base::go"
-                && e.resolution == ResolutionKind::Direct
+            fn_name(&program, e.caller) == "Base::go" && e.resolution == ResolutionKind::Direct
         })
         .map(|e| fn_name(&program, e.callee))
         .collect::<Vec<_>>();
@@ -355,8 +389,7 @@ fn cpp_member_virtual_overload_filters_by_arity() {
         })
         .collect();
     assert!(
-        unary.iter().any(|(t, _)| t == "Over::foo")
-            && unary.iter().any(|(t, _)| t == "OverD::foo"),
+        unary.iter().any(|(t, _)| t == "Over::foo") && unary.iter().any(|(t, _)| t == "OverD::foo"),
         "p->foo(1) should CHA to unary Over::foo / OverD::foo, got {unary:?}"
     );
     for (t, n) in &unary {
@@ -486,12 +519,7 @@ fn cpp_functor_operator_call_resolves() {
         has_direct(&program, &analysis, "call_functor_field", "Fn::operator()"),
         "w->cb() when cb is a functor field should target operator()"
     );
-    assert!(has_direct(
-        &program,
-        &analysis,
-        "Fn::operator()",
-        "target"
-    ));
+    assert!(has_direct(&program, &analysis, "Fn::operator()", "target"));
     assert!(
         has_direct(
             &program,

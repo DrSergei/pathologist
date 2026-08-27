@@ -175,9 +175,10 @@ Directed value-flow edges between PAG nodes. Always exported.
 
 Edge kinds:
 
-- `copy`, `addr_of`, `load`, `store`, `gep` — direct translations of the IR
+- `copy`, `addr_of`, `load`, `store`, `gep`, `dlsym` — direct translations of the IR
   flow constraints that survived solving (including param copies wired by
-  the solver).
+  the solver). `dlsym` is the symbol-lookup model: string constants in the
+  name argument become function locations on the return destination.
 - `points_to` — implicit var → storage-location edge derived from the final
   var→location map.
 - `call_arg` — actual-to-formal argument passing from `arg_flow_edges`,
@@ -208,7 +209,7 @@ PAG abstract locations (`--full-export`).
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | INTEGER PK | Location id |
-| `kind` | TEXT | `Global`, `Local`, `FieldSummary`, `Function`, … |
+| `kind` | TEXT | `global`, `file_static`, `fn_static`, `local`, `heap`, `field`, `field_summary`, `array_summary`, `function`, `string_lit`, … |
 | `desc` | TEXT | Description |
 | `type_id` | INTEGER FK → `types` | Optional |
 

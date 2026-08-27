@@ -38,7 +38,7 @@ Each stage must remain independently testable.
 
 Lowering emits `FlowConstraint` (+ `ReturnFlow` on functions). Document new kinds in `docs/ANALYSIS.md` before adding.
 
-Current kinds: `Copy`, `AddrOfVar`, `AddrOfFn`, `Store`, `Load`, `GepField`, `ArrayFnMember`, `CallReturn`.
+Current kinds: `Copy`, `AddrOfVar`, `AddrOfFn`, `Store`, `Load`, `GepField`, `ArrayFnMember`, `CallReturn`, `CallReturnIndirect`, `NewHeap`, `StringConst`.
 
 ## Adding analysis constraints
 

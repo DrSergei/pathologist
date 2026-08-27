@@ -257,9 +257,11 @@ fn export_flow_graph(
                     LocKind::FieldSummary => "field_summary",
                     LocKind::ArraySummary => "array_summary",
                     LocKind::Function => "function",
+                    LocKind::StringLit => "string_lit",
                 };
                 let label = match (loc.kind, loc.var) {
                     (LocKind::Function, _) => format!("fn:{}", loc.desc),
+                    (LocKind::StringLit, _) => format!("string:{}", loc.desc),
                     (_, Some(v)) => match program.symbols.variable_by_id(v) {
                         Some(var) => format!("{} of {}", loc.desc, var.name),
                         None => loc.desc.clone(),
@@ -303,6 +305,7 @@ fn export_flow_graph(
             ConstraintKind::Load => "load",
             ConstraintKind::Store => "store",
             ConstraintKind::Gep => "gep",
+            ConstraintKind::Dlsym => "dlsym",
         };
         edge_rows.push((c.src.0, c.dst.0, kind));
     }

@@ -26,6 +26,8 @@ pub struct PreprocessResult {
     pub output: String,
     pub line_map: LineMap,
     pub diagnostics: Vec<Diagnostic>,
+    /// Canonical paths processed by this run (`#include` closure).
+    pub included_headers: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -51,6 +53,20 @@ struct PreprocessorState {
     /// Current nested macro-expansion depth (hide-set rescan frames).
     expansion_depth: u32,
     expansion_limit_warned: bool,
+    /// Token-loop iterations this run (macro rescan included).
+    tokens_processed: u64,
+    /// In-progress cached-header frames (warm pass). Guard-skipped includes
+    /// are recorded here so the finished entry can embed nested expansions
+    /// without copying them into live `output` (that exponentiates on
+    /// diamond include graphs).
+    cache_frames: Vec<CacheFrame>,
+}
+
+/// One cached header being constructed.
+#[derive(Debug)]
+struct CacheFrame {
+    /// Guard-skipped includes at the live-output offset of the `#include`.
+    skips: Vec<(usize, PathBuf)>,
 }
 
 impl PreprocessorState {
@@ -70,6 +86,8 @@ impl PreprocessorState {
             lm_cur_file: u32::MAX,
             expansion_depth: 0,
             expansion_limit_warned: false,
+            tokens_processed: 0,
+            cache_frames: Vec::new(),
         };
         if let Some(shared) = &state.opts.shared_macros {
             if let Ok(guard) = shared.read() {
@@ -239,6 +257,29 @@ impl PreprocessorState {
         PreprocessError::Message { message: msg }
     }
 
+    fn check_resource_limits(&mut self, line: u32) -> Result<(), PreprocessError> {
+        self.tokens_processed = self.tokens_processed.saturating_add(1);
+        if self.tokens_processed > self.opts.max_expanded_tokens {
+            return Err(self.error(
+                line,
+                format!(
+                    "preprocessed token budget exceeded ({})",
+                    self.opts.max_expanded_tokens
+                ),
+            ));
+        }
+        if self.output.len() > self.opts.max_output_bytes {
+            return Err(self.error(
+                line,
+                format!(
+                    "preprocessed output exceeded {} bytes",
+                    self.opts.max_output_bytes
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Replay a cached expansion into the output. Returns false when no
     /// entry exists for `canonical`.
     fn splice_cached(&mut self, canonical: &Path) -> bool {
@@ -252,6 +293,33 @@ impl PreprocessorState {
         else {
             return false;
         };
+        if !self.opts.inline_include_bodies {
+            for (name, def) in entry.macros.iter() {
+                self.macros
+                    .entry(name.clone())
+                    .or_insert_with(|| def.clone());
+            }
+            self.included_guard.insert(canonical.to_path_buf());
+            self.included_guard.extend(entry.files.iter().cloned());
+            return true;
+        }
+        if self
+            .output
+            .len()
+            .saturating_add(entry.text.len())
+            > self.opts.max_output_bytes
+        {
+            self.warn(
+                1,
+                format!(
+                    "skipping cached include {} (would exceed {}-byte output cap)",
+                    canonical.display(),
+                    self.opts.max_output_bytes
+                ),
+            );
+            self.included_guard.insert(canonical.to_path_buf());
+            return true;
+        }
         let offset = self.output.len();
         self.output.push_str(&entry.text);
         // Replay the entry's macro side effects. Cached text is spliced
@@ -280,26 +348,141 @@ impl PreprocessorState {
         true
     }
 
+    fn cached_expansion(&self, canonical: &Path) -> Option<crate::IncludeExpansion> {
+        let cache = self.opts.include_expansion_cache.as_ref()?;
+        cache
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(canonical).cloned())
+    }
+
+    fn is_cacheable_header(path: &Path) -> bool {
+        path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            matches!(e, "h" | "H" | "hpp" | "hh" | "hxx" | "inl" | "ipp")
+                || e.eq_ignore_ascii_case("h")
+        })
+    }
+
+    /// Self-contained cache blob: live unique text plus nested expansions
+    /// inserted at each first guard-skip include site.
+    fn compose_cache_text(
+        &self,
+        output_start: usize,
+        output_end: usize,
+        skips: &[(usize, PathBuf)],
+    ) -> (String, LineMap, HashSet<PathBuf>) {
+        if skips.is_empty() {
+            return (
+                self.output[output_start..output_end].to_string(),
+                self.line_map.slice_from(output_start),
+                HashSet::new(),
+            );
+        }
+        let mut text = String::new();
+        let mut line_map = LineMap::new();
+        let mut extra_files = HashSet::new();
+        let mut live_pos = output_start;
+        let mut embedded: HashSet<PathBuf> = HashSet::new();
+        for (at, path) in skips {
+            let at = (*at).min(output_end).max(live_pos);
+            Self::append_live_chunk(
+                &mut text,
+                &mut line_map,
+                &self.output,
+                &self.line_map,
+                live_pos,
+                at,
+            );
+            live_pos = at;
+            if !embedded.insert(path.clone()) {
+                continue;
+            }
+            let Some(entry) = self.cached_expansion(path) else {
+                continue;
+            };
+            if text.len().saturating_add(entry.text.len()) > self.opts.max_output_bytes {
+                continue;
+            }
+            extra_files.extend(entry.files.iter().cloned());
+            extra_files.insert(path.clone());
+            if self.opts.track_line_map {
+                let mut remap = Vec::with_capacity(entry.line_map.files.len());
+                for p in &entry.line_map.files {
+                    remap.push(line_map.intern_file(p));
+                }
+                line_map.splice(&entry.line_map, text.len(), &remap);
+            }
+            text.push_str(&entry.text);
+        }
+        Self::append_live_chunk(
+            &mut text,
+            &mut line_map,
+            &self.output,
+            &self.line_map,
+            live_pos,
+            output_end,
+        );
+        (text, line_map, extra_files)
+    }
+
+    fn append_live_chunk(
+        dest_text: &mut String,
+        dest_map: &mut LineMap,
+        src_text: &str,
+        src_map: &LineMap,
+        from: usize,
+        to: usize,
+    ) {
+        if from >= to {
+            return;
+        }
+        let dest_off = dest_text.len();
+        dest_text.push_str(&src_text[from..to]);
+        let chunk_len = to - from;
+        let sliced = src_map.slice_from(from);
+        let mut remap = Vec::with_capacity(sliced.files.len());
+        for p in &sliced.files {
+            remap.push(dest_map.intern_file(p));
+        }
+        for e in &sliced.entries {
+            if (e.output_offset as usize) >= chunk_len {
+                break;
+            }
+            dest_map.entries.push(crate::LineMapEntry {
+                output_offset: e.output_offset + dest_off as u32,
+                file: remap[e.file as usize],
+                line: e.line,
+                col: e.col,
+            });
+        }
+    }
+
     fn process_file(&mut self, path: &Path) -> Result<(), PreprocessError> {
         let canonical = trace_ir::canonicalize(path);
         if self.included_guard.contains(&canonical) {
-            // Already expanded earlier in this run — normally a silent skip.
-            // But cached expansions are flat text: an entry built while this
-            // file was skipped freezes WITHOUT its content, and consumers
-            // that reach these definitions only through that entry lose them
-            // permanently (verified FN-class loss on real corpora). So while
-            // entries are being CONSTRUCTED (non-frozen phases), re-splice
-            // the cached text to keep every entry self-contained; duplicate
-            // definitions are harmless downstream (merge deduplicates
-            // same-origin entities and re-declarations remain valid C).
-            //
-            // In frozen phases nothing is cached and every replayed entry is
-            // already self-contained, so the definitions are guaranteed to
-            // exist somewhere in this run's output — splicing there would
-            // only duplicate parse/lower work (measured +48% index time).
+            // Already expanded earlier in this run. Re-splicing the cached
+            // subtree into *live* output exponentiates on diamond include
+            // graphs (each skip copies a self-contained blob that already
+            // contains previous copies). Record the skip on the in-progress
+            // cache frame instead; `compose_cache_text` embeds the nested
+            // expansion only into that frame's cache entry.
             if !self.opts.frozen_expansion_cache {
-                self.splice_cached(&canonical);
+                if let Some(frame) = self.cache_frames.last_mut() {
+                    frame.skips.push((self.output.len(), canonical.clone()));
+                }
             }
+            return Ok(());
+        }
+
+        if self.include_stack.len() >= self.opts.max_include_depth {
+            self.warn(
+                1,
+                format!(
+                    "include depth exceeded ({}); skipping {}",
+                    self.opts.max_include_depth,
+                    path.display()
+                ),
+            );
             return Ok(());
         }
 
@@ -307,10 +490,8 @@ impl PreprocessorState {
             return Ok(());
         }
 
-        let cache_header = self.opts.include_expansion_cache.is_some()
-            && canonical
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("h"));
+        let cache_header =
+            self.opts.include_expansion_cache.is_some() && Self::is_cacheable_header(&canonical);
 
         let guard_snapshot = if cache_header {
             self.included_guard.clone()
@@ -327,6 +508,10 @@ impl PreprocessorState {
         };
         self.included_guard.insert(canonical.clone());
         let output_start = self.output.len();
+        let pushing_frame = cache_header && !self.opts.frozen_expansion_cache;
+        if pushing_frame {
+            self.cache_frames.push(CacheFrame { skips: Vec::new() });
+        }
 
         let content = if let Some(cache) = &self.opts.source_cache {
             let key = canonical.clone();
@@ -365,9 +550,11 @@ impl PreprocessorState {
 
         let emitted = self.output.len() - output_start;
         self.emitted_bytes.insert(canonical.clone(), emitted);
+        let pending_skips = self.cache_frames.last().map(|f| f.skips.len()).unwrap_or(0);
         if cache_header
             && !self.opts.frozen_expansion_cache
             && emitted == 0
+            && pending_skips == 0
             && content.chars().any(|c| !c.is_whitespace())
         {
             // The include resolved but its entire body was skipped — almost
@@ -384,38 +571,45 @@ impl PreprocessorState {
         }
 
         if cache_header && !self.opts.frozen_expansion_cache {
+            let frame = self.cache_frames.pop();
             if let Some(cache) = &self.opts.include_expansion_cache {
-                let text: Arc<str> = self.output[output_start..].into();
-                if !text.is_empty() {
-                    // Claim only files whose expansion actually contributed
-                    // bytes. Guard-skipped files emit nothing; claiming them
-                    // would make replaying consumers treat the paths as
-                    // already included while their content is absent.
-                    let new_files: HashSet<PathBuf> = self
-                        .included_guard
-                        .difference(&guard_snapshot)
-                        .filter(|p| self.emitted_bytes.get(*p).copied().unwrap_or(usize::MAX) > 0)
-                        .cloned()
-                        .collect();
-                    let line_map = Arc::new(self.line_map.slice_from(output_start));
-                    let macro_defs: Arc<Vec<(String, crate::MacroDef)>> = match &macros_snapshot {
-                        Some(snap) => {
-                            let mut v: Vec<(String, crate::MacroDef)> = self
-                                .macros
-                                .iter()
-                                .filter(|(k, _)| !snap.contains_key(k.as_str()))
-                                .map(|(k, val)| (k.clone(), val.clone()))
-                                .collect();
-                            v.shrink_to_fit();
-                            Arc::new(v)
-                        }
-                        None => Arc::default(),
-                    };
+                let skips = frame.map(|f| f.skips).unwrap_or_default();
+                let output_end = self.output.len();
+                let (composed, composed_map, extra_files) = if self.opts.inline_include_bodies {
+                    self.compose_cache_text(output_start, output_end, &skips)
+                } else {
+                    (
+                        self.output[output_start..output_end].to_string(),
+                        self.line_map.slice_from(output_start),
+                        HashSet::new(),
+                    )
+                };
+                let mut new_files: HashSet<PathBuf> = self
+                    .included_guard
+                    .difference(&guard_snapshot)
+                    .filter(|p| self.emitted_bytes.get(*p).copied().unwrap_or(0) > 0)
+                    .cloned()
+                    .collect();
+                new_files.extend(extra_files);
+                let macro_defs: Arc<Vec<(String, crate::MacroDef)>> = match &macros_snapshot {
+                    Some(snap) => {
+                        let mut v: Vec<(String, crate::MacroDef)> = self
+                            .macros
+                            .iter()
+                            .filter(|(k, _)| !snap.contains_key(k.as_str()))
+                            .map(|(k, val)| (k.clone(), val.clone()))
+                            .collect();
+                        v.shrink_to_fit();
+                        Arc::new(v)
+                    }
+                    None => Arc::default(),
+                };
+                if !composed.is_empty() || !macro_defs.is_empty() || !new_files.is_empty() {
                     if let Ok(mut guard) = cache.write() {
                         guard.entry(canonical).or_insert(crate::IncludeExpansion {
-                            text,
+                            text: composed.into(),
                             files: Arc::new(new_files),
-                            line_map,
+                            line_map: Arc::new(composed_map),
                             macros: macro_defs,
                         });
                     }
@@ -429,6 +623,7 @@ impl PreprocessorState {
     fn process_tokens(&mut self, tokens: &[Token]) -> Result<(), PreprocessError> {
         let mut i = 0;
         while i < tokens.len() {
+            self.check_resource_limits(tokens[i].line)?;
             let tok = &tokens[i];
             if matches!(tok.kind, TokenKind::Eof) {
                 break;
@@ -536,6 +731,7 @@ impl PreprocessorState {
     fn expand_tokens_no_directives(&mut self, tokens: &[Token]) -> Result<(), PreprocessError> {
         let mut i = 0;
         while i < tokens.len() {
+            self.check_resource_limits(tokens[i].line)?;
             let tok = &tokens[i];
             if matches!(tok.kind, TokenKind::Eof) {
                 break;
@@ -755,11 +951,28 @@ impl PreprocessorState {
                 return Ok(i + 1);
             }
         };
+        let live_at = self.output.len();
         if let Err(e) = self.process_file(&include_path) {
             self.warn(
                 tokens.get(i).map(|t| t.line).unwrap_or(1),
                 format!("include preprocessing failed for {path}: {e}"),
             );
+        }
+        // File-local output: drop a nested cacheable header's tokens from
+        // the *parent* buffer after the child has been cached. The child's
+        // IR is merged at index time (PCH-style) instead of re-parsed in
+        // every consumer.
+        if !self.opts.inline_include_bodies
+            && !self.opts.frozen_expansion_cache
+            && Self::is_cacheable_header(&include_path)
+        {
+            self.output.truncate(live_at);
+            self.line_map.truncate_at(live_at);
+            if let Some(frame) = self.cache_frames.last_mut() {
+                frame
+                    .skips
+                    .push((live_at, trace_ir::canonicalize(&include_path)));
+            }
         }
         Ok(i + 1)
     }
@@ -1067,6 +1280,7 @@ impl PreprocessorState {
             output: self.output,
             line_map: self.line_map,
             diagnostics: self.diagnostics,
+            included_headers: self.included_guard.into_iter().collect(),
         }
     }
 }
@@ -1535,11 +1749,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "operator() must not become operator( ): {}",
             result.output
         );
-        assert!(
-            !result.output.contains("operator( )"),
-            "{}",
-            result.output
-        );
+        assert!(!result.output.contains("operator( )"), "{}", result.output);
         let src = "void f(const std::shared_ptr<Plugin> &p);\n";
         let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
         assert!(
@@ -1795,6 +2005,214 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
                 .any(|d| d.message.contains("expanded to nothing")),
             "{:?}",
             r.diagnostics
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Diamond includes must not copy a header's cached body into live
+    /// output on every skip — that exponentiates. Live text stays unique;
+    /// the second parent's *cache entry* still embeds the nested header
+    /// so a later replay of only that parent keeps the nested declaration.
+    #[test]
+    fn diamond_include_does_not_blow_up_and_cache_stays_self_contained() {
+        let dir = unique_tmp_dir("diamond_inc");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("common.h"),
+            "#ifndef COMMON_H\n#define COMMON_H\nstruct NeedThis { int x; };\n#endif\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("left.h"),
+            "#ifndef LEFT_H\n#define LEFT_H\n#include \"common.h\"\nvoid left(void);\n#endif\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("right.h"),
+            "#ifndef RIGHT_H\n#define RIGHT_H\n#include \"common.h\"\nvoid right(struct NeedThis *p);\n#endif\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("top.h"),
+            "#ifndef TOP_H\n#define TOP_H\n#include \"left.h\"\n#include \"right.h\"\n#endif\n",
+        )
+        .unwrap();
+
+        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let warm = PreprocessOptions::new()
+            .with_include_expansion_cache(Arc::clone(&cache))
+            .with_include(dir.clone());
+        let top = preprocess_file(&dir.join("top.h"), &warm).unwrap();
+        let need_count = top.output.matches("NeedThis").count();
+        assert!(
+            need_count >= 1 && need_count <= 2,
+            "live output should mention NeedThis once (maybe twice), not explode: {need_count}\n{}",
+            top.output
+        );
+        assert!(
+            top.output.len() < 1024,
+            "diamond live output too large: {}",
+            top.output.len()
+        );
+
+        let right = cache
+            .read()
+            .unwrap()
+            .get(&dir.join("right.h"))
+            .cloned()
+            .expect("right.h cached");
+        assert!(
+            right.text.contains("NeedThis"),
+            "right.h cache must be self-contained, got {}",
+            right.text
+        );
+
+        // Frozen consumer that only includes right.h still sees NeedThis.
+        let frozen = PreprocessOptions::new()
+            .with_include_expansion_cache(Arc::clone(&cache))
+            .with_frozen_expansion_cache(true)
+            .with_include(dir.clone());
+        let c = preprocess_file(&dir.join("right.h"), &frozen).unwrap();
+        assert!(
+            c.output.contains("NeedThis"),
+            "frozen replay of right.h lost nested common.h: {}",
+            c.output
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// n headers each including all previous ones: live output is O(n), not 2^n.
+    #[test]
+    fn chained_includes_live_output_is_linear() {
+        let dir = unique_tmp_dir("chain_inc");
+        fs::create_dir_all(&dir).unwrap();
+        const N: usize = 24;
+        for i in 0..N {
+            let mut src = format!("#ifndef H{i}\n#define H{i}\n");
+            for j in 0..i {
+                src.push_str(&format!("#include \"h{j}.h\"\n"));
+            }
+            src.push_str(&format!("int v{i};\n#endif\n"));
+            fs::write(dir.join(format!("h{i}.h")), src).unwrap();
+        }
+        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = PreprocessOptions::new()
+            .with_include_expansion_cache(Arc::clone(&cache))
+            .with_include(dir.clone());
+        let r = preprocess_file(&dir.join(format!("h{}.h", N - 1)), &opts).unwrap();
+        for i in 0..N {
+            assert!(
+                r.output.contains(&format!("v{i}")),
+                "missing v{i} in {}",
+                r.output
+            );
+        }
+        assert!(
+            r.output.len() < 8 * 1024,
+            "chained-include live output exploded: {}",
+            r.output.len()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn include_depth_cap_skips_deeper_nests() {
+        let dir = unique_tmp_dir("inc_depth");
+        fs::create_dir_all(&dir).unwrap();
+        const N: usize = 12;
+        for i in 0..N {
+            let src = if i + 1 < N {
+                format!("int v{i};\n#include \"n{}.h\"\n", i + 1)
+            } else {
+                format!("int v{i};\n")
+            };
+            fs::write(dir.join(format!("n{i}.h")), src).unwrap();
+        }
+        let opts = PreprocessOptions::new()
+            .with_include(dir.clone())
+            .with_max_include_depth(6);
+        let r = preprocess_file(&dir.join("n0.h"), &opts).unwrap();
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.message.contains("include depth exceeded")),
+            "expected depth warning: {:?}",
+            r.diagnostics
+        );
+        assert!(r.output.contains("v0"), "{}", r.output);
+        assert!(
+            !r.output.contains("v11"),
+            "depth cap should not expand the whole chain: {}",
+            r.output
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn token_budget_stops_explosive_macro_expansion() {
+        let src = "\
+#define A B B B B B B B B
+#define B C C C C C C C C
+#define C D D D D D D D D
+#define D E E E E E E E E
+#define E 1
+int x = A;
+";
+        let opts = PreprocessOptions::new().with_max_expanded_tokens(2_000);
+        let result = preprocess_string(src, Path::new("t.c"), &opts);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("token budget exceeded")),
+            "expected token-budget diagnostic: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn inline_false_keeps_parent_output_file_local() {
+        let dir = unique_tmp_dir("no_inline");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("common.h"),
+            "#ifndef COMMON_H\n#define COMMON_H\nstruct NeedThis { int x; };\n#endif\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("top.h"),
+            "#ifndef TOP_H\n#define TOP_H\n#include \"common.h\"\nint from_top;\n#endif\n",
+        )
+        .unwrap();
+        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = PreprocessOptions::new()
+            .with_include_expansion_cache(Arc::clone(&cache))
+            .with_include(dir.clone())
+            .with_inline_include_bodies(false);
+        let top = preprocess_file(&dir.join("top.h"), &opts).unwrap();
+        assert!(
+            top.output.contains("from_top"),
+            "parent tokens must remain: {}",
+            top.output
+        );
+        assert!(
+            !top.output.contains("NeedThis"),
+            "nested header body must not be copied into parent live output: {}",
+            top.output
+        );
+        let common = cache
+            .read()
+            .unwrap()
+            .get(&dir.join("common.h"))
+            .cloned()
+            .expect("common.h cached");
+        assert!(
+            common.text.contains("NeedThis"),
+            "child cache still holds its own text: {}",
+            common.text
         );
         let _ = fs::remove_dir_all(&dir);
     }
