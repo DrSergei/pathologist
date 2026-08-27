@@ -43,6 +43,7 @@ flowchart LR
 | Comments | `//`, `/* */` |
 | Literals | String and character literals preserved |
 | `#include "..."` / `<...>` | Include path stack + `--include` |
+| `#include` macro operand | C11 6.10.2: if the tokens are not already `"..."` / `<...>`, the rest of the line is macro-expanded and must then form a header-name (`#include FOO` with `#define FOO "n.h"`) |
 | `#define` | Object-like and **function-like** (non-variadic) |
 | Macro rescanning | Function-like macros invoked inside another macro's expansion are expanded too (C11 6.10.3.4); uninvoked function-like names are emitted verbatim |
 | Macro hide set | Replacement-list tokens are painted with the macro name (and the invoking token's hide set) so self-referential macros such as `#define FOO FOO, BAR` terminate; nested `MIN(MIN(a,b),c)` still expands because argument tokens are not painted |
@@ -107,9 +108,11 @@ Translation units inherit the **union** of all warm-pass macro states: cached ex
 
 Indexing sets `inline_include_bodies = false`. Nested cacheable `#include`s replay **macros and include-once state** but do not copy header tokens into the consumer's live output. Each header's preprocessed text is therefore file-local.
 
-After the warm pass, reachable headers are parsed and lowered **once**, in include-graph order (a header is lowered only after the headers it includes). Nested `#include` IR is merged into that header before lower so `struct StreamHost { struct IDeviceIoService service; }` sees `Dispatch`, and `GpioIrqFunc func` sees the typedef. Parallel isolation interned those as empty tags / `Int` and dropped field stores (`DeviceNodeExtDispatch`, `GpioOnDevEventReceive`).
+After the warm pass, reachable headers are parsed and lowered **once**. PCH order uses the include graph **plus preprocess `included_headers`** (macro includes the raw scanner misses). Independent leaves may run in parallel waves; a header is never in the same wave as a nested include it needs. Include **cycles** are not a parallel wave: leftovers are indexed in include-graph order so nested layouts stay visible. Nested `#include` IR merges **types and typedefs** from **direct** includes (plus this header's preprocess `included_headers`) so `struct StreamHost { struct IDeviceIoService service; }` sees `Dispatch`, and `GpioIrqFunc func` sees the typedef, without copying every descendant's functions/flow into ancestor units. Child PCH units already nested-merged grandchild types. Parallel isolation *without* those preprocess edges interned empty tags / `Int` and dropped field stores (`DeviceNodeExtDispatch` lost `DispatchToMessage`, `GpioOnDevEventReceive` lost `gpio->func`).
 
-Translation units parse only their own remainder and merge already-built header `UnitIndex`es for **direct includes** plus preprocessor `included_headers` (a cached splice can omit a nested path from the graph edge). Nested types/typedefs are already inside those units from sequential PCH. Merge also rewrites leftover incomplete nested tags. That is the analogue of a PCH / clangd preamble.
+Headers that become reachable only after those preprocess edges are added join the PCH set (and leave the orphan path) so translation units can merge their prototypes.
+
+Translation units parse only their own remainder and merge already-built header `UnitIndex`es for every header **reachable** via the include graph, plus preprocessor `included_headers` (a cached splice can omit a nested path from the graph edge, and types-only nested PCH does not copy nested prototypes into ancestors). That merge is **symbols only** (types + prototypes): header call sites and flow are already in the global program from PCH. Merge also rewrites leftover incomplete nested tags. That is the analogue of a PCH / clangd preamble. Merging only direct includes dropped `DispatchToMessage` from `DeviceNodeExtDispatch` (designated `.Dispatch =` in `hdf_wifi_core.c` when `sidecar.h` was not in that TU's `included_headers`).
 
 Grammar follows the including language, not the extension alone: `.hpp`/`.hh`/`.hxx`/`.inl`/`.ipp` always use the C++ parser; a `.h` uses C++ if any C++ TU can reach it via the include graph, otherwise C. (Before PCH, header tokens were spliced into the TU and parsed with that TU's grammar, so `plugin.h` included from `plugin.cpp` was already C++.)
 
@@ -141,7 +144,7 @@ Manual `-I` remains appropriate only for things the tool cannot discover:
 - **platform selection**: when several dirs contain same-basename twins (e.g. per-OS adapter layers), `-I` order picks the intended one — discovery order is sorted-path and not platform-aware;
 - paired with `-D` for the matching platform macros (e.g. `-D __LITEOS__`).
 
-**Limitation:** Reachability is computed from literal `#include` lines in raw source (no macro expansion). Headers included only via macros may be misclassified as orphan (duplicate work, usually still correct). Headers excluded by `#if 0` in the preprocessor but visible in the raw graph are treated as reachable and not indexed separately — if the TU also omits them at preprocess time, calls in those headers can be missed.
+**Limitation:** The raw include scanner only sees literal `#include "..."` / `<...>` lines (no macro expansion). After the warm pass, preprocess `included_headers` — including headers reached via `#include FOO` — are added as graph edges, so those files join PCH instead of staying orphan. Headers excluded by `#if 0` in the preprocessor but visible in the raw graph are treated as reachable and not indexed separately — if the TU also omits them at preprocess time, calls in those headers can be missed.
 
 ## Error recovery
 
@@ -166,6 +169,6 @@ A mid-run stop inside ONE nested header must not invalidate the whole TU: indexi
 ## Testing
 
 - Unit tests: `trace-preproc/src/`
-- Integration fixtures: `tests/fixtures/preproc/` (including `self_ref_macro.c` for C11 hide-set / X-macro lists)
+- Integration fixtures: `tests/fixtures/preproc/` (including `self_ref_macro.c` for C11 hide-set / X-macro lists, `include_macro.c` for `#include FOO`)
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how preprocessing fits the full workflow.

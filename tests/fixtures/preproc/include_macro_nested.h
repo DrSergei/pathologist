@@ -1,0 +1,6 @@
+#ifndef INCLUDE_MACRO_NESTED_H
+#define INCLUDE_MACRO_NESTED_H
+
+#define NESTED_VAL 42
+
+#endif

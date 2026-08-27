@@ -153,7 +153,7 @@ pub fn build_program_with_jobs(
         ));
     }
 
-    let include_graph = IncludeGraph::build(root, &files, &headers);
+    let mut include_graph = IncludeGraph::build(root, &files, &headers);
     index_progress(format!(
         "include-graph: {} files, {} include edges",
         include_graph.project_files.len(),
@@ -188,10 +188,7 @@ pub fn build_program_with_jobs(
     let project_headers: Vec<PathBuf> = include_graph
         .project_files
         .iter()
-        .filter(|p| {
-            p.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("h"))
-        })
+        .filter(|p| is_index_header(p))
         .cloned()
         .collect();
     let c_sources: HashSet<PathBuf> = files.iter().cloned().collect();
@@ -200,15 +197,6 @@ pub fn build_program_with_jobs(
         &project_headers
             .iter()
             .filter(|p| reachable_from_c.contains(*p))
-            .cloned()
-            .collect::<Vec<_>>(),
-    );
-    // Headers never #included from any `.c` must be indexed separately; the rest
-    // are already expanded into translation units during TU preprocess.
-    let orphan_headers: Vec<PathBuf> = include_graph.index_order(
-        &project_headers
-            .iter()
-            .filter(|p| !reachable_from_c.contains(*p))
             .cloned()
             .collect::<Vec<_>>(),
     );
@@ -221,7 +209,6 @@ pub fn build_program_with_jobs(
         .filter(|p| crate::discover::is_cpp_path(p))
         .cloned()
         .collect();
-    let cpp_parse: Arc<HashSet<PathBuf>> = Arc::new(include_graph.reachable_from(&cpp_tus));
 
     let source_cache = IndexSourceCache::new();
     let warm_n = headers_for_macro_warm.len();
@@ -230,12 +217,7 @@ pub fn build_program_with_jobs(
     ));
     for (i, path) in headers_for_macro_warm.iter().enumerate() {
         let t = Instant::now();
-        index_progress(format!(
-            "warm: {}/{} {}",
-            i + 1,
-            warm_n,
-            path.display()
-        ));
+        index_progress(format!("warm: {}/{} {}", i + 1, warm_n, path.display()));
         let header_macros: Arc<std::sync::RwLock<MacroTable>> = Arc::new(std::sync::RwLock::new(
             macro_table_from_defines(&opts.defines),
         ));
@@ -268,6 +250,38 @@ pub fn build_program_with_jobs(
         ));
     }
 
+    for (from, headers) in source_cache.included_by_file() {
+        include_graph.add_preprocess_includes(&from, &headers);
+    }
+
+    // Macro includes discovered while warming can make a previously "orphan"
+    // header reachable from a `.c`. Those must be PCH'd into `header_ir` so
+    // TUs can merge their prototypes; they must not stay on the orphan path
+    // (merged into the global program only, invisible at TU lower time).
+    let reachable_from_c = include_graph.reachable_from(&c_sources);
+    let cpp_parse: Arc<HashSet<PathBuf>> = Arc::new(include_graph.reachable_from(&cpp_tus));
+    let mut pch_headers: Vec<PathBuf> = project_headers
+        .iter()
+        .filter(|p| reachable_from_c.contains(*p))
+        .cloned()
+        .collect();
+    for (_, hs) in source_cache.included_by_file() {
+        pch_headers.extend(
+            hs.into_iter()
+                .filter(|h| include_graph.project_files.contains(h) && is_index_header(h)),
+        );
+    }
+    pch_headers.sort();
+    pch_headers.dedup();
+    let pch_set: HashSet<PathBuf> = pch_headers.iter().cloned().collect();
+    let orphan_headers: Vec<PathBuf> = include_graph.index_order(
+        &project_headers
+            .iter()
+            .filter(|p| !pch_set.contains(*p))
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+
     // Parallel phases must treat the expansion cache as read-only: warm-pass
     // entries were produced sequentially and deterministically, while worker
     // inserts are first-writer-wins races that make output scheduling-
@@ -289,15 +303,63 @@ pub fn build_program_with_jobs(
         .map_err(|e| e.to_string())?;
 
     let pch_t = Instant::now();
-    index_progress(format!("pch: parse {warm_n} warmed headers once"));
-    // Sequential in `index_order` (included files before includers) so a
-    // header that embeds `struct IDeviceIoService service` sees that type's
-    // layout, and a header that uses `GpioIrqFunc` sees the typedef. Parallel
-    // isolation interned those as empty tags / `Int` and dropped field stores.
+    index_progress(format!("pch: parse {} headers once", pch_headers.len()));
+    // Include-graph order (included files before includers), including
+    // preprocess-only edges so a header is never PCH'd in the same wave as a
+    // nested type the raw `#include` scanner missed. Nested merge copies
+    // types/typedefs only; TUs pull prototypes from every reachable header.
+    // Cyclic leftovers are indexed in `index_order`, never as a parallel wave.
     let mut header_ir_map: HashMap<PathBuf, Arc<UnitIndex>> = HashMap::new();
-    for path in &headers_for_macro_warm {
+    let (pch_waves, pch_cycles) = if jobs == 1 {
+        (vec![include_graph.index_order(&pch_headers)], Vec::new())
+    } else {
+        include_graph.index_waves(&pch_headers)
+    };
+    for wave in pch_waves {
+        if wave.is_empty() {
+            continue;
+        }
+        if jobs == 1 || wave.len() == 1 {
+            for path in &wave {
+                let unit = index_source_file(
+                    path,
+                    root,
+                    &include_graph,
+                    &index_opts,
+                    &source_cache,
+                    Some(&header_ir_map),
+                    &cpp_parse,
+                );
+                header_ir_map.insert(trace_ir::canonicalize(path), Arc::new(unit));
+            }
+        } else {
+            let snapshot = header_ir_map.clone();
+            let units: Vec<(PathBuf, UnitIndex)> = pool.install(|| {
+                wave.par_iter()
+                    .map(|path| {
+                        (
+                            path.clone(),
+                            index_source_file(
+                                path,
+                                root,
+                                &include_graph,
+                                &index_opts,
+                                &source_cache,
+                                Some(&snapshot),
+                                &cpp_parse,
+                            ),
+                        )
+                    })
+                    .collect()
+            });
+            for (path, unit) in units {
+                header_ir_map.insert(trace_ir::canonicalize(&path), Arc::new(unit));
+            }
+        }
+    }
+    for path in include_graph.index_order(&pch_cycles) {
         let unit = index_source_file(
-            path,
+            &path,
             root,
             &include_graph,
             &index_opts,
@@ -305,7 +367,7 @@ pub fn build_program_with_jobs(
             Some(&header_ir_map),
             &cpp_parse,
         );
-        header_ir_map.insert(trace_ir::canonicalize(path), Arc::new(unit));
+        header_ir_map.insert(trace_ir::canonicalize(&path), Arc::new(unit));
     }
     let header_ir = Arc::new(header_ir_map);
     index_progress(format!(
@@ -313,11 +375,12 @@ pub fn build_program_with_jobs(
         pch_t.elapsed().as_secs_f64(),
         header_ir.len()
     ));
-    for path in &headers_for_macro_warm {
-        if let Some(unit) = header_ir.get(path) {
+    for path in include_graph.index_order(&header_ir.keys().cloned().collect::<Vec<_>>()) {
+        if let Some(unit) = header_ir.get(&path) {
             merge_unit_index(&mut program, unit.as_ref().clone());
         }
     }
+    program.types.complete_nested_tags();
 
     pool.install(|| {
         if jobs == 1 {
@@ -429,6 +492,7 @@ pub fn build_program_with_jobs(
         }
     });
 
+    program.types.complete_nested_tags();
     program.include_deps = include_graph.edge_list();
     for dir in &include_graph.include_dirs {
         if !program.include_paths.iter().any(|p| p == dir) {
@@ -629,6 +693,57 @@ fn project_preprocess_opts(
     eff
 }
 
+fn is_index_header(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        crate::discover::HEADER_EXTENSIONS
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(e))
+    })
+}
+
+/// Headers whose IR must be visible before lowering `self_canon`.
+///
+/// PCH (`types_only`): direct include-graph edges plus this file's preprocess
+/// `included_headers`. Child units already nested-merged grandchild types, so
+/// walking the full reachable DAG only repeats `merge_types`.
+///
+/// TUs: graph reachability so nested prototypes stay available even when a
+/// cached splice omits them from `included_headers` (direct-only dropped
+/// `DispatchToMessage` from `hdf_wifi_core.c` via `sidecar.h`).
+fn headers_to_merge(
+    graph: &IncludeGraph,
+    self_canon: &PathBuf,
+    included_headers: &[PathBuf],
+    types_only: bool,
+) -> Vec<PathBuf> {
+    let mut headers: Vec<PathBuf> = if types_only {
+        graph
+            .edges
+            .get(self_canon)
+            .into_iter()
+            .flatten()
+            .filter(|h| *h != self_canon && is_index_header(h))
+            .cloned()
+            .collect()
+    } else {
+        let mut seeds = HashSet::new();
+        seeds.insert(self_canon.clone());
+        graph
+            .reachable_from(&seeds)
+            .into_iter()
+            .filter(|h| h != self_canon && is_index_header(h))
+            .collect()
+    };
+    for h in included_headers {
+        if h != self_canon && is_index_header(h) {
+            headers.push(h.clone());
+        }
+    }
+    headers.sort();
+    headers.dedup();
+    graph.index_order(&headers)
+}
+
 fn index_lang(path: &Path, cpp_parse: &HashSet<PathBuf>) -> crate::parse::SourceLang {
     let canon = trace_ir::canonicalize(path);
     if crate::parse::SourceLang::from_path(&canon) == crate::parse::SourceLang::Cpp
@@ -670,11 +785,7 @@ fn index_source_file(
                             .symbols
                             .files
                             .get(f.span.file.0 as usize)
-                            .is_some_and(|fi| {
-                                fi.path
-                                    .extension()
-                                    .is_some_and(|e| e.eq_ignore_ascii_case("h"))
-                            })
+                            .is_some_and(|fi| is_index_header(&fi.path))
                     })
                     .count();
                 eprintln!(
@@ -713,34 +824,22 @@ fn process_indexed_file(
     let self_canon = trace_ir::canonicalize(path);
     let file_id = program.symbols.add_file_interned(self_canon.clone());
     if let Some(ir) = header_ir {
-        // Sequential PCH already nested-merged types/typedefs into each
-        // header's UnitIndex, so TUs only need direct includes plus the
-        // preprocessor's `included_headers` (a cached splice can omit a
-        // nested path from the graph edge). Full include-graph closure
-        // re-merged hundreds of units per TU and blew up index time.
-        let mut headers: Vec<PathBuf> = graph
-            .edges
-            .get(&self_canon)
-            .into_iter()
-            .flatten()
-            .cloned()
-            .chain(pre.included_headers.iter().cloned())
-            .filter(|h| h != &self_canon)
-            .collect();
-        headers.sort();
-        headers.dedup();
-        // Include-graph order so leftover incomplete tags intern after
-        // the headers that define them (`complete_nested_tags` follows).
-        let headers = graph.index_order(&headers);
+        // Nested PCH copies types/typedefs only so ancestor units stay small.
+        // TUs merge prototypes from every reachable header (the defining
+        // unit keeps call sites/flow). Direct-edges + included_headers used
+        // to miss `sidecar.h` for `hdf_wifi_core.c`, dropping
+        // `DispatchToMessage` from `DeviceNodeExtDispatch`.
+        let types_only = is_index_header(path);
+        let headers = headers_to_merge(graph, &self_canon, &pre.included_headers, types_only);
         for h in headers {
             let key = trace_ir::canonicalize(&h);
             if let Some(unit) = ir.get(&key) {
-                let mut unit = unit.as_ref().clone();
-                // Headers are already merged (with diagnostics) into the
-                // global program; repeating their parse warnings per TU
-                // would multiply counts by the number of includers.
-                unit.diagnostics.clear();
-                merge_unit_index(program, unit);
+                let slice = if types_only {
+                    unit.clone_types_only()
+                } else {
+                    unit.clone_symbols_only()
+                };
+                merge_unit_index(program, slice);
             }
             let hid = program.symbols.add_file_interned(key);
             if hid != file_id {
@@ -787,6 +886,7 @@ fn process_indexed_file(
     };
     lower_tree(program, &mut ctx, &parsed.source, parsed.tree.root_node());
     resolve_pending_fn_refs(program, &ctx);
+    program.types.complete_nested_tags();
     Ok(())
 }
 

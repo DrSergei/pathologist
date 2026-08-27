@@ -53,6 +53,17 @@ impl IndexSourceCache {
         }
         Ok(src)
     }
+
+    /// Canonical file → project headers it `#include`d during preprocess.
+    pub fn included_by_file(&self) -> Vec<(PathBuf, Vec<PathBuf>)> {
+        let Ok(guard) = self.inner.read() else {
+            return Vec::new();
+        };
+        guard
+            .iter()
+            .map(|(path, src)| (path.clone(), src.included_headers.as_ref().clone()))
+            .collect()
+    }
 }
 
 fn read_index_source(

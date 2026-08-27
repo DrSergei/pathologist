@@ -8,7 +8,7 @@ mod common;
 use common::*;
 use trace_analysis::{analyze, ResolutionKind};
 use trace_ir::Linkage;
-use trace_parse::build_program;
+use trace_parse::{build_program, build_program_with_jobs};
 
 /// `struct Widget *WidgetGet(void);` is declared in a header and defined in
 /// another TU. Lowering used to register a *variable* named `WidgetGet` for
@@ -458,6 +458,69 @@ fn nested_header_struct_field_store_resolves() {
             ResolutionKind::Indirect
         ),
         "launch -> s->Dispatch must see StreamDispatch stored via host->service.Dispatch"
+    );
+}
+
+/// HDF `wifiService = { .object.objectId = 1, .Dispatch = DispatchToMessage }`:
+/// nested `HdfObject` prefix plus a prototype that lives in a nested header
+/// (`sidecar.h` via `wrapper.h`, not a direct include of the store TU).
+#[test]
+fn nested_designated_embedded_object_resolves() {
+    let root = fixture("nested_designated_dispatch");
+    let program = build_program(&root, &default_opts(&root)).expect("build");
+    let (_pag, analysis) = analyze(&program);
+
+    assert!(
+        has_edge(
+            &program,
+            &analysis,
+            "launch",
+            "DispatchToMessage",
+            ResolutionKind::Indirect
+        ),
+        "launch -> g_svc.Dispatch must see DispatchToMessage from designated init"
+    );
+}
+
+/// Raw `#include` scanner misses `#include OBJECT_HDR`. Parallel PCH must
+/// still serialize `object.h` before `device.h` via preprocess edges, and
+/// the nested designated store must resolve (jobs>1).
+#[test]
+fn macro_include_nested_object_resolves() {
+    let root = fixture("macro_include_dispatch");
+    let program = build_program_with_jobs(&root, &default_opts(&root), 2).expect("build");
+    let (_pag, analysis) = analyze(&program);
+
+    assert!(
+        has_edge(
+            &program,
+            &analysis,
+            "launch",
+            "DispatchToMessage",
+            ResolutionKind::Indirect
+        ),
+        "launch -> g_svc.Dispatch must see DispatchToMessage via #include MACRO"
+    );
+}
+
+/// `.hpp` reachable only from `.cpp` used to skip the warm/PCH header set
+/// (filter was `.h` only). With `inline_include_bodies = false` the TU
+/// remainder has no layout, so the field store was dropped.
+#[test]
+fn hpp_header_is_warmed_and_resolves() {
+    let root = fixture("hpp_designated_dispatch");
+    let program = build_program_with_jobs(&root, &default_opts(&root), 2).expect("build");
+    let (_pag, analysis) = analyze(&program);
+
+    assert!(
+        has_edge(
+            &program,
+            &analysis,
+            "launch",
+            "DispatchToMessage",
+            ResolutionKind::Indirect
+        ),
+        "launch -> g_svc.Dispatch must see DispatchToMessage stored via layout.hpp"
     );
 }
 

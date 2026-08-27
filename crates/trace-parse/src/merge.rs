@@ -27,6 +27,41 @@ pub struct UnitIndex {
     pub final_classes: Vec<String>,
 }
 
+impl UnitIndex {
+    /// Types, aliases, and inheritance only — used when a header is lowered
+    /// after its includes so nested structs/typedefs are visible, without
+    /// copying the child's functions/flow into every ancestor unit.
+    pub fn clone_types_only(&self) -> UnitIndex {
+        UnitIndex {
+            path: self.path.clone(),
+            files: self.files.clone(),
+            types: self.types.clone(),
+            inheritance: self.inheritance.clone(),
+            final_classes: self.final_classes.clone(),
+            anon_type_counter: self.anon_type_counter,
+            ..Default::default()
+        }
+    }
+
+    /// Symbols without executable IR. Header bodies are already in the
+    /// global program from PCH; TUs only need types and prototypes so
+    /// lowering can resolve names and field layouts.
+    pub fn clone_symbols_only(&self) -> UnitIndex {
+        UnitIndex {
+            path: self.path.clone(),
+            files: self.files.clone(),
+            types: self.types.clone(),
+            functions: self.functions.clone(),
+            variables: self.variables.clone(),
+            inheritance: self.inheritance.clone(),
+            final_classes: self.final_classes.clone(),
+            anon_type_counter: self.anon_type_counter,
+            diagnostics: Vec::new(),
+            ..Default::default()
+        }
+    }
+}
+
 type SiteKey = (trace_ir::FileId, u32, u32, String);
 
 pub fn merge_unit_index(program: &mut Program, unit: UnitIndex) {
@@ -280,7 +315,6 @@ fn merge_types(
             dst.register_alias(alias, desc.clone());
         }
     }
-    dst.complete_nested_tags();
     map
 }
 

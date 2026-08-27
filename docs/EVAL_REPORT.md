@@ -20,24 +20,24 @@ C++ fixture coverage (`cpp_basic`, `cpp_dispatch`, `cpp_callable`, `cpp_flow`, �
 
 | Step | Time |
 |------|-----:|
-| Index | 12.8s |
-| Analyze | 1.1s |
+| Index | 4.4s |
+| Analyze | 1.6s |
 | Export | 0.8s |
-| **Wall** | **14.8s** |
+| **Wall** | **7.0s** |
 
 | Metric | Value |
 |--------|------:|
 | Files | 1,483 |
-| Functions | 11,800 (9,398 defined / 2,402 external) |
-| Call edges | 40,273 |
-| Direct / indirect / external | 20,532 / **4,431** / 15,310 |
-| Arg-flow edges | 31,828 |
+| Functions | 11,779 (9,399 defined / 2,380 external) |
+| Call edges | 40,337 |
+| Direct / indirect / external | 20,887 / **4,464** / 14,986 |
+| Arg-flow edges | 32,382 |
 | Parse warnings | 370 |
 | `dlsym` PAG edges | 4 |
 
-Sequential PCH (626 headers, nested types/typedefs) is the index cost versus an earlier parallel-PCH run (~3.3s) that dropped `DeviceNodeExtDispatch` and `gpio->func`. Direct edges recovered once C header prototypes merged with `.c` definitions.
+Sequential warm, then **wave-parallel PCH** (626 headers). Nested merge is **types/typedefs** from **direct** includes plus this header's preprocess `included_headers` (child units already nested-merged grandchild types). Each TU merges **symbols** from every include-graph-reachable header plus preprocess `included_headers`. After warm, preprocess `included_headers` are added as include-graph edges so a header is never PCH'd in the same wave as a nested type the raw `#include` scanner missed; headers that become reachable only then move from the orphan path into PCH. Include-graph **cycles** are indexed in order, not as a parallel leftover wave. That was the `DeviceNodeExtDispatch` 73→72 drop (`DispatchToMessage`): `hdf_wifi_core.c` designated `.object.objectId = 1, .Dispatch = DispatchToMessage` needs a complete `struct HdfObject` prefix inside `IDeviceIoService`. Parallel leaves used to intern that nested tag empty; sequential path-sort happened to PCH `hdf_object.h` first. With preprocess edges, waves keep all 73 names (including `DispatchToMessage`). `pch-done` 0.2s vs 1.0s sequential.
 
-Hub unique-indirect counts vs the original eval: `DeviceNodeExtDispatch` **73**, `HdfDeviceLaunchNode` **125**, `HdfSbufReadBuffer` **2**, `StreamDispatch` **24**, `HdfCameraDispatch` **23**, `HdfPmDriverDispatch` **19**, `HdfObjectManagerGetObject` **18**, `PlatformDumperDump` **13**, `SetOption` **13**, `DeviceDriverBind` 122 edges / **106** names, `GpioOnDevEventReceive` 13 edges / **12** names. Leftovers: `HdfDeviceUnlaunchNode` **112** names (was 116), linux `WorkEntry` **20** (was 19, extra `AlsDataWorkEntry`).
+Hub unique-indirect counts are unchanged vs the previous correct snapshot: `DeviceNodeExtDispatch` **73** (includes `DispatchToMessage`), `HdfDeviceLaunchNode` **125**, `HdfSbufReadBuffer` **2**, `StreamDispatch` **24**, `HdfCameraDispatch` **23**, `HdfPmDriverDispatch` **19**, `HdfObjectManagerGetObject` **18**, `PlatformDumperDump` **13**, `SetOption` **13**, `DeviceDriverBind` 122 edges / **106** names, `GpioOnDevEventReceive` 13 edges / **12** names. Leftovers: `HdfDeviceUnlaunchNode` **112** names (was 116), linux `WorkEntry` **20** (was 19, extra `AlsDataWorkEntry`).
 
 ## Cases
 
@@ -1372,6 +1372,118 @@ Obtain constructor vtable after `dlsym` stores.
 - `SbufObtainIpcHw`
 - `SbufObtainRaw`
 
+### 45. `DeviceServiceStubDispatch` — User-space IOService dispatch
+
+| Field | Value |
+|-------|-------|
+| File | `adapter/uhdf2/host/src/device_service_stub.c` |
+| Line | 26–60 |
+| Function | `DeviceServiceStubDispatch` |
+| Function-pointer sites | `ioService->Dispatch` (line 53) |
+| Resolved targets | **73** |
+
+Same `IDeviceIoService.Dispatch` field as case 1, from the UHDF2 stub. Target set is **identical** to `DeviceNodeExtDispatch` (verified), including `DispatchToMessage`.
+
+**Resolved function-pointer targets:** same 73 names as case 1.
+
+### 46. `HdfKIoServiceDispatch` — Kernel vnode IOService dispatch
+
+| Field | Value |
+|-------|-------|
+| File | `framework/core/adapter/vnode/src/hdf_vnode_adapter.c` |
+| Line | 56–71 |
+| Function | `HdfKIoServiceDispatch` |
+| Function-pointer sites | `kClient->client.device->service->Dispatch` (line 70) |
+| Resolved targets | **73** |
+
+Kernel vnode path onto the same `Dispatch` field. Target set is **identical** to case 1 (verified), including `DispatchToMessage`.
+
+**Resolved function-pointer targets:** same 73 names as case 1.
+
+### 47. `HdfObjectManagerFreeObject` — Object-factory Release
+
+| Field | Value |
+|-------|-------|
+| File | `framework/core/shared/src/hdf_object_manager.c` |
+| Line | 24–35 |
+| Function | `HdfObjectManagerFreeObject` |
+| Function-pointer sites | `targetCreator->Release` (line 34) |
+| Resolved targets | **13** |
+
+Teardown counterpart of case 37 (`Create` has 18; five creator-table slots set `Release = NULL` and correctly contribute no target).
+
+**Resolved function-pointer targets:**
+
+- `DevHostServiceRelease`
+- `DevHostServiceStubRelease`
+- `DevSvcManagerExtRelease`
+- `DevSvcManagerProxyRelease`
+- `DevSvcManagerRelease`
+- `DeviceNodeExtRelease`
+- `DeviceServiceStubRelease`
+- `DeviceTokenStubRelease`
+- `DevmgrServiceProxyRelease`
+- `DevmgrServiceRelease`
+- `HdfDeviceRelease`
+- `HdfDeviceTokenRelease`
+- `HdfDriverLoaderFullRelease`
+
+### 48. `Enable` — Sensor ops Enable
+
+| Field | Value |
+|-------|-------|
+| File | `framework/model/sensor/driver/common/src/sensor_device_manager.c` |
+| Line | 162–169 |
+| Function | `Enable` |
+| Function-pointer sites | `deviceInfo->ops.Enable` (line 168) |
+| Resolved targets | **13** |
+
+All 13 production `deviceInfo->ops.Enable = Set*Enable` stores (accel/als/barometer/gas/gravity/gyro/hall/humidity/magnetic/pedometer/ppg/proximity/temperature). `SensorEnableTest` in the unittest file writes a **different** struct and is not a source for this site.
+
+**Resolved function-pointer targets:**
+
+- `SetAccelEnable`
+- `SetAlsEnable`
+- `SetBarometerEnable`
+- `SetGasEnable`
+- `SetGravityEnable`
+- `SetGyroEnable`
+- `SetHallEnable`
+- `SetHumidityEnable`
+- `SetMagneticEnable`
+- `SetPedometerEnable`
+- `SetPpgEnable`
+- `SetProximityEnable`
+- `SetTemperatureEnable`
+
+### 49. `Disable` — Sensor ops Disable
+
+| Field | Value |
+|-------|-------|
+| File | `framework/model/sensor/driver/common/src/sensor_device_manager.c` |
+| Line | 171–179 |
+| Function | `Disable` |
+| Function-pointer sites | `deviceInfo->ops.Disable` (line 178) |
+| Resolved targets | **13** |
+
+Same 13 drivers as case 48, `Set*Disable` stores. Complete vs source.
+
+**Resolved function-pointer targets:**
+
+- `SetAccelDisable`
+- `SetAlsDisable`
+- `SetBarometerDisable`
+- `SetGasDisable`
+- `SetGravityDisable`
+- `SetGyroDisable`
+- `SetHallDisable`
+- `SetHumidityDisable`
+- `SetMagneticDisable`
+- `SetPedometerDisable`
+- `SetPpgDisable`
+- `SetProximityDisable`
+- `SetTemperatureDisable`
+
 ---
 
 # 2. `hiviewdfx_hiview`
@@ -1383,18 +1495,18 @@ Obtain constructor vtable after `dlsym` stores.
 
 | Step | Time |
 |------|-----:|
-| Index | 8.1s |
-| Analyze | 1.3s |
-| Export | 2.3s |
-| **Wall** | **11.1s** |
+| Index | 3.9s |
+| Analyze | 0.1s |
+| Export | 0.4s |
+| **Wall** | **3.7s** |
 
 | Metric | Value |
 |--------|------:|
 | Files | 1,424 |
-| Functions | 10,566 (6,421 defined / 4,145 external) |
-| Call edges | 19,832 |
-| Direct / indirect / external | 3,999 / **10** / 15,823 |
-| Arg-flow edges | 4,310 |
+| Functions | 10,582 (6,425 defined / 4,157 external) |
+| Call edges | 19,900 |
+| Direct / indirect / external | 4,056 / **10** / 15,834 |
+| Arg-flow edges | 4,367 |
 | Parse warnings | 462 |
 | `dlsym` PAG edges | 1 |
 
@@ -1649,6 +1761,132 @@ Same-class calls bind. Nested `EventStore::…`, `TriggerExportEngine`, `TimeUti
 
 **Resolved function-pointer / virtual targets:** none.
 
+### 15. `OHOS::HiviewDFX::EventHandler::OnEventProxy` — EventHandler CHA
+
+| Field | Value |
+|-------|-------|
+| File | `base/include/event.h` |
+| Line | 230–233 |
+| Function | `OHOS::HiviewDFX::EventHandler::OnEventProxy` |
+| Dispatch site | `OnEvent(event)` (line 232) |
+| Resolved targets | **27** |
+
+CHA from static type `EventHandler`. The 23 plugin `::OnEvent` names from case 2 plus four handlers that override `EventHandler` but not `Plugin`: `EventHandler::OnEvent`, `OverheadCalculateEventHandler`, `RealEventHandler`, `TestEventHandler`. Complete vs defined `::OnEvent` bodies under those two bases.
+
+**Resolved targets:**
+
+- `OHOS::HiviewDFX::BBoxDetectorPlugin::OnEvent`
+- `OHOS::HiviewDFX::BundlePluginExample1::OnEvent`
+- `OHOS::HiviewDFX::BundlePluginExample2::OnEvent`
+- `OHOS::HiviewDFX::BundlePluginExample3::OnEvent`
+- `OHOS::HiviewDFX::CrashValidator::OnEvent`
+- `OHOS::HiviewDFX::DynamicLoadPluginExample::OnEvent`
+- `OHOS::HiviewDFX::EventHandler::OnEvent`
+- `OHOS::HiviewDFX::EventLogger::OnEvent`
+- `OHOS::HiviewDFX::EventProcessorExample1::OnEvent`
+- `OHOS::HiviewDFX::EventProcessorExample2::OnEvent`
+- `OHOS::HiviewDFX::EventProcessorExample3::OnEvent`
+- `OHOS::HiviewDFX::EventProcessorExample4::OnEvent`
+- `OHOS::HiviewDFX::EventProcessorExample5::OnEvent`
+- `OHOS::HiviewDFX::EventValidator::OnEvent`
+- `OHOS::HiviewDFX::FaultDetectorManager::OnEvent`
+- `OHOS::HiviewDFX::Faultlogger::OnEvent`
+- `OHOS::HiviewDFX::FreezeDetectorPlugin::OnEvent`
+- `OHOS::HiviewDFX::OverheadCalculateEventHandler::OnEvent`
+- `OHOS::HiviewDFX::Plugin::OnEvent`
+- `OHOS::HiviewDFX::PluginExample::OnEvent`
+- `OHOS::HiviewDFX::PluginProxy::OnEvent`
+- `OHOS::HiviewDFX::PrivacyController::OnEvent`
+- `OHOS::HiviewDFX::RealEventHandler::OnEvent`
+- `OHOS::HiviewDFX::SysEventDispatcher::OnEvent`
+- `OHOS::HiviewDFX::SysEventStore::OnEvent`
+- `OHOS::HiviewDFX::TestEventHandler::OnEvent`
+- `OHOS::HiviewDFX::UsageEventReport::OnEvent`
+
+### 16. `OHOS::HiviewDFX::PluginProxy::CanProcessEvent` — Field receiver CHA
+
+| Field | Value |
+|-------|-------|
+| File | `base/plugin_proxy.cpp` |
+| Line | 33–40 |
+| Function | `OHOS::HiviewDFX::PluginProxy::CanProcessEvent` |
+| Dispatch site | `plugin_->CanProcessEvent(event)` (line 39) |
+| Resolved targets | **12** |
+
+All 11 `Plugin::CanProcessEvent` overrides in tree plus the proxy itself. `Pipeline::CanProcessEvent` takes `PipelineEvent` and is a different function. Complete vs source.
+
+**Resolved targets:**
+
+- `OHOS::HiviewDFX::BundlePluginExample1::CanProcessEvent`
+- `OHOS::HiviewDFX::BundlePluginExample2::CanProcessEvent`
+- `OHOS::HiviewDFX::BundlePluginExample3::CanProcessEvent`
+- `OHOS::HiviewDFX::EventProcessorExample1::CanProcessEvent`
+- `OHOS::HiviewDFX::EventProcessorExample2::CanProcessEvent`
+- `OHOS::HiviewDFX::EventProcessorExample3::CanProcessEvent`
+- `OHOS::HiviewDFX::EventProcessorExample4::CanProcessEvent`
+- `OHOS::HiviewDFX::EventProcessorExample5::CanProcessEvent`
+- `OHOS::HiviewDFX::Faultlogger::CanProcessEvent`
+- `OHOS::HiviewDFX::FreezeDetectorPlugin::CanProcessEvent`
+- `OHOS::HiviewDFX::Plugin::CanProcessEvent`
+- `OHOS::HiviewDFX::PluginProxy::CanProcessEvent`
+
+### 17. `OHOS::HiviewDFX::PluginProxy::OnEventListeningCallback` — Listener CHA
+
+| Field | Value |
+|-------|-------|
+| File | `base/plugin_proxy.cpp` |
+| Line | 75–83 |
+| Function | `OHOS::HiviewDFX::PluginProxy::OnEventListeningCallback` |
+| Dispatch site | `plugin_->OnEventListeningCallback(msg)` (line 81) |
+| Resolved targets | **8** |
+
+**Complete for this analysis config.** Eight overrides remain after preprocess. `UnifiedCollector::OnEventListeningCallback` exists in source (`unified_collector.h:36`, `unified_collector.cpp:201`) but only under `#ifdef UNIFIED_COLLECTOR_TRACE_ENABLE`. GN sets that define when `hiview_unified_collector_trace_enable` is on (`plugins/unified_collector/BUILD.gn`). `trace analyze` does not pass OpenHarmony product flags, so the preprocessor strips both the declaration and the body. CHA then only sees `Plugin`'s empty default in `plugin.h`. Not a CHA miss: this run is the trace-disabled variant of the plugin. Passing `-D UNIFIED_COLLECTOR_TRACE_ENABLE` would include the override.
+
+**Resolved targets:**
+
+- `OHOS::HiviewDFX::BundlePluginExample3::OnEventListeningCallback`
+- `OHOS::HiviewDFX::EventProcessorExample4::OnEventListeningCallback`
+- `OHOS::HiviewDFX::FaultDetectorManager::OnEventListeningCallback`
+- `OHOS::HiviewDFX::Faultlogger::OnEventListeningCallback`
+- `OHOS::HiviewDFX::FreezeDetectorPlugin::OnEventListeningCallback`
+- `OHOS::HiviewDFX::Plugin::OnEventListeningCallback`
+- `OHOS::HiviewDFX::PluginProxy::OnEventListeningCallback`
+- `OHOS::HiviewDFX::XperfPlugin::OnEventListeningCallback`
+
+### 18. `OHOS::HiviewDFX::EventLoop::ProcessEvent` — Handler OnEventProxy
+
+| Field | Value |
+|-------|-------|
+| File | `base/event_loop.cpp` |
+| Line | 492–511 |
+| Function | `OHOS::HiviewDFX::EventLoop::ProcessEvent` |
+| Dispatch site | `event.handler->OnEventProxy(event.event)` (line 498) |
+| Resolved targets | **2** |
+
+Typed `EventHandler*` receiver CHA to the two `OnEventProxy` implementations (`EventHandler` inline, `Plugin` override). Fan-out from those proxies to `::OnEvent` is cases 2 and 15. (`event.task()` / packaged tasks remain unresolved — case 10.)
+
+**Resolved targets:**
+
+- `OHOS::HiviewDFX::EventHandler::OnEventProxy`
+- `OHOS::HiviewDFX::Plugin::OnEventProxy`
+
+### 19. `OHOS::HiviewDFX::PluginProxy::GetHandlerInfo` — Field receiver
+
+| Field | Value |
+|-------|-------|
+| File | `base/plugin_proxy.cpp` |
+| Line | 55–65 |
+| Function | `OHOS::HiviewDFX::PluginProxy::GetHandlerInfo` |
+| Dispatch site | `plugin_->GetHandlerInfo()` (line 62) |
+| Resolved targets | **2** |
+
+Only `Plugin` and `PluginProxy` define `GetHandlerInfo` in this tree. Complete vs source.
+
+**Resolved targets:**
+
+- `OHOS::HiviewDFX::Plugin::GetHandlerInfo`
+- `OHOS::HiviewDFX::PluginProxy::GetHandlerInfo`
+
 ---
 
 # 3. Camera and clang/test
@@ -1663,21 +1901,213 @@ Hang / stack-overflow checks, not dispatch-hub evals. PCH-style header IR is wha
 
 | Step | Time |
 |------|-----:|
-| Index | 30.1s |
-| Analyze | 8.7s |
-| Export | 13.2s |
-| **Wall** | **51.9s** |
+| Index | 11.3s |
+| Analyze | 0.3s |
+| Export | 1.4s |
+| **Wall** | **13.0s** |
 
 | Metric | Value |
 |--------|------:|
 | Files | 1,593 |
-| Functions | 23,003 (16,180 defined / 6,823 external) |
-| Call edges | 44,788 |
-| Direct / indirect / external | 13,156 / **0** / 31,632 |
-| Arg-flow edges | 10,225 |
+| Functions | 22,981 (16,172 defined / 6,809 external) |
+| Call edges | 45,518 |
+| Direct / indirect / external | 13,618 / **117** / 31,783 |
+| Arg-flow edges | 10,858 |
 | Parse warnings | 776 |
 
-Completes. No function-pointer hub list for this corpus (not an OpenHarmony dispatch eval). Indirect **0** on this binary (117 on an earlier parallel-PCH run).
+Completes. The 117 indirect edges are almost all fuzzer `FuzzedDataProvider` calls; production dispatch is recovered as **direct** CHA. Five verified production cases follow.
+
+### Cases
+
+### 1. `OHOS::CameraStandard::DeferredProcessing::Command::Do` — `Executing`
+
+| Field | Value |
+|-------|-------|
+| File | `services/deferred_processing_service/src/base/command_server/command.cpp` |
+| Line | 33–42 |
+| Function | `OHOS::CameraStandard::DeferredProcessing::Command::Do` |
+| Dispatch site | `Executing()` (line 37) |
+| Resolved targets | **30** (29 defined overrides + pure-virtual `Command::Executing` external) |
+
+`Executing` is pure virtual on `Command`. Source has 29 out-of-line overrides; all 29 resolve. `ServiceDiedCommand` has no `Executing` body (abstract) and is correctly absent.
+
+**Resolved targets:**
+
+- `OHOS::CameraStandard::DeferredProcessing::AddPhotoCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::AddPhotoSessionCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::AddVideoCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::AddVideoSessionCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::CancelProcessPhotoCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::CancelProcessVideoCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::Command::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::DeletePhotoSessionCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::DeleteVideoSessionCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::EventStatusChangeCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::NotifyJobChangedCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::NotifyVideoJobChangedCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::PhotoDiedCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::PhotoProcessFailedCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::PhotoProcessSuccessCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::PhotoProcessTimeOutCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::PhotoSyncCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::ProcessCachePhotoCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::ProcessPhotoCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::ProcessVideoCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::RemovePhotoCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::RemoveVideoCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::RestorePhotoCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::RestoreVideoCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::VideoDiedCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::VideoProcessFailedCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::VideoProcessSuccessCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::VideoProcessTimeOutCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::VideoStateChangedCommand::Executing`
+- `OHOS::CameraStandard::DeferredProcessing::VideoSyncCommand::Executing`
+
+### 2. `OHOS::CameraStandard::DeferredProcessing::Command::Do` — `GetCommandName`
+
+| Field | Value |
+|-------|-------|
+| File | `services/deferred_processing_service/src/base/command_server/command.cpp` |
+| Line | 33–42 |
+| Function | `OHOS::CameraStandard::DeferredProcessing::Command::Do` |
+| Dispatch site | `GetCommandName()` (line 35) |
+| Resolved targets | **31** |
+
+`DECLARE_COMMAND` inline overrides plus `ServiceDiedCommand` (name only) and the pure-virtual `Command::GetCommandName` external. Matches every command class that exists in tree.
+
+**Resolved targets:**
+
+- `OHOS::CameraStandard::DeferredProcessing::AddPhotoCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::AddPhotoSessionCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::AddVideoCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::AddVideoSessionCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::CancelProcessPhotoCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::CancelProcessVideoCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::Command::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::DeletePhotoSessionCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::DeleteVideoSessionCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::EventStatusChangeCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::NotifyJobChangedCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::NotifyVideoJobChangedCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::PhotoDiedCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::PhotoProcessFailedCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::PhotoProcessSuccessCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::PhotoProcessTimeOutCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::PhotoSyncCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::ProcessCachePhotoCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::ProcessPhotoCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::ProcessVideoCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::RemovePhotoCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::RemoveVideoCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::RestorePhotoCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::RestoreVideoCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::ServiceDiedCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::VideoDiedCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::VideoProcessFailedCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::VideoProcessSuccessCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::VideoProcessTimeOutCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::VideoStateChangedCommand::GetCommandName`
+- `OHOS::CameraStandard::DeferredProcessing::VideoSyncCommand::GetCommandName`
+
+### 3. `OHOS::CameraStandard::CFilter::PrepareDone` — `DoPrepare`
+
+| Field | Value |
+|-------|-------|
+| File | `mediastream/src/filter/cfilter.cpp` |
+| Line | ~101 |
+| Function | `OHOS::CameraStandard::CFilter::PrepareDone` |
+| Dispatch site | `DoPrepare()` |
+| Resolved targets | **18** |
+
+All 17 `CFilter` subclasses that define `DoPrepare` plus the base. Complete vs `::DoPrepare(` in `mediastream/src/filter/`.
+
+**Resolved targets:**
+
+- `OHOS::CameraStandard::AudioCacheFilter::DoPrepare`
+- `OHOS::CameraStandard::AudioCaptureFilter::DoPrepare`
+- `OHOS::CameraStandard::AudioEncoderFilter::DoPrepare`
+- `OHOS::CameraStandard::AudioForkFilter::DoPrepare`
+- `OHOS::CameraStandard::AudioProcessFilter::DoPrepare`
+- `OHOS::CameraStandard::CFilter::DoPrepare`
+- `OHOS::CameraStandard::CinematicVideoCacheFilter::DoPrepare`
+- `OHOS::CameraStandard::DemuxerFilter::DoPrepare`
+- `OHOS::CameraStandard::ImageEffectFilter::DoPrepare`
+- `OHOS::CameraStandard::MetaCacheFilter::DoPrepare`
+- `OHOS::CameraStandard::MetaDataFilter::DoPrepare`
+- `OHOS::CameraStandard::MovingPhotoAudioEncoderFilter::DoPrepare`
+- `OHOS::CameraStandard::MovingPhotoMuxerFilter::DoPrepare`
+- `OHOS::CameraStandard::MovingPhotoVideoEncoderFilter::DoPrepare`
+- `OHOS::CameraStandard::MuxerFilter::DoPrepare`
+- `OHOS::CameraStandard::SinkFilter::DoPrepare`
+- `OHOS::CameraStandard::VideoCacheFilter::DoPrepare`
+- `OHOS::CameraStandard::VideoEncoderFilter::DoPrepare`
+
+### 4. `OHOS::CameraStandard::Pipeline::LinkFilters` — `LinkNext`
+
+| Field | Value |
+|-------|-------|
+| File | `mediastream/src/pipeline/pipeline.cpp` |
+| Line | ~243 |
+| Function | `OHOS::CameraStandard::Pipeline::LinkFilters` |
+| Dispatch site | `LinkNext` |
+| Resolved targets | **18** |
+
+Same 17 filter subclasses plus `CFilter::LinkNext`. Complete vs `::LinkNext(` in `mediastream/src/filter/`.
+
+**Resolved targets:**
+
+- `OHOS::CameraStandard::AudioCacheFilter::LinkNext`
+- `OHOS::CameraStandard::AudioCaptureFilter::LinkNext`
+- `OHOS::CameraStandard::AudioEncoderFilter::LinkNext`
+- `OHOS::CameraStandard::AudioForkFilter::LinkNext`
+- `OHOS::CameraStandard::AudioProcessFilter::LinkNext`
+- `OHOS::CameraStandard::CFilter::LinkNext`
+- `OHOS::CameraStandard::CinematicVideoCacheFilter::LinkNext`
+- `OHOS::CameraStandard::DemuxerFilter::LinkNext`
+- `OHOS::CameraStandard::ImageEffectFilter::LinkNext`
+- `OHOS::CameraStandard::MetaCacheFilter::LinkNext`
+- `OHOS::CameraStandard::MetaDataFilter::LinkNext`
+- `OHOS::CameraStandard::MovingPhotoAudioEncoderFilter::LinkNext`
+- `OHOS::CameraStandard::MovingPhotoMuxerFilter::LinkNext`
+- `OHOS::CameraStandard::MovingPhotoVideoEncoderFilter::LinkNext`
+- `OHOS::CameraStandard::MuxerFilter::LinkNext`
+- `OHOS::CameraStandard::SinkFilter::LinkNext`
+- `OHOS::CameraStandard::VideoCacheFilter::LinkNext`
+- `OHOS::CameraStandard::VideoEncoderFilter::LinkNext`
+
+### 5. `OHOS::CameraStandard::CaptureSession::AddOutput` — `CanAddOutput`
+
+| Field | Value |
+|-------|-------|
+| File | `frameworks/native/camera/base/src/session/capture_session.cpp` |
+| Line | ~1272 |
+| Function | `OHOS::CameraStandard::CaptureSession::AddOutput` |
+| Dispatch site | `CanAddOutput` |
+| Resolved targets | **18** |
+
+Base `CaptureSession::CanAddOutput` plus every session subclass that overrides it in `frameworks/native/camera/`. `CaptureSessionForSys` has no override (stitching calls it through inheritance). Complete vs `::CanAddOutput(` definitions.
+
+**Resolved targets:**
+
+- `OHOS::CameraStandard::ApertureVideoSession::CanAddOutput`
+- `OHOS::CameraStandard::CaptureSession::CanAddOutput`
+- `OHOS::CameraStandard::FluorescencePhotoSession::CanAddOutput`
+- `OHOS::CameraStandard::HighResPhotoSession::CanAddOutput`
+- `OHOS::CameraStandard::MacroPhotoSession::CanAddOutput`
+- `OHOS::CameraStandard::MacroVideoSession::CanAddOutput`
+- `OHOS::CameraStandard::NightSession::CanAddOutput`
+- `OHOS::CameraStandard::PanoramaSession::CanAddOutput`
+- `OHOS::CameraStandard::PhotoSession::CanAddOutput`
+- `OHOS::CameraStandard::PhotoSessionForSys::CanAddOutput`
+- `OHOS::CameraStandard::PortraitSession::CanAddOutput`
+- `OHOS::CameraStandard::ProfessionSession::CanAddOutput`
+- `OHOS::CameraStandard::QuickShotPhotoSession::CanAddOutput`
+- `OHOS::CameraStandard::ScanSession::CanAddOutput`
+- `OHOS::CameraStandard::SlowMotionSession::CanAddOutput`
+- `OHOS::CameraStandard::StitchingPhotoSession::CanAddOutput`
+- `OHOS::CameraStandard::VideoSession::CanAddOutput`
+- `OHOS::CameraStandard::VideoSessionForSys::CanAddOutput`
 
 ## clang/test (llvm-project)
 

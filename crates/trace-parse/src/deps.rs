@@ -181,7 +181,93 @@ impl IncludeGraph {
         order
     }
 
-    /// All project files transitively reachable from `sources` via `#include` edges.
+    /// Topological waves: each wave's includes (inside `files`) are in
+    /// earlier waves, so the wave can be indexed in parallel.
+    ///
+    /// Cyclic leftovers are **not** a parallel wave: they still depend on
+    /// each other, so they must be indexed in [`index_order`] (the same
+    /// append [`index_order`] uses for cycles).
+    pub fn index_waves(&self, files: &[PathBuf]) -> (Vec<Vec<PathBuf>>, Vec<PathBuf>) {
+        let mut ordered_files: Vec<PathBuf> = files.to_vec();
+        ordered_files.sort();
+        let file_set: HashSet<PathBuf> = ordered_files.iter().cloned().collect();
+
+        let mut in_degree: IndexMap<PathBuf, usize> = IndexMap::new();
+        for f in &ordered_files {
+            in_degree.entry(f.clone()).or_insert(0);
+        }
+        for (dep, incs) in &self.edges {
+            if !file_set.contains(dep) {
+                continue;
+            }
+            for inc in incs {
+                if file_set.contains(inc) {
+                    *in_degree.entry(dep.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut reverse: IndexMap<PathBuf, Vec<PathBuf>> = IndexMap::new();
+        for (dep, incs) in &self.edges {
+            if !file_set.contains(dep) {
+                continue;
+            }
+            for inc in incs {
+                if file_set.contains(inc) {
+                    reverse.entry(inc.clone()).or_default().push(dep.clone());
+                }
+            }
+        }
+
+        let mut remaining: HashSet<PathBuf> = file_set;
+        let mut waves = Vec::new();
+        while !remaining.is_empty() {
+            let mut wave: Vec<PathBuf> = remaining
+                .iter()
+                .filter(|f| in_degree.get(*f).copied().unwrap_or(0) == 0)
+                .cloned()
+                .collect();
+            if wave.is_empty() {
+                let mut rest: Vec<PathBuf> = remaining.iter().cloned().collect();
+                rest.sort();
+                return (waves, rest);
+            }
+            wave.sort();
+            for node in &wave {
+                remaining.remove(node);
+                if let Some(dependents) = reverse.get(node) {
+                    for dep in dependents {
+                        if let Some(deg) = in_degree.get_mut(dep) {
+                            *deg = deg.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+            waves.push(wave);
+        }
+        (waves, Vec::new())
+    }
+
+    /// Record `#include` edges discovered only after preprocessing
+    /// (macro-expanded includes the raw scanner misses). Used to order PCH
+    /// so a header is not lowered in parallel with a nested type it needs.
+    pub fn add_preprocess_includes(&mut self, from: &Path, headers: &[PathBuf]) {
+        let from = canonicalize(from);
+        if !self.project_files.contains(&from) {
+            return;
+        }
+        for h in headers {
+            let to = canonicalize(h);
+            if to == from || !self.project_files.contains(&to) {
+                continue;
+            }
+            let e = self.edges.entry(from.clone()).or_default();
+            if !e.contains(&to) {
+                e.push(to);
+            }
+        }
+    }
+
     pub fn reachable_from(&self, sources: &HashSet<PathBuf>) -> HashSet<PathBuf> {
         let mut seen = HashSet::new();
         let mut queue: VecDeque<PathBuf> = sources.iter().cloned().collect();
@@ -332,7 +418,7 @@ mod tests {
 
         let c = vec![tmp.join("main.c")];
         let h = vec![tmp.join("api.h")];
-        let g = IncludeGraph::build(&tmp, &c, &h);
+        let mut g = IncludeGraph::build(&tmp, &c, &h);
         assert_eq!(g.edges.len(), 1);
         let deps = g.edges.get(&canonicalize(&tmp.join("main.c"))).unwrap();
         assert_eq!(deps.len(), 1);
@@ -346,6 +432,62 @@ mod tests {
         assert_eq!(order[0], canonicalize(&tmp.join("api.h")));
         assert_eq!(order[1], canonicalize(&tmp.join("main.c")));
 
+        let (waves, leftover) = g.index_waves(&all);
+        assert!(leftover.is_empty());
+        assert_eq!(waves.len(), 2);
+        assert_eq!(waves[0], vec![canonicalize(&tmp.join("api.h"))]);
+        assert_eq!(waves[1], vec![canonicalize(&tmp.join("main.c"))]);
+
+        // A preprocess-only include (raw scanner missed it) must still
+        // serialize the includer after the nested header.
+        let late = canonicalize(&tmp.join("late.h"));
+        fs::write(tmp.join("late.h"), "struct T { int y; };\n").unwrap();
+        g.project_files.insert(late.clone());
+        g.add_preprocess_includes(&tmp.join("main.c"), &[late.clone()]);
+        let all2 = [
+            canonicalize(&tmp.join("api.h")),
+            late.clone(),
+            canonicalize(&tmp.join("main.c")),
+        ];
+        let (waves2, leftover2) = g.index_waves(&all2);
+        assert!(leftover2.is_empty());
+        assert!(
+            waves2.iter().position(|w| w.contains(&late)).unwrap()
+                < waves2
+                    .iter()
+                    .position(|w| w.contains(&canonicalize(&tmp.join("main.c"))))
+                    .unwrap(),
+            "preprocess edge must put late.h before main.c"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn index_waves_keeps_include_cycles_sequential() {
+        let tmp = std::env::temp_dir().join(format!("trace_deps_cycle_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("a.h"), "#include \"b.h\"\nstruct A { int x; };\n").unwrap();
+        fs::write(tmp.join("b.h"), "#include \"a.h\"\nstruct B { int y; };\n").unwrap();
+        let h = vec![tmp.join("a.h"), tmp.join("b.h")];
+        let g = IncludeGraph::build(&tmp, &[], &h);
+        let all = [
+            canonicalize(&tmp.join("a.h")),
+            canonicalize(&tmp.join("b.h")),
+        ];
+        let (waves, leftover) = g.index_waves(&all);
+        assert!(
+            leftover.contains(&canonicalize(&tmp.join("a.h")))
+                && leftover.contains(&canonicalize(&tmp.join("b.h"))),
+            "cyclic pair must be leftover, not a parallel wave: waves={waves:?} leftover={leftover:?}"
+        );
+        assert!(
+            waves
+                .iter()
+                .all(|w| w.iter().all(|f| !leftover.contains(f))),
+            "leftover files must not also appear in a parallel wave"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 }

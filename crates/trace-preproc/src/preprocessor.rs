@@ -303,12 +303,7 @@ impl PreprocessorState {
             self.included_guard.extend(entry.files.iter().cloned());
             return true;
         }
-        if self
-            .output
-            .len()
-            .saturating_add(entry.text.len())
-            > self.opts.max_output_bytes
-        {
+        if self.output.len().saturating_add(entry.text.len()) > self.opts.max_output_bytes {
             self.warn(
                 1,
                 format!(
@@ -916,45 +911,39 @@ impl PreprocessorState {
         while i < tokens.len() && matches!(tokens[i].kind, TokenKind::Newline) {
             i += 1;
         }
-        let path = match &tokens.get(i).map(|t| &t.kind) {
-            Some(TokenKind::String(s)) => s.clone(),
-            Some(TokenKind::Punct(s)) if s == "<" => {
-                let mut header = String::new();
-                i += 1;
-                while i < tokens.len() {
-                    match &tokens[i].kind {
-                        TokenKind::Identifier(s) | TokenKind::Punct(s) if s != ">" => {
-                            header.push_str(s);
-                        }
-                        TokenKind::Punct(s) if s == ">" => break,
-                        _ => break,
-                    }
-                    i += 1;
-                }
-                header
+        let line = tokens.get(i).map(|t| t.line).unwrap_or(1);
+        // C11 6.10.2: a header-name (`"..."` / `<...>`) is taken as-is;
+        // otherwise the rest of the line is macro-expanded and must then
+        // form a header-name (`#include FOO` with `#define FOO "n.h"`).
+        let path = if let Some(p) = parse_include_header(&tokens[i..]) {
+            p
+        } else {
+            let mut end = i;
+            while end < tokens.len()
+                && !matches!(tokens[end].kind, TokenKind::Newline | TokenKind::Eof)
+            {
+                end += 1;
             }
-            _ => {
-                return Err(self.error(
-                    tokens.get(i).map(|t| t.line).unwrap_or(1),
-                    "expected string or <...> after #include",
-                ));
+            let expanded = self.expand_include_operand(&tokens[i..end])?;
+            match parse_include_header(&expanded) {
+                Some(p) => p,
+                None => {
+                    return Err(self.error(line, "expected string or <...> after #include"));
+                }
             }
         };
 
         let include_path = match self.resolve_include(&path) {
             Ok(p) => p,
             Err(_) => {
-                self.warn(
-                    tokens.get(i).map(|t| t.line).unwrap_or(1),
-                    format!("include file not found, skipping: {path}"),
-                );
-                return Ok(i + 1);
+                self.warn(line, format!("include file not found, skipping: {path}"));
+                return Ok(i);
             }
         };
         let live_at = self.output.len();
         if let Err(e) = self.process_file(&include_path) {
             self.warn(
-                tokens.get(i).map(|t| t.line).unwrap_or(1),
+                line,
                 format!("include preprocessing failed for {path}: {e}"),
             );
         }
@@ -974,7 +963,84 @@ impl PreprocessorState {
                     .push((live_at, trace_ir::canonicalize(&include_path)));
             }
         }
-        Ok(i + 1)
+        Ok(i)
+    }
+
+    /// Macro-expand tokens on a `#include` line until they form a header-name.
+    fn expand_include_operand(&mut self, tokens: &[Token]) -> Result<Vec<Token>, PreprocessError> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < tokens.len() {
+            if matches!(tokens[i].kind, TokenKind::Newline | TokenKind::Eof) {
+                i += 1;
+                continue;
+            }
+            let TokenKind::Identifier(name) = &tokens[i].kind else {
+                out.push(tokens[i].clone());
+                i += 1;
+                continue;
+            };
+            if tokens[i].is_hidden(name) {
+                out.push(tokens[i].clone());
+                i += 1;
+                continue;
+            }
+            let Some(def) = self.macros.get(name).cloned() else {
+                out.push(tokens[i].clone());
+                i += 1;
+                continue;
+            };
+            match def {
+                MacroDef::Object { replacement } => {
+                    if !self.push_expansion(tokens[i].line) {
+                        out.push(tokens[i].clone());
+                        i += 1;
+                        continue;
+                    }
+                    let painted = Self::paint_replacement(&replacement, &tokens[i], name);
+                    let nested = self.expand_include_operand(&painted)?;
+                    self.pop_expansion();
+                    out.extend(nested);
+                    i += 1;
+                }
+                MacroDef::Function {
+                    params,
+                    replacement,
+                    variadic,
+                } if self.next_non_newline_is(tokens, i + 1, "(") => {
+                    if !self.push_expansion(tokens[i].line) {
+                        out.push(tokens[i].clone());
+                        i += 1;
+                        continue;
+                    }
+                    let origin = tokens[i].clone();
+                    i += 1;
+                    let args = match self.parse_macro_args(tokens, &mut i) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            self.pop_expansion();
+                            return Err(e);
+                        }
+                    };
+                    let expanded = apply_concatenation(substitute_macro(
+                        name,
+                        &origin,
+                        &replacement,
+                        &params,
+                        &args,
+                        variadic,
+                    ));
+                    let nested = self.expand_include_operand(&expanded)?;
+                    self.pop_expansion();
+                    out.extend(nested);
+                }
+                MacroDef::Function { .. } => {
+                    out.push(tokens[i].clone());
+                    i += 1;
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn resolve_include(&self, path: &str) -> Result<PathBuf, PreprocessError> {
@@ -1282,6 +1348,34 @@ impl PreprocessorState {
             diagnostics: self.diagnostics,
             included_headers: self.included_guard.into_iter().collect(),
         }
+    }
+}
+
+fn parse_include_header(tokens: &[Token]) -> Option<String> {
+    let mut i = 0;
+    while i < tokens.len() && matches!(tokens[i].kind, TokenKind::Newline) {
+        i += 1;
+    }
+    match tokens.get(i).map(|t| &t.kind) {
+        Some(TokenKind::String(s)) => Some(s.clone()),
+        Some(TokenKind::Punct(s)) if s == "<" => {
+            let mut header = String::new();
+            i += 1;
+            while i < tokens.len() {
+                match &tokens[i].kind {
+                    TokenKind::Identifier(s) | TokenKind::Number(s) | TokenKind::Punct(s)
+                        if s != ">" =>
+                    {
+                        header.push_str(s);
+                    }
+                    TokenKind::Punct(s) if s == ">" => return Some(header),
+                    _ => return None,
+                }
+                i += 1;
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -1823,6 +1917,35 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             !result.output.contains("MIN"),
             "nested MIN leaked: {}",
             result.output
+        );
+    }
+
+    #[test]
+    fn include_macro_operand_expands() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/preproc/include_macro.c");
+        let result = preprocess_file(&path, &PreprocessOptions::new()).unwrap();
+        assert!(
+            result.output.contains("NESTED_VAL") || result.output.contains("42"),
+            "macro #include must splice nested.h: {}",
+            result.output
+        );
+        assert!(
+            result
+                .included_headers
+                .iter()
+                .any(|p| p.ends_with("include_macro_nested.h")),
+            "included_headers must record the expanded include: {:?}",
+            result.included_headers
+        );
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("expected string or <...>")),
+            "{:?}",
+            result.diagnostics
         );
     }
 
