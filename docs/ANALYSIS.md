@@ -397,12 +397,17 @@ C++-aware only where it must be — everything else reuses the C machinery.
   used for base-name qualification.
 - **Overloads**: same-name entries are kept apart when **both** sides are C++
   and arity (or same-arity param types) differ (`add_function`;
-  `externals_by_name` bucket). A C `.c` body still merges with a C++-parsed
-  `.h` prototype of the same arity — otherwise callers bind to the undefined
-  prototype (HDF `GpioSetIrq` / `gpio->func`). Calls resolve over the
-  candidate set filtered by argument count; an empty arity-filtered set
-  falls back to all candidates (varargs). Ties emit one direct site per
-  candidate.
+  `externals_by_name` bucket). Signature comparison uses real types: at TU
+  merge the incoming params are remapped into global `TypeId` space by
+  `merge_unit_index` and passed via `add_function_with_param_types`, so a
+  cross-TU prototype + definition of the same function collapse into one
+  record instead of duplicating (two `functions` rows / two callgraph edges),
+  while distinct same-arity overloads still separate across TUs. A C `.c`
+  body still merges with a C++-parsed `.h` prototype of the same arity —
+  otherwise callers bind to the undefined prototype (HDF `GpioSetIrq` /
+  `gpio->func`). Calls resolve over the candidate set filtered by argument
+  count; an empty arity-filtered set falls back to all candidates (varargs).
+  Ties emit one direct site per candidate.
 - **Classes**: layouts intern under the fully qualified tag
   (`gfx::Shape`). Inheritance facts (`Program.inheritance`) drive member
   resolution: a call walks upward to the nearest declaring base. **Non-virtual**

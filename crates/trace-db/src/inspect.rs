@@ -489,6 +489,7 @@ pub fn dataflow_graph(
                 "points_to" => "points_to",
                 "call_arg" => "call_arg",
                 "terminates" => "terminates",
+                "dlsym" => "dlsym",
                 _ => "flow",
             };
             fwd.entry(src)

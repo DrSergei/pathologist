@@ -116,7 +116,25 @@ fn merge_unit(program: &mut Program, unit: &UnitIndex, mode: MergeMode) {
                     .and_then(|&eid| program.symbols.function_index(eid))
                     .map(|idx| program.symbols.functions[idx].params.is_empty())
                     .unwrap_or(false));
-        let merged = program.symbols.add_function(f);
+        // The incoming params are unit-local VarIds: resolving their types
+        // against the global table in `add_function` hits unrelated globals
+        // whose ids collide, breaking C++ prototype + definition merges. Map
+        // them through the unit's own variables + this unit's type_map so the
+        // overload signature check sees real, remapped types.
+        let incoming_param_types: Vec<trace_ir::TypeId> = f
+            .params
+            .iter()
+            .map(|old| {
+                unit.variables
+                    .iter()
+                    .find(|v| &v.id == old)
+                    .map(|v| remap_type(v.type_id, &type_map))
+                    .unwrap_or(trace_ir::TypeId(0))
+            })
+            .collect();
+        let merged = program
+            .symbols
+            .add_function_with_param_types(f, Some(&incoming_param_types));
         if merged == new_id {
             remap_params.insert(merged);
             remap_locals.insert(merged);

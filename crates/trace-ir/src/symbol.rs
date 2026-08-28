@@ -168,8 +168,26 @@ impl SymbolTable {
     }
 
     pub fn add_function(&mut self, func: Function) -> FnId {
+        self.add_function_with_param_types(func, None)
+    }
+
+    /// Variant of [`SymbolTable::add_function`] for cross-TU merges. The
+    /// incoming function's params are still *unit-local* VarIds whose small
+    /// ids can collide with unrelated globals already merged from earlier
+    /// TUs, so resolving their types via `param_type` is meaningless and
+    /// would always fail the C++ overload signature check — leaving a
+    /// prototype (TU A) and its definition (TU B) as two records
+    /// (`hpp_designated_dispatch` duplicated `DispatchToMessage`). The
+    /// caller (merge) supplies the params' types remapped into global TypeId
+    /// space; strict signature separation then also works across TUs.
+    pub fn add_function_with_param_types(
+        &mut self,
+        func: Function,
+        param_types: Option<&[TypeId]>,
+    ) -> FnId {
         if func.linkage == Linkage::External {
-            if let Some(existing_id) = self.fn_by_name.get(&func.name).copied() {
+            let existing_id = self.fn_by_name.get(&func.name).copied();
+            if let Some(existing_id) = existing_id {
                 // Merge only compatible redeclarations (prototype + definition).
                 // Distinct arities mean C++ overloads — and only then: keep
                 // both entries so call-site resolution can pick between them.
@@ -202,14 +220,26 @@ impl SymbolTable {
                         // C++: prototypes and definitions of the *same*
                         // function merge; distinct same-arity overloads
                         // must stay apart. Parameter types disambiguate.
+                        // When `param_types` is supplied (cross-TU merge) it
+                        // holds the remapped global types of `func.params`;
+                        // otherwise (per-TU) they resolve via `param_type`.
+                        // A side whose type is unresolvable falls back to
+                        // arity-only, like the C-vs-C++ path.
                         arity_ok
                             && (existing.params.is_empty()
                                 || func.params.is_empty()
-                                || existing
-                                    .params
-                                    .iter()
-                                    .zip(func.params.iter())
-                                    .all(|(a, b)| self.param_type(*a) == self.param_type(*b)))
+                                || existing.params.iter().zip(func.params.iter().enumerate()).all(
+                                    |(a, (i, b))| {
+                                        let incoming = param_types
+                                            .and_then(|ts| ts.get(i))
+                                            .copied()
+                                            .or_else(|| self.param_type(*b));
+                                        match (self.param_type(*a), incoming) {
+                                            (Some(ta), Some(tb)) => ta == tb,
+                                            _ => true,
+                                        }
+                                    },
+                                ))
                     })
                     .unwrap_or(false);
                 if mergeable {
@@ -488,5 +518,139 @@ impl SymbolTable {
     pub fn function_ids_unique(&self) -> bool {
         let mut seen = std::collections::HashSet::new();
         self.functions.iter().all(|f| seen.insert(f.id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Program;
+
+    fn fake_function(
+        id: FnId,
+        name: &str,
+        params: Vec<VarId>,
+        is_defined: bool,
+        is_cpp: bool,
+        file: FileId,
+        line: u32,
+    ) -> Function {
+        Function {
+            id,
+            name: name.to_string(),
+            linkage: Linkage::External,
+            return_type: TypeId(0),
+            params,
+            locals: Vec::new(),
+            span: Span::new(file, line, 1),
+            end_line: line,
+            file,
+            is_defined,
+            is_virtual: false,
+            is_final: false,
+            is_cpp,
+        }
+    }
+
+    #[test]
+    fn cpp_prototype_merges_with_cross_tu_definition() {
+        // TU 1 (store.cpp) declares `int DispatchToMessage(int);`. Its param
+        // var has been merged into the global table (resolvable type).
+        let mut p = Program::new(PathBuf::from("/t"));
+        let file = p.symbols.add_file(PathBuf::from("/t/store.cpp"));
+        let proto = fake_function(
+            p.symbols.alloc_fn_id(),
+            "DispatchToMessage",
+            vec![p.symbols.alloc_var_id()],
+            false,
+            true,
+            file,
+            3,
+        );
+        let mut proto = proto;
+        let param = Variable {
+            id: proto.params[0],
+            name: "$arg0".into(),
+            type_id: TypeId(2),
+            storage: StorageClass::Param,
+            fn_id: Some(proto.id),
+            param_index: Some(0),
+            span: Span::new(file, 3, 23),
+            is_pointer: false,
+        };
+        p.symbols.add_variable(param);
+        let proto_id = p.symbols.add_function(proto);
+
+        // TU 2 (target.cpp) defines the same function. Its param var is still
+        // a unit-local id NOT in the global table (None type). The pair must
+        // collapse into the prototype's entry.
+        let target_file = p.symbols.add_file(PathBuf::from("/t/target.cpp"));
+        let def = fake_function(
+            p.symbols.alloc_fn_id(),
+            "DispatchToMessage",
+            vec![VarId(999)],
+            true,
+            true,
+            target_file,
+            1,
+        );
+        let def_id = p.symbols.add_function(def);
+        assert_eq!(def_id, proto_id, "proto+def must collapse to one record");
+        let merged = p.symbols.function(proto_id);
+        assert!(merged.is_defined);
+        assert_eq!(merged.file, target_file);
+        assert_eq!(p.symbols.fn_by_name.len(), 1);
+    }
+
+    #[test]
+    fn cpp_same_arity_distinct_overloads_stay_apart() {
+        let mut p = Program::new(PathBuf::from("/t"));
+        let file = p.symbols.add_file(PathBuf::from("/t/store.cpp"));
+        let fint = fake_function(
+            p.symbols.alloc_fn_id(),
+            "f",
+            vec![p.symbols.alloc_var_id()],
+            true,
+            true,
+            file,
+            1,
+        );
+        let var_int = Variable {
+            id: fint.params[0],
+            name: "a".into(),
+            type_id: TypeId(2),
+            storage: StorageClass::Param,
+            fn_id: Some(fint.id),
+            param_index: Some(0),
+            span: Span::new(file, 1, 1),
+            is_pointer: false,
+        };
+        p.symbols.add_variable(var_int);
+        let fint_id = p.symbols.add_function(fint);
+
+        // `double` overload, same arity, both params resolvable -> separate.
+        let fdouble = fake_function(
+            p.symbols.alloc_fn_id(),
+            "f",
+            vec![p.symbols.alloc_var_id()],
+            true,
+            true,
+            file,
+            2,
+        );
+        let var_double = Variable {
+            id: fdouble.params[0],
+            name: "b".into(),
+            type_id: TypeId(3),
+            storage: StorageClass::Param,
+            fn_id: Some(fdouble.id),
+            param_index: Some(0),
+            span: Span::new(file, 2, 1),
+            is_pointer: false,
+        };
+        p.symbols.add_variable(var_double);
+        let fdouble_id = p.symbols.add_function(fdouble);
+        assert_ne!(fdouble_id, fint_id, "same-arity distinct overloads keep both");
+        assert_eq!(p.symbols.externals_by_name["f"].len(), 2);
     }
 }
