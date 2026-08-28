@@ -91,6 +91,9 @@ enum InspectCommands {
         /// Traversal direction: `down` (callees) or `up` (callers).
         #[arg(long, default_value = "down")]
         direction: String,
+        /// Graph output format: `text`, `json`, `graphviz`, or `mermaid`.
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
     },
     /// Value-flow (dataflow) graph for the variable declared at FILE:LINE:COL.
     ///
@@ -113,7 +116,29 @@ enum InspectCommands {
         /// (where they come from).
         #[arg(long, default_value = "down")]
         direction: String,
+        /// Graph output format: `text`, `json`, `graphviz`, or `mermaid`.
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
+    Graphviz,
+    Mermaid,
+}
+
+impl OutputFormat {
+    fn to_render(self) -> trace_db::RenderFormat {
+        match self {
+            OutputFormat::Text => trace_db::RenderFormat::Text,
+            OutputFormat::Json => trace_db::RenderFormat::Json,
+            OutputFormat::Graphviz => trace_db::RenderFormat::Graphviz,
+            OutputFormat::Mermaid => trace_db::RenderFormat::Mermaid,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -393,6 +418,7 @@ fn run_inspect(db: PathBuf, command: InspectCommands) -> Result<()> {
             line,
             depth,
             direction,
+            format,
         } => {
             let dir = trace_db::Direction::parse(&direction)?;
             if depth == 0 {
@@ -404,23 +430,26 @@ fn run_inspect(db: PathBuf, command: InspectCommands) -> Result<()> {
                 trace_db::Direction::Down => "callees",
                 trace_db::Direction::Up => "callers",
             };
-            println!("callgraph from {start} ({dir_word}, depth {depth}):");
-            print_tree(&graph, &mut |id, out| match graph.nodes.get(&id) {
-                Some(n) => out.push_str(&format!(
-                    "{} ({})",
-                    n.label,
-                    if n.detail.is_empty() { "?" } else { &n.detail }
-                )),
-                None => out.push_str(&format!("fn{id}")),
-            });
-            if graph.truncated {
-                println!("(truncated at --depth {depth}; increase to see more)");
-            }
-            println!(
-                "{} functions, {} edges",
-                graph.nodes.len(),
-                graph.edges.len()
+            let meta = trace_db::GraphMeta {
+                title: &format!("callgraph from {start} ({dir_word}, depth {depth}):"),
+                direction: dir_word,
+                depth,
+                summary: &format!("{} functions, {} edges", graph.nodes.len(), graph.edges.len()),
+            };
+            let out = trace_db::render_graph(
+                &graph,
+                format.to_render(),
+                &meta,
+                &mut |id, out| match graph.nodes.get(&id) {
+                    Some(n) => out.push_str(&format!(
+                        "{} ({})",
+                        n.label,
+                        if n.detail.is_empty() { "?" } else { &n.detail }
+                    )),
+                    None => out.push_str(&format!("fn{id}")),
+                },
             );
+            print!("{out}");
         }
         InspectCommands::Dataflow {
             file,
@@ -428,6 +457,7 @@ fn run_inspect(db: PathBuf, command: InspectCommands) -> Result<()> {
             col,
             depth,
             direction,
+            format,
         } => {
             let dir = trace_db::Direction::parse(&direction)?;
             if depth == 0 {
@@ -462,84 +492,33 @@ fn run_inspect(db: PathBuf, command: InspectCommands) -> Result<()> {
                 trace_db::Direction::Down => "flows-to",
                 trace_db::Direction::Up => "flows-from",
             };
-            println!("dataflow for {best} ({dir_word}, depth {depth}):");
-            print_tree(&graph, &mut |id, out| match graph.nodes.get(&id) {
-                Some(n) => {
-                    out.push_str(&n.label);
-                    if !n.detail.is_empty() {
-                        out.push_str(&format!(" ({})", n.detail));
+            let meta = trace_db::GraphMeta {
+                title: &format!("dataflow for {best} ({dir_word}, depth {depth}):"),
+                direction: dir_word,
+                depth,
+                summary: &format!(
+                    "{} flow nodes, {} flow edges",
+                    graph.nodes.len(),
+                    graph.edges.len()
+                ),
+            };
+            let out = trace_db::render_graph(
+                &graph,
+                format.to_render(),
+                &meta,
+                &mut |id, out| match graph.nodes.get(&id) {
+                    Some(n) => {
+                        out.push_str(&n.label);
+                        if !n.detail.is_empty() {
+                            out.push_str(&format!(" ({})", n.detail));
+                        }
                     }
-                }
-                None => out.push_str(&format!("node{id}")),
-            });
-            if graph.truncated {
-                println!("(truncated at --depth {depth}; increase to see more)");
-            }
-            println!(
-                "{} flow nodes, {} flow edges",
-                graph.nodes.len(),
-                graph.edges.len()
+                    None => out.push_str(&format!("node{id}")),
+                },
             );
+            print!("{out}");
         }
     }
     Ok(())
 }
 
-/// Print a `QueryGraph` as an indented forest: one line per node at first
-/// discovery, children indented under it with their edge annotation.
-/// Cross-edge revisits render as `.. name (see above)` leaves.
-fn print_tree(graph: &trace_db::QueryGraph, fmt: &mut dyn FnMut(i64, &mut String)) {
-    use rustc_hash::{FxHashMap, FxHashSet};
-    use trace_db::GraphEdge;
-
-    let mut children: FxHashMap<i64, Vec<&GraphEdge>> = FxHashMap::default();
-    for e in &graph.edges {
-        children.entry(e.from).or_default().push(e);
-    }
-    let mut seen: FxHashSet<i64> = FxHashSet::default();
-    let mut buf = String::new();
-
-    fn walk(
-        id: i64,
-        level: usize,
-        prefix_edge: Option<&GraphEdge>,
-        children: &FxHashMap<i64, Vec<&GraphEdge>>,
-        seen: &mut FxHashSet<i64>,
-        fmt: &mut dyn FnMut(i64, &mut String),
-        buf: &mut String,
-    ) {
-        buf.clear();
-        fmt(id, buf);
-        let indent = "  ".repeat(level);
-        match prefix_edge {
-            None => println!("{indent}* {buf}"),
-            Some(e) => {
-                if seen.contains(&id) {
-                    if e.site.is_empty() {
-                        println!("{indent}-{}-> {buf} (see above)", e.label);
-                    } else {
-                        println!("{indent}-{}-> {buf} (see above; also {})", e.label, e.site);
-                    }
-                    return;
-                }
-                if e.site.is_empty() {
-                    println!("{indent}-{}-> {buf}", e.label);
-                } else {
-                    println!("{indent}-{}-> {buf} ({})", e.label, e.site);
-                }
-            }
-        }
-        seen.insert(id);
-        if let Some(kids) = children.get(&id) {
-            for kid in kids.clone() {
-                walk(kid.to, level + 1, Some(kid), children, seen, fmt, buf);
-            }
-        }
-    }
-
-    for &(root, depth) in &graph.order.clone() {
-        if depth == 0 && !seen.contains(&root) {
-            walk(root, 0, None, &children, &mut seen, fmt, &mut buf);
-        }
-    }
-}

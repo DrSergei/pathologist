@@ -153,6 +153,7 @@ trace inspect <DB> callgraph --file SUBSTR --line N [--depth N] [--direction dow
 | `--line <N>` | A line inside the function of interest. |
 | `--depth <N>` | Maximum BFS depth (default 3). |
 | `--direction` | `down` = callees (default), `up` = callers. |
+| `--format` | Output format: `text` (default), `json`, `graphviz`, or `mermaid`. |
 
 The start function is chosen among definitions whose `[line_start, line_end]`
 contains `--line`. Edges are labeled with their resolution (`direct`,
@@ -180,6 +181,7 @@ trace inspect <DB> dataflow --file SUBSTR --line N --col C [--depth N] [--direct
 | `--line <N>`, `--col <C>` | Position near a variable **declaration** (use sites are not recorded). |
 | `--depth <N>` | Maximum BFS depth (default 3). |
 | `--direction` | `down` = where the value flows (default), `up` = where it came from. |
+| `--format` | Output format: `text` (default), `json`, `graphviz`, or `mermaid`. |
 
 Edges show how values move: `copy`, `addr_of`, `load`, `store`, `gep`,
 `points_to` (variable → storage), and `call_arg` (argument passing into a
@@ -196,6 +198,105 @@ automatically widens to same-name parameters of the same function record
 trace inspect /tmp/hdf.db dataflow --file can_test.c --line 33 --col 31
 trace inspect /tmp/hdf.db dataflow --file usb_raw_io.c --line 331 --col 23 --depth 4
 ```
+
+### Graph output formats
+
+Both `callgraph` and `dataflow` accept `--format text|json|graphviz|mermaid`
+(`text` is the default). `text` is the indented view shown above; the other
+formats emit machine-readable graphs of the same traversal — same nodes,
+same edges, same depth limit and truncation semantics. `trace inspect dataflow`
+prints its candidate/fallback `note:` hints on stderr in every format.
+
+All examples below run the same query on `/tmp/hpp.db`
+(`tests/fixtures/hpp_designated_dispatch`):
+
+```bash
+trace inspect /tmp/hpp.db callgraph --file hpp_designated_dispatch/launch.cpp --line 5 --depth 3
+```
+
+**`--format text`** (default)
+
+```text
+callgraph from launch (launch.cpp:5-5) (callees, depth 3):
+* launch (launch.cpp:5)
+  -indirect-> DispatchToMessage (target.cpp:1) (launch.cpp:5)
+2 functions, 1 edges
+```
+
+**`--format json`** — a single JSON document with `title`, `direction`,
+`depth`, `truncated`, `summary`, `nodes`, and `edges`:
+
+```json
+{
+  "title": "callgraph from launch (launch.cpp:5-5) (callees, depth 3):",
+  "direction": "callees",
+  "depth": 3,
+  "truncated": false,
+  "summary": "2 functions, 1 edges",
+  "nodes": [
+    {
+      "id": 0,
+      "depth": 0,
+      "label": "launch (launch.cpp:5)",
+      "detail": "launch.cpp:5"
+    },
+    {
+      "id": 1,
+      "depth": 1,
+      "label": "DispatchToMessage (target.cpp:1)",
+      "detail": "target.cpp:1"
+    }
+  ],
+  "edges": [
+    {
+      "from": 0,
+      "to": 1,
+      "label": "indirect",
+      "site": "launch.cpp:5"
+    }
+  ]
+}
+```
+
+**`--format graphviz`** — a DOT `digraph` renderable with `dot`:
+
+```bash
+trace inspect /tmp/hpp.db callgraph --file hpp_designated_dispatch/launch.cpp --line 5 --depth 3 --format graphviz > call.dot
+dot -Tsvg call.dot -o call.svg
+```
+
+```dot
+digraph "callgraph from launch (launch.cpp:5-5) (callees, depth 3):" {
+  rankdir="TB";
+  node [shape=box];
+  n0 [label="launch (launch.cpp:5)"];
+  n1 [label="DispatchToMessage (target.cpp:1)"];
+  n0 -> n1 [label="indirect (launch.cpp:5)"];
+}
+```
+
+**`--format mermaid`** — a Mermaid `flowchart` for GitHub/Markdown or
+`mmdc`:
+
+````markdown
+```mermaid
+flowchart TD
+  %% callgraph from launch (launch.cpp:5-5) (callees, depth 3):
+  n0["launch (launch.cpp:5)"]
+  n1["DispatchToMessage (target.cpp:1)"]
+  n0 -->|"indirect (launch.cpp:5)"| n1
+```
+````
+
+The same flag applies to `dataflow`:
+
+```text
+trace inspect /tmp/hpp.db dataflow --file hpp_designated_dispatch/launch.cpp --line 5 --col 12 --format mermaid
+```
+
+Every format escapes special characters (quote/backslash for DOT, HTML
+entities for Mermaid, JSON via `serde_json`), so arbitrary C++ names and
+file paths stay valid input.
 
 ## Analysis pipeline
 
