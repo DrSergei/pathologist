@@ -7,8 +7,13 @@ use serde::{Deserialize, Serialize};
 pub enum TypeDesc {
     Void,
     Char,
+    Bool,
+    Short,
     Int,
     Long,
+    LongLong,
+    Float,
+    Double,
     SizeT,
     Unknown,
     Ptr(Box<TypeDesc>),
@@ -43,12 +48,59 @@ impl TypeDesc {
     }
 }
 
+/// Numeric-category classification used by C++ overload-table construction
+/// and call-site ranking. Kept coarser than [`TypeDesc`] so that only the
+/// properties overload resolution cares about leak into symbol merging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScalarKind {
+    /// `bool`
+    Bool,
+    /// `char` / `signed char` / `unsigned char`
+    Char,
+    /// `short` / `unsigned short`
+    Short,
+    /// `int` / `unsigned int`
+    Int,
+    /// `long` / `unsigned long`
+    Long,
+    /// `long long` / `unsigned long long`
+    LongLong,
+    /// `float`
+    Float,
+    /// `double` / `long double`
+    Double,
+    /// Aggregate (struct/union) or any non-numeric type.
+    Aggregate,
+}
+
+impl TypeDesc {
+    /// Numeric category, for distinguishing same-arity overloads.
+    pub fn scalar_kind(&self) -> ScalarKind {
+        match self {
+            TypeDesc::Bool => ScalarKind::Bool,
+            TypeDesc::Char => ScalarKind::Char,
+            TypeDesc::Short => ScalarKind::Short,
+            TypeDesc::Int => ScalarKind::Int,
+            TypeDesc::Long => ScalarKind::Long,
+            TypeDesc::LongLong => ScalarKind::LongLong,
+            TypeDesc::Float => ScalarKind::Float,
+            TypeDesc::Double => ScalarKind::Double,
+            _ => ScalarKind::Aggregate,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TypeKind {
     Void,
     Char,
+    Bool,
+    Short,
     Int,
     Long,
+    LongLong,
+    Float,
+    Double,
     SizeT,
     Unknown,
     Ptr,
@@ -115,8 +167,13 @@ impl TypeTable {
         };
         table.intern(TypeDesc::Void);
         table.intern(TypeDesc::Char);
+        table.intern(TypeDesc::Bool);
+        table.intern(TypeDesc::Short);
         table.intern(TypeDesc::Int);
         table.intern(TypeDesc::Long);
+        table.intern(TypeDesc::LongLong);
+        table.intern(TypeDesc::Float);
+        table.intern(TypeDesc::Double);
         table.intern(TypeDesc::SizeT);
         table.intern(TypeDesc::Unknown);
         table
@@ -390,11 +447,14 @@ fn desc_has_named_tag(desc: &TypeDesc) -> bool {
 fn compute_layout(desc: &TypeDesc, table: &mut TypeTable) -> (u64, u64, TypeLayout) {
     match desc {
         TypeDesc::Void => (0, 1, TypeLayout::default()),
-        TypeDesc::Char => (1, 1, TypeLayout::default()),
-        TypeDesc::Int => (4, 4, TypeLayout::default()),
-        TypeDesc::Long => (8, 8, TypeLayout::default()),
-        TypeDesc::SizeT => (8, 8, TypeLayout::default()),
-        TypeDesc::Unknown => (8, 8, TypeLayout::default()),
+        TypeDesc::Char | TypeDesc::Bool => (1, 1, TypeLayout::default()),
+        TypeDesc::Short => (2, 2, TypeLayout::default()),
+        TypeDesc::Int | TypeDesc::Float => (4, 4, TypeLayout::default()),
+        TypeDesc::Long
+        | TypeDesc::LongLong
+        | TypeDesc::Double
+        | TypeDesc::SizeT
+        | TypeDesc::Unknown => (8, 8, TypeLayout::default()),
         TypeDesc::Ptr(_) | TypeDesc::FnPtr { .. } => (8, 8, TypeLayout::default()),
         TypeDesc::Array { elem, size } => {
             let (elem_size, elem_align, _) = compute_layout(elem, table);

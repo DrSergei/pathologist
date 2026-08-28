@@ -2,6 +2,8 @@
 
 **Date:** 2026-08-28  
 **Binary:** `target/release/trace` (current tree; `cargo build --release` before the run, `cargo test --workspace` green)  
+**Re-verified 2026-08-28 (after the C++ overload/template slice):** every probe below was re-run on the new binary and is byte-identical; `cargo test --workspace` is green (25 suites, incl. 32 C++ cases + 3 new `cpp_templates_overloads` regression tests). New in this revision: Case 20 (scalar-type overload ranking at call sites) and Case 21 (template member calls) in §1.2.
+
 **Method:** every fixture under `tests/fixtures/` that exercises indirect calls or value flow was analyzed fresh into `/tmp/*.db`, then probed with both tools. Every result was cross-checked three ways: (1) against the source files, (2) against `call_sites`/`call_edges` and `flow_nodes`/`flow_edges` in the export, (3) via recursive-CTE BFS closure queries on those tables.
 
 | Command | Data source | `--direction` meaning |
@@ -374,6 +376,47 @@ callgraph from test_callback_dispatch (main.c:11-26) (callees, depth 2):
 ```
 
 Note: `entry.Init` resolves to `SampleDriverInit` even though `entry.Init = nullptr` is stored first — instance-insensitive `FieldSummary` reads the whole field history (documented may-analaracter over-approximation); the tool renders it faithfully.
+
+### Case 20 — scalar-type overload ranking (fixture `cpp_templates_overloads`)
+
+Same-arity overloads separated by parameter type are distinct records, and a call
+site picks the exact match instead of fanning out over every candidate:
+
+```text
+callgraph from main (main.cpp:18-31) (callees, depth 2):
+* main (main.cpp:18)
+  -direct-> FieldValue::GetNumber (main.cpp:4) (main.cpp:20)
+  -direct-> FieldValue::GetNumber (main.cpp:5) (main.cpp:21)
+  -direct-> FieldValue::GetNumber (main.cpp:4) (see above; also main.cpp:22)
+  -direct-> f (main.cpp:13) (main.cpp:23)   # f(1) -> f(int)
+  -direct-> f (main.cpp:14) (main.cpp:24)   # f(1.5) -> f(double)
+  -direct-> f (main.cpp:15) (main.cpp:26)   # f(s) -> f(short)
+  -direct-> f (main.cpp:16) (main.cpp:27)   # f(1, 2) -> f(int, int)
+  -direct-> Box::read (main.cpp:10) (main.cpp:29)
+8 functions, 8 edges
+```
+
+`f(1)`, `f(1.5)`, `f(s)` each emit **one** direct edge to the distinct defined
+overload — `FieldValue::GetNumber` has 3 records (int / long / template primary).
+Candidates of the same name resolve independently; export `functions` keeps one
+row per overload, call sites one direct edge per exact match (ties still emit all
+candidates). Validate: `SELECT COUNT(*) ...` (see `scripts/eval_check.py`).
+
+### Case 21 — template member calls (fixture `cpp_templates_overloads`)
+
+`fv.GetNumber<int>()` and `b.read<short>()` resolve to the primary registered
+method (template `<…>` stripped from callee text; in-class template methods lower
+from their `template_declaration` body):
+
+```text
+inspect calls --from GetNumber :
+FieldValue::GetNumber (main.cpp:6) -> T [main.cpp] (external)   # template body `return T();`
+```
+
+The call sites themselves are direct (`8/8` edges, 0 indirect, no unresolved
+`GetNumber`/`read` stubs). The single `external` edge is the template body's `T()`
+temporary — the un-instantiated placeholder stays unresolvable by design
+(document in `docs/CPP_ROADMAP.md` C9).
 
 ## 1.3 Depth, direction, dedup
 

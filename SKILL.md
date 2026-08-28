@@ -268,6 +268,14 @@ entities for Mermaid), so arbitrary C++ names and paths stay valid.
   `add` record); the callgraph tree restores precision by showing the defining
   **line**; the plain `calls` listing cannot distinguish equal-display-name
   overloads. Underlying edges are arity-correct.
+- **Same-arity C++ overloads** are type-ranked at call sites (static arg
+  `TypeDesc` from `CallArgs.arg_desc`; unique exact match wins, ties fall back
+  to the whole arity set) and survive TU merge via `Function::param_type_ids`.
+  Scalar kinds: `Int`, `Short`, `Long`, `LongLong`, `Bool`, `Float`, `Double`,
+  `Char`, `SizeT` (coarse: `unsigned`→`Int`, `long double`→`Double`).
+- **Template member calls** (`obj.GetNumber<int>()`) resolve to the primary
+  name; in-class template methods register and lower. 0-arg member overload
+  calls resolve through the primary-name entry only (one edge).
 - C++ prototype + definition across TUs collapse to one record (merged by name
   + arity). Fixing an inspect bug, this fixed the duplicate
   `hpp_designated_dispatch` edge trailing along.

@@ -726,3 +726,123 @@ fn cpp_extern_c_driver_resolves_ipc_and_dispatch() {
         ResolutionKind::Indirect
     ));
 }
+
+// --- cpp_templates_overloads: scalar-type overload resolution, template
+// member calls with explicit arguments, in-class template methods ---
+
+/// Param type descriptors of a function, in signature order.
+fn fn_param_descs(program: &Program, id: FnId) -> Vec<String> {
+    program
+        .symbols
+        .function(id)
+        .params
+        .iter()
+        .map(|v| {
+            let tid = program.symbols.variable(*v).type_id;
+            format!("{:?}", program.types.get(tid).desc)
+        })
+        .collect()
+}
+
+#[test]
+fn cpp_same_arity_overloads_stay_distinct_by_scalar_type() {
+    let root = fixture("cpp_templates_overloads");
+    let program = build_program(&root, &default_opts(&root)).expect("build");
+
+    let candidates = program.symbols.resolve_function_candidates("f", None);
+    let sigs: Vec<Vec<String>> = candidates.iter().map(|&f| fn_param_descs(&program, f)).collect();
+    assert!(
+        sigs.contains(&vec!["Int".to_string()]),
+        "f(int) must survive as its own overload, got {sigs:?}"
+    );
+    assert!(
+        sigs.contains(&vec!["Double".to_string()]),
+        "f(double) must survive as its own overload, got {sigs:?}"
+    );
+    assert!(
+        sigs.contains(&vec!["Short".to_string()]),
+        "f(short) must survive as its own overload, got {sigs:?}"
+    );
+    assert!(
+        sigs.contains(&vec!["Int".to_string(), "Int".to_string()]),
+        "f(int, int) must survive as its own overload, got {sigs:?}"
+    );
+    let distinct: std::collections::HashSet<_> = sigs.iter().cloned().collect();
+    assert_eq!(distinct.len(), 4, "all four signatures distinct: {sigs:?}");
+}
+
+#[test]
+fn cpp_call_sites_prefer_exact_scalar_match() {
+    let root = fixture("cpp_templates_overloads");
+    let program = build_program(&root, &default_opts(&root)).expect("build");
+    let (_pag, analysis) = analyze(&program);
+
+    for (lit_call, descs) in [
+        ("f(1)", vec!["Int"]),
+        ("f(1.5)", vec!["Double"]),
+        ("f(s)", vec!["Short"]),
+        ("f(1, 2)", vec!["Int", "Int"]),
+    ] {
+        let matching: Vec<FnId> = analysis
+            .call_edges
+            .iter()
+            .filter(|e| {
+                fn_name(&program, e.caller) == "main"
+                    && fn_name(&program, e.callee) == "f"
+                    && e.resolution == ResolutionKind::Direct
+                    && fn_param_descs(&program, e.callee) == descs
+            })
+            .map(|e| e.callee)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "{lit_call} must pick exactly one overload with {descs:?}, got {matching:?}"
+        );
+    }
+
+    // No call site may emit more than one edge: the type-resolved overload is
+    // unambiguous rather than the may-tie set.
+    let multi = analysis
+        .call_edges
+        .iter()
+        .any(|e| {
+            analysis
+                .call_edges
+                .iter()
+                .filter(|e2| e2.call_site == e.call_site)
+                .count()
+                > 1
+        });
+    assert!(!multi, "type-resolved overloads must emit one site per call");
+}
+
+#[test]
+fn cpp_template_member_calls_resolve_to_primary_name() {
+    let root = fixture("cpp_templates_overloads");
+    let program = build_program(&root, &default_opts(&root)).expect("build");
+    let (_pag, analysis) = analyze(&program);
+
+    // Template primary registrations exist.
+    let candidates = program.symbols.resolve_function_candidates("FieldValue::GetNumber", None);
+    assert_eq!(
+        candidates.len(),
+        3,
+        "in-class template GetNumber must register alongside its overloads"
+    );
+
+    // `fv.GetNumber<int>()` and `b.read<short>()` resolve directly.
+    assert!(
+        has_direct(&program, &analysis, "main", "FieldValue::GetNumber"),
+        "fv.GetNumber<int>() must resolve to FieldValue::GetNumber"
+    );
+    assert!(
+        has_direct(&program, &analysis, "main", "Box::read"),
+        "b.read<short>() must resolve to Box::read"
+    );
+    assert!(
+        has_direct(&program, &analysis, "main", "Box::read")
+            && has_direct(&program, &analysis, "main", "FieldValue::GetNumber"),
+        "template member calls must be direct, not external stubs"
+    );
+}

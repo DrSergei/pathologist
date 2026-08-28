@@ -402,12 +402,25 @@ C++-aware only where it must be — everything else reuses the C machinery.
   `merge_unit_index` and passed via `add_function_with_param_types`, so a
   cross-TU prototype + definition of the same function collapse into one
   record instead of duplicating (two `functions` rows / two callgraph edges),
-  while distinct same-arity overloads still separate across TUs. A C `.c`
+  while distinct same-arity overloads still separate across TUs. The merge
+  gate resolves the surviving entry's types through `Function::param_type_ids`
+  (remapped into global type space at merge; unit-local VarIds are not
+  queryable mid-merge). A C `.c`
   body still merges with a C++-parsed `.h` prototype of the same arity —
   otherwise callers bind to the undefined prototype (HDF `GpioSetIrq` /
   `gpio->func`). Calls resolve over the candidate set filtered by argument
   count; an empty arity-filtered set falls back to all candidates (varargs).
-  Ties emit one direct site per candidate.
+  Ties emit one direct site per candidate. Same-arity C++ overloads
+  additionally rank by **static argument type**: `CallArgs.arg_desc`
+  carries each argument's `TypeDesc` (casts unwrapped, numeric literal
+  width, `char`, `true`/`false`, string, `nullptr`, plus var/field/subscript
+  declared types); a unique exact param-type match wins, otherwise the
+  full arity set is kept (may-approx).
+- **Template member calls**: `obj.GetNumber<int>()` parses its method slot
+  as `template_method`; both it and `template_type` route to the primary
+  name, so `fv.GetNumber<int>()` / `b.read<short>()` resolve directly.
+  In-class template methods (`template_declaration` members in a class
+  body) register as prototypes and lower their inner `function_definition`.
 - **Classes**: layouts intern under the fully qualified tag
   (`gfx::Shape`). Inheritance facts (`Program.inheritance`) drive member
   resolution: a call walks upward to the nearest declaring base. **Non-virtual**
@@ -466,7 +479,12 @@ Known C++ imprecision (in addition to the general list below):
 - Default construction without parens (`Cls o;`) emits no ctor site.
 - Objects at namespace scope emit no ctor/dtor sites (no enclosing function).
 - Anonymous-namespace overload ties degrade to first-wins.
-- Overload resolution is arity-only (no type-based ranking, conversions).
+- Overload resolution is arity + static-type ranked; a non-exact argument
+  (conversion, `auto`, unknown type) still keeps the whole arity set, and
+  0-arg member-call overloads resolve through the primary-name entry only.
+- Scalar type identity is coarse: `unsigned`/`signed` collapse to `Int`,
+  `signed long long`→`LongLong`, `long double`→`Double`; distinct
+  same-arity overloads relying on those distinctions collapse.
   Unnamed parameters (`void foo(int)`) still occupy a slot so
   `foo(int)` and `foo(int, int)` stay distinct; `void f(void)` does not.
 - Template specializations collapse into the primary entry; no

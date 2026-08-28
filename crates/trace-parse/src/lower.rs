@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use trace_ir::{
     CallSite, Diagnostic, DiagnosticSeverity, FieldId, FlowConstraint, FnId, Function, Linkage,
-    Program, ReturnFlow, Span, StorageClass, TypeDesc, VarId, Variable,
+    Program, ReturnFlow, ScalarKind, Span, StorageClass, TypeDesc, VarId, Variable,
 };
 use trace_preproc::{macro_table_from_defines, MacroTable, PreprocessOptions};
 use tree_sitter::Node;
@@ -589,6 +589,7 @@ fn finalize_extern_callees(program: &mut Program) {
             end_line: line,
             file,
             is_defined: false,
+            param_type_ids: Vec::new(),
             is_virtual: false,
             is_final: false,
         });
@@ -1366,11 +1367,25 @@ fn lower_class_members(
         .filter(|m| {
             matches!(
                 m.kind(),
-                "function_definition" | "field_declaration" | "declaration"
+                "function_definition"
+                    | "field_declaration"
+                    | "declaration"
+                    | "template_declaration"
             )
         })
         .collect();
     for m in &members {
+        // A class-scope `template <typename T> T GetNumber() {...}` declares
+        // the member's primary; the template parameter list is not an
+        // argument — unwrap it and register the nested member like any other.
+        if m.kind() == "template_declaration" {
+            if let Some(inner) = template_member_decl(*m) {
+                if member_decl_is_function(inner) {
+                    register_member_prototype(program, ctx, source, inner, cls_qual);
+                }
+            }
+            continue;
+        }
         if m.kind() == "field_declaration" && member_decl_is_function(*m) {
             register_member_prototype(program, ctx, source, *m, cls_qual);
         }
@@ -1382,18 +1397,34 @@ fn lower_class_members(
     }
     let saved = ctx.class_ctx.clone();
     for m in &members {
-        let in_class_def = m.kind() == "function_definition"
-            || (m.kind() == "field_declaration"
-                && member_decl_is_function(*m)
-                && node_has_compound_body(*m));
+        let unwrapped = if m.kind() == "template_declaration" {
+            template_member_decl(*m)
+        } else {
+            None
+        };
+        let member = unwrapped.unwrap_or(*m);
+        let in_class_def = member.kind() == "function_definition"
+            || (member.kind() == "field_declaration"
+                && member_decl_is_function(member)
+                && node_has_compound_body(member));
         if in_class_def {
             ctx.class_ctx = Some(ClassCtx {
                 qual_name: cls_qual.to_string(),
             });
-            lower_function(program, ctx, source, *m);
+            lower_function(program, ctx, source, member);
         }
     }
     ctx.class_ctx = saved;
+}
+
+/// Unwrap the declaration wrapped by a `template_declaration` (skipping the
+/// `template_parameter_list`), if any.
+fn template_member_decl(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .filter(|c| !matches!(c.kind(), "template_parameter_list" | "template"))
+        .filter(|c| matches!(c.kind(), "function_definition" | "field_declaration" | "declaration"))
+        .last()
 }
 
 /// The bare name a member declares: method identifier, ctor class-name, or
@@ -1461,6 +1492,7 @@ fn register_member_prototype(
         end_line: span.line,
         file: ctx.current_file,
         is_defined: false,
+        param_type_ids: Vec::new(),
         is_virtual: flags.is_virtual,
         is_final: flags.is_final,
         is_cpp: ctx.is_cpp,
@@ -1574,6 +1606,7 @@ fn lower_function(program: &mut Program, ctx: &mut LowerContext, source: &str, n
         end_line,
         file: ctx.current_file,
         is_defined: true,
+        param_type_ids: Vec::new(),
         is_virtual: flags.is_virtual,
         is_final: flags.is_final,
         is_cpp: ctx.is_cpp,
@@ -2055,6 +2088,7 @@ fn lower_function_decl(
         end_line: span.line,
         file: ctx.current_file,
         is_defined: false,
+        param_type_ids: Vec::new(),
         is_virtual: false,
         is_final: false,
         is_cpp: ctx.is_cpp,
@@ -2210,7 +2244,7 @@ fn collect_call_at_node(
             if let Some(field) = func.child_by_field_name("field") {
                 if matches!(
                     field.kind(),
-                    "field_identifier" | "destructor_name" | "template_type"
+                    "field_identifier" | "destructor_name" | "template_type" | "template_method"
                 ) {
                     if let Some(recv) = func.child_by_field_name("argument") {
                         if let Some(cls) = infer_static_class(program, ctx, source, recv) {
@@ -2336,13 +2370,16 @@ fn collect_call_at_node(
         fn_args,
         addr_of_member_args,
         argc: _,
+        arg_desc,
     } = collected;
 
     // ---- Resolution ----
     // C preserves the exact legacy semantics: one scoped lookup, zero or
     // one target. C++ resolves over the candidate set with arity filtering
     // for overloads; an arity-filtered empty set falls back to every
-    // candidate so varargs declarations keep their targets.
+    // candidate so varargs declarations keep their targets. When several
+    // same-arity overloads survive, rank them by argument/parameter types
+    // so `f(1)` picks `f(int)` rather than emitting every overload.
     let chosen: Vec<FnId> = if !ctx.is_cpp {
         program
             .symbols
@@ -2360,6 +2397,8 @@ fn collect_call_at_node(
             .collect();
         if by_arity.is_empty() {
             candidates
+        } else if by_arity.len() > 1 {
+            rank_overloads(program, &by_arity, &arg_desc)
         } else {
             by_arity
         }
@@ -2439,6 +2478,10 @@ struct CallArgs {
     fn_args: Vec<(u32, FnId)>,
     addr_of_member_args: Vec<u32>,
     argc: u32,
+    /// One slot per argument position (aligned with `argc`), holding the
+    /// best-effort static type of the passed expression (literals, casts,
+    /// variable types, pointer decay). Used to rank same-arity C++ overloads.
+    arg_desc: Vec<TypeDesc>,
 }
 
 impl CallArgs {
@@ -2448,6 +2491,7 @@ impl CallArgs {
             fn_args: Vec::new(),
             addr_of_member_args: Vec::new(),
             argc: 0,
+            arg_desc: Vec::new(),
         }
     }
 }
@@ -2463,10 +2507,12 @@ fn collect_call_args(
     let mut var_args = Vec::new();
     let mut fn_args = Vec::new();
     let mut addr_of_member_args = Vec::new();
+    let mut arg_desc = Vec::new();
     let mut arg_index = 0u32;
     if let Some(args_node) = args_node {
         for arg in args_node.children(&mut args_node.walk()) {
             if arg.kind() != "(" && arg.kind() != ")" && arg.kind() != "," {
+                let adesc = arg_expr_type(program, ctx, source, arg);
                 // Parameter positions are syntactic: every argument slot
                 // advances the index even when the expression yields no IR
                 // variable (literals, sizeof, casts). Compressing indices
@@ -2484,6 +2530,7 @@ fn collect_call_args(
                         if let Some(flow) = expr_to_rhs_flow(program, ctx, source, arg, temp) {
                             program.flow.push(flow);
                             var_args.push((arg_index, temp));
+                            arg_desc.push(adesc);
                             arg_index += 1;
                             continue;
                         }
@@ -2507,6 +2554,7 @@ fn collect_call_args(
                 } else if let Some(fn_id) = resolve_call_fn_arg(program, ctx, source, arg) {
                     fn_args.push((arg_index, fn_id));
                 }
+                arg_desc.push(adesc);
                 arg_index += 1;
             }
         }
@@ -2516,6 +2564,122 @@ fn collect_call_args(
         fn_args,
         addr_of_member_args,
         argc: arg_index,
+        arg_desc,
+    }
+}
+
+/// Best-effort static type of a call argument expression, for overload
+/// ranking. Unknown for anything unresolvable.
+fn arg_expr_type(program: &mut Program, ctx: &mut LowerContext, source: &str, node: Node) -> TypeDesc {
+    match node.kind() {
+        "cast_expression" => {
+            if let Some(ty) = node.child_by_field_name("type") {
+                return type_desc_from_node(program, ctx, source, ty);
+            }
+            TypeDesc::Unknown
+        }
+        "number_literal" => number_literal_desc(node_text(source, &node)),
+        "char_literal" => TypeDesc::Char,
+        "true" | "false" => TypeDesc::Bool,
+        "string_literal" => TypeDesc::Ptr(Box::new(TypeDesc::Char)),
+        "nullptr" => TypeDesc::Ptr(Box::new(TypeDesc::Unknown)),
+        _ => {
+            if let Some(v) = resolve_expr_var(program, ctx, source, node) {
+                let tid = program.symbols.variable(v).type_id;
+                let desc = program.types.get(tid).desc.clone();
+                // Field/subscript args pass the *stored value*: a pointer
+                // member is passed as its pointee (array decay), and a
+                // struct-by-value member as the struct.
+                if matches!(node.kind(), "field_expression" | "subscript_expression") {
+                    if let TypeDesc::Ptr(inner) = &desc {
+                        return (**inner).clone();
+                    }
+                }
+                return desc;
+            }
+            TypeDesc::Unknown
+        }
+    }
+}
+
+fn number_literal_desc(text: &str) -> TypeDesc {
+    let lower = text.trim().to_ascii_lowercase();
+    let is_hex = lower.starts_with("0x") || lower.starts_with("0b");
+    let is_float = lower.contains('.')
+        || ((lower.contains('e') || lower.contains('p')) && !is_hex);
+    if is_float {
+        if lower.ends_with('f') || lower.ends_with("lf") {
+            TypeDesc::Float
+        } else {
+            TypeDesc::Double
+        }
+    } else if lower.ends_with('u') || lower.ends_with('l') {
+        TypeDesc::Long
+    } else {
+        TypeDesc::Int
+    }
+}
+
+/// Pick among same-arity C++ candidates using argument-type ranking. Exact
+/// matches (score 0) beat every conversion; a unique best winner is chosen.
+/// Any ambiguity (ties, no exact match, unresolvable args) keeps the whole
+/// arity-set — the may-approximation — rather than guessing.
+fn rank_overloads(program: &Program, candidates: &[FnId], arg_desc: &[TypeDesc]) -> Vec<FnId> {
+    let arg_desc = arg_desc.to_vec();
+    let score = |f: FnId| -> usize {
+        let params = &program.symbols.function(f).params;
+        params
+            .iter()
+            .enumerate()
+            .map(|(i, pv)| {
+                let pdesc = program
+                    .types
+                    .get(program.symbols.variable(*pv).type_id)
+                    .desc
+                    .clone();
+                let adesc = arg_desc.get(i).cloned().unwrap_or(TypeDesc::Unknown);
+                param_match_rank(&adesc, &pdesc)
+            })
+            .sum()
+    };
+    let ranked: Vec<(FnId, usize)> = candidates.iter().copied().map(|f| (f, score(f))).collect();
+    let min = ranked.iter().map(|(_, s)| *s).min().unwrap_or(0);
+    let second = ranked
+        .iter()
+        .filter(|(_, s)| *s != min)
+        .map(|(_, s)| *s)
+        .min();
+    match (min, second) {
+        (0, Some(s2)) if s2 > 0 => ranked
+            .into_iter()
+            .filter(|(_, s)| *s == min)
+            .map(|(f, _)| f)
+            .collect(),
+        _ => candidates.to_vec(),
+    }
+}
+
+fn param_match_rank(arg: &TypeDesc, param: &TypeDesc) -> usize {
+    use ScalarKind as S;
+    if arg == param {
+        return 0;
+    }
+    match (arg, param) {
+        (TypeDesc::Unknown, _) | (_, TypeDesc::Unknown) => 0,
+        (a, p) if a.is_pointer_like() || p.is_pointer_like() => {
+            if a.is_pointer_like() && p.is_pointer_like() {
+                2
+            } else {
+                4
+            }
+        }
+        (a, p) => match (a.scalar_kind(), p.scalar_kind()) {
+            (S::Float | S::Double, S::Float | S::Double) => 1,
+            (S::Float | S::Double, S::Int | S::Short | S::Long | S::LongLong | S::Char) => 3,
+            (S::Int | S::Short | S::Long | S::LongLong | S::Char, S::Float | S::Double) => 2,
+            (_, S::Bool) | (S::Bool, _) => 3,
+            _ => 1,
+        },
     }
 }
 
@@ -2535,6 +2699,7 @@ fn emit_member_sites(
         fn_args,
         addr_of_member_args,
         argc,
+        arg_desc: _,
     } = args;
     let targets = filter_targets_by_argc(
         program,
@@ -2782,6 +2947,7 @@ fn lower_lambda_expression(
         end_line,
         file: ctx.current_file,
         is_defined: true,
+        param_type_ids: Vec::new(),
         is_virtual: false,
         is_final: false,
         is_cpp: true,
@@ -4507,6 +4673,8 @@ fn type_desc_from_node(
             name: extract_tag_name(source, &node, "struct"),
             fields: Vec::new(),
         }
+    } else if let Some(desc) = primitive_scalar_desc(&text) {
+        desc
     } else if text.contains("char") {
         TypeDesc::Char
     } else if text.contains("void") {
@@ -4522,6 +4690,34 @@ fn type_desc_from_node(
             }
         }
         TypeDesc::Int
+    }
+}
+
+/// Distinguish C/C++ primitive scalar parameter types (`double` vs `int`,
+/// `short`, `long long`, ...). Same-arity overloads must survive merging, so
+/// the scalar category is part of the type identity, not just a size hint.
+/// `unsigned` collapses into its signed companion (documented imprecision);
+/// `long double` is treated as `double`.
+fn primitive_scalar_desc(text: &str) -> Option<TypeDesc> {
+    let t = text.trim();
+    if t.contains("long double") {
+        Some(TypeDesc::Double)
+    } else if t.contains("bool") {
+        Some(TypeDesc::Bool)
+    } else if t.contains("long long") {
+        Some(TypeDesc::LongLong)
+    } else if t.contains("double") {
+        Some(TypeDesc::Double)
+    } else if t.contains("float") {
+        Some(TypeDesc::Float)
+    } else if t.contains("short") {
+        Some(TypeDesc::Short)
+    } else if t.contains("long") {
+        Some(TypeDesc::Long)
+    } else if t.contains("unsigned") || t == "signed" {
+        Some(TypeDesc::Int)
+    } else {
+        None
     }
 }
 

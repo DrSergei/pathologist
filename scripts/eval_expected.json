@@ -1,0 +1,101 @@
+{
+  "note": "Regression expectations for scripts/eval_check.py. 'exact' must match; 'band' compares abs(actual-expected) <= N; 'min' requires actual >= N. Site checks count distinct callee NAMES at one dispatch call_site (caller name LIKE, line). Values were captured from a fresh 2026-08-28 run (see docs/EVAL_REPORT.md); bulk function/edge totals drift a little run-to-run (parallel index), correctness numbers do not.",
+  "budget_pops": 800000,
+  "jobs": 8,
+  "corpora": {
+    "hdf": {
+      "name": "drivers_hdf_core",
+      "root": "~/drivers_hdf_core",
+      "globals": {
+        "files": {"cmp": "exact", "value": 1483},
+        "functions_total": {"cmp": "band", "value": 11721, "tol": 40},
+        "functions_defined": {"cmp": "band", "value": 9382, "tol": 40},
+        "functions_external": {"cmp": "band", "value": 2339, "tol": 40},
+        "edges_total": {"cmp": "band", "value": 40347, "tol": 240},
+        "edges_direct": {"cmp": "band", "value": 20916, "tol": 240},
+        "edges_indirect": {"cmp": "exact", "value": 4475},
+        "edges_external": {"cmp": "band", "value": 14956, "tol": 200},
+        "arg_flow_edges": {"cmp": "band", "value": 32400, "tol": 150},
+        "diagnostics": {"cmp": "exact", "value": 370},
+        "dlsym_edges": {"cmp": "exact", "value": 4}
+      },
+      "sites": [
+        {"case": "DeviceNodeExtDispatch", "caller": "%DeviceNodeExtDispatch", "line": 0, "resolution": "indirect", "expected": 73},
+        {"case": "HdfDeviceLaunchNode", "caller": "%HdfDeviceLaunchNode", "line": 0, "resolution": "indirect", "expected": 125},
+        {"case": "HdfDeviceUnlaunchNode", "caller": "%HdfDeviceUnlaunchNode", "line": 0, "resolution": "indirect", "expected": 112},
+        {"case": "HdfSbufReadBuffer", "caller": "%HdfSbufReadBuffer", "line": 0, "resolution": "indirect", "expected": 2},
+        {"case": "StreamDispatch", "caller": "%StreamDispatch", "line": 0, "resolution": "indirect", "expected": 24},
+        {"case": "HdfCameraDispatch", "caller": "%HdfCameraDispatch", "line": 0, "resolution": "indirect", "expected": 23},
+        {"case": "HdfPmDriverDispatch", "caller": "%HdfPmDriverDispatch", "line": 0, "resolution": "indirect", "expected": 19},
+        {"case": "HdfObjectManagerGetObject", "caller": "%HdfObjectManagerGetObject", "line": 0, "resolution": "indirect", "expected": 18},
+        {"case": "PlatformDumperDump", "caller": "%PlatformDumperDump", "line": 0, "resolution": "indirect", "expected": 13},
+        {"case": "SetOption", "caller": "%SetOption", "line": 0, "resolution": "indirect", "expected": 13},
+        {"case": "GpioOnDevEventReceive", "caller": "%GpioOnDevEventReceive", "line": 0, "resolution": "indirect", "expected": 12},
+        {"case": "WorkEntry (linux workqueue)", "caller": "%WorkEntry", "caller_file": "%linux/osal/src/osal_workqueue.c%", "line": 0, "resolution": "indirect", "expected": 20}
+      ],
+      "probes": [
+        {"name": "flow_graph_nodes", "sql": "SELECT COUNT(*) FROM flow_nodes", "cmp": "min", "value": 100000},
+        {"name": "arg_flow_rows_per_call_edge", "sql": "SELECT COUNT(*) FROM arg_flow_edges a JOIN call_sites cs ON cs.id=a.call_site_id", "cmp": "band", "value": 32400, "tol": 150}
+      ]
+    },
+    "hiview": {
+      "name": "hiviewdfx_hiview",
+      "root": "~/hiviewdfx_hiview",
+      "globals": {
+        "files": {"cmp": "exact", "value": 1424},
+        "functions_total": {"cmp": "band", "value": 10349, "tol": 120},
+        "functions_defined": {"cmp": "band", "value": 6390, "tol": 120},
+        "functions_external": {"cmp": "band", "value": 3959, "tol": 120},
+        "edges_total": {"cmp": "band", "value": 19845, "tol": 160},
+        "edges_direct": {"cmp": "band", "value": 4323, "tol": 160},
+        "edges_indirect": {"cmp": "exact", "value": 10},
+        "edges_external": {"cmp": "band", "value": 15512, "tol": 160},
+        "arg_flow_edges": {"cmp": "band", "value": 4720, "tol": 120},
+        "diagnostics": {"cmp": "exact", "value": 462},
+        "dlsym_edges": {"cmp": "exact", "value": 1}
+      },
+      "sites": [
+        {"case": "Plugin::OnEventProxy dispatch", "caller": "%Plugin::OnEventProxy", "line": 68, "resolution": "all", "expected": 23},
+        {"case": "PluginProxy::OnEvent dispatch", "caller": "%PluginProxy::OnEvent", "line": 28, "resolution": "all", "expected": 23},
+        {"case": "EventHandler::OnEventProxy CHA", "caller": "%EventHandler::OnEventProxy", "line": 232, "resolution": "all", "expected": 27},
+        {"case": "PluginProxy::CanProcessEvent", "caller": "%PluginProxy::CanProcessEvent", "line": 39, "resolution": "all", "expected": 12},
+        {"case": "PluginProxy::OnEventListeningCallback", "caller": "%PluginProxy::OnEventListeningCallback", "line": 81, "resolution": "all", "expected": 8},
+        {"case": "EventLoop::ProcessEvent", "caller": "%EventLoop::ProcessEvent", "line": 498, "resolution": "all", "expected": 2},
+        {"case": "PluginProxy::GetHandlerInfo", "caller": "%PluginProxy::GetHandlerInfo", "line": 62, "resolution": "all", "expected": 2}
+      ],
+      "probes": [
+        {"name": "defined overload groups (C++ overload splitting)", "sql": "SELECT COUNT(*) FROM (SELECT name FROM functions WHERE is_defined=1 GROUP BY name HAVING COUNT(*)>1)", "cmp": "min", "value": 120},
+        {"name": "EventHandler::OnEvent family overrides resolved at the CHA site (base + subclasses)", "sql": "SELECT COUNT(DISTINCT tf.name) FROM call_sites cs JOIN call_edges e ON e.call_site_id=cs.id JOIN functions cf ON cf.id=cs.caller_fn_id JOIN functions tf ON tf.id=e.callee_fn_id WHERE cf.name LIKE '%EventHandler::OnEventProxy' AND cs.line=232 AND tf.name LIKE '%EventHandler::OnEvent'", "cmp": "exact", "value": 4}
+      ]
+    },
+    "camera": {
+      "name": "multimedia_camera_framework",
+      "root": "~/multimedia_camera_framework",
+      "globals": {
+        "files": {"cmp": "exact", "value": 1593},
+        "functions_total": {"cmp": "band", "value": 22289, "tol": 120},
+        "functions_defined": {"cmp": "band", "value": 15673, "tol": 120},
+        "functions_external": {"cmp": "band", "value": 6616, "tol": 120},
+        "edges_total": {"cmp": "band", "value": 43312, "tol": 420},
+        "edges_direct": {"cmp": "band", "value": 12644, "tol": 420},
+        "edges_indirect": {"cmp": "exact", "value": 105},
+        "edges_external": {"cmp": "band", "value": 30563, "tol": 420},
+        "arg_flow_edges": {"cmp": "band", "value": 10520, "tol": 250},
+        "diagnostics": {"cmp": "exact", "value": 776},
+        "dlsym_edges": {"cmp": "exact", "value": 0}
+      },
+      "sites": [
+        {"case": "Command::Do GetCommandName", "caller": "%DeferredProcessing::Command::Do", "line": 35, "resolution": "all", "expected": 31},
+        {"case": "Command::Do Executing", "caller": "%DeferredProcessing::Command::Do", "line": 37, "resolution": "all", "expected": 30},
+        {"case": "CFilter::PrepareDone DoPrepare", "caller": "%CFilter::PrepareDone", "line": 101, "resolution": "all", "expected": 18},
+        {"case": "Pipeline::LinkFilters LinkNext", "caller": "%Pipeline::LinkFilters", "line": 243, "resolution": "all", "expected": 18},
+        {"case": "CaptureSession::AddOutput CanAddOutput", "caller": "%CaptureSession::AddOutput", "line": 1272, "resolution": "all", "expected": 18}
+      ],
+      "probes": [
+        {"name": "defined overload groups (C++ overload splitting)", "sql": "SELECT COUNT(*) FROM (SELECT name FROM functions WHERE is_defined=1 GROUP BY name HAVING COUNT(*)>1)", "cmp": "min", "value": 240},
+        {"name": "template member call sites carry resolution records (template-<> text, >=0 edges)", "sql": "SELECT COUNT(DISTINCT cs.callee_text) FROM call_sites cs JOIN call_edges e ON e.call_site_id=cs.id WHERE cs.callee_text LIKE '%<%' AND cs.callee_text LIKE '%>%'", "cmp": "min", "value": 15},
+        {"name": "external-class template sites stay unresolved by design (MetaHdr Set<Tag>/Get<Tag>; no regression into garbage edges)", "sql": "SELECT COUNT(*) FROM call_sites WHERE callee_text LIKE '%<%' AND callee_text LIKE '%>%' AND NOT EXISTS (SELECT 1 FROM call_edges e WHERE e.call_site_id=call_sites.id)", "cmp": "band", "value": 1178, "tol": 30}
+      ]
+    }
+  }
+}

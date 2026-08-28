@@ -197,7 +197,7 @@ Exported with `--full-export` only.
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | INTEGER PK | Type id |
-| `kind` | TEXT | `void`, `int`, `struct`, `ptr`, … |
+| `kind` | TEXT | `void`, `int`, `short`, `long`, `long long`, `bool`, `float`, `double`, `struct`, `ptr`, `fnptr`, `array`, `func`, `unknown`, … |
 | `name` | TEXT | Display name |
 | `size` | INTEGER | Layout size |
 | `layout_json` | TEXT | JSON field layout |

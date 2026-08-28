@@ -275,7 +275,17 @@ fn solve(
     for loc in &pag.locations {
         let g = match &program.types.get(loc.type_id).desc {
             TD::FnPtr { params, .. } if !params.is_empty() => SlotGuard::FnParams(params.len()),
-            TD::Void | TD::Char | TD::Int | TD::Long | TD::SizeT | TD::Unknown => continue,
+            TD::Void
+            | TD::Char
+            | TD::Bool
+            | TD::Short
+            | TD::Int
+            | TD::Long
+            | TD::LongLong
+            | TD::Float
+            | TD::Double
+            | TD::SizeT
+            | TD::Unknown => continue,
             TD::Struct { .. } | TD::Union { .. } | TD::Ptr(_) | TD::Array { .. } => {
                 SlotGuard::NotFnPtr
             }

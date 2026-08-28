@@ -49,6 +49,13 @@ pub struct Function {
     pub end_line: u32,
     pub file: FileId,
     pub is_defined: bool,
+    /// Overload-signature param types in the *merged* program's TypeId space,
+    /// recorded by the cross-TU merge pass. During `merge_unit_index` all
+    /// functions are registered before their param variables are remapped, so
+    /// `param_type(VarId)` cannot resolve a same-unit predecessor's params
+    /// when a later overload is compared against it. This field carries the
+    /// remapped types so the gate still separates `f(int)` from `f(double)`.
+    pub param_type_ids: Vec<TypeId>,
     /// Declared `virtual` (C++ methods). Virtual dispatch expansion treats a
     /// method as virtual if *any* entry with its qualified name carries this
     /// flag, so out-of-class definitions without the token still participate.
@@ -185,6 +192,7 @@ impl SymbolTable {
         func: Function,
         param_types: Option<&[TypeId]>,
     ) -> FnId {
+        let mut pending_param_type_ids: Option<Vec<TypeId>> = None;
         if func.linkage == Linkage::External {
             let existing_id = self.fn_by_name.get(&func.name).copied();
             if let Some(existing_id) = existing_id {
@@ -223,23 +231,36 @@ impl SymbolTable {
                         // When `param_types` is supplied (cross-TU merge) it
                         // holds the remapped global types of `func.params`;
                         // otherwise (per-TU) they resolve via `param_type`.
-                        // A side whose type is unresolvable falls back to
-                        // arity-only, like the C-vs-C++ path.
+                        // The existing side resolves through `param_type_ids`
+                        // first: during a merge pass all functions register
+                        // before their param variables are remapped, so the
+                        // VarId probe comes back `None` for a same-unit
+                        // predecessor with a *different* signature. A side
+                        // whose type is unresolvable falls back to arity-only,
+                        // like the C-vs-C++ path.
                         arity_ok
                             && (existing.params.is_empty()
                                 || func.params.is_empty()
-                                || existing.params.iter().zip(func.params.iter().enumerate()).all(
-                                    |(a, (i, b))| {
-                                        let incoming = param_types
+                                || {
+                                    let existing_t = |i: usize| {
+                                        existing
+                                            .param_type_ids
+                                            .get(i)
+                                            .copied()
+                                            .or_else(|| self.param_type(existing.params[i]))
+                                    };
+                                    let ok = existing.params.iter().enumerate().all(|(i, _)| {
+                                        let incoming_t = param_types
                                             .and_then(|ts| ts.get(i))
                                             .copied()
-                                            .or_else(|| self.param_type(*b));
-                                        match (self.param_type(*a), incoming) {
+                                            .or_else(|| self.param_type(*func.params.get(i).unwrap()));
+                                        match (existing_t(i), incoming_t) {
                                             (Some(ta), Some(tb)) => ta == tb,
                                             _ => true,
                                         }
-                                    },
-                                ))
+                                    });
+                                    ok
+                                })
                     })
                     .unwrap_or(false);
                 if mergeable {
@@ -255,6 +276,12 @@ impl SymbolTable {
                             }
                         } else if existing.params.is_empty() && !func.params.is_empty() {
                             existing.params = func.params.clone();
+                        }
+                        // The surviving entry now carries the incoming
+                        // signature's types (it may even be a different
+                        // overload whose definition overwrote a prototype).
+                        if let Some(ts) = param_types {
+                            existing.param_type_ids = ts.to_vec();
                         }
                         if func.is_virtual {
                             existing.is_virtual = true;
@@ -281,6 +308,9 @@ impl SymbolTable {
                 .entry(func.name.clone())
                 .or_default()
                 .push(func.id);
+            // The entry is not indexed yet (push_indexed runs below), so
+            // carry the remapped signature types to the push.
+            pending_param_type_ids = param_types.map(|ts| ts.to_vec());
         }
         if func.linkage == Linkage::Internal {
             // Merge forward declarations with definitions for internal
@@ -325,7 +355,13 @@ impl SymbolTable {
                 .or_default()
                 .insert(func.name.clone(), func.id);
         }
-        self.push_indexed(func)
+        if let Some(ts) = pending_param_type_ids.take() {
+            let mut func = func;
+            func.param_type_ids = ts;
+            self.push_indexed(func)
+        } else {
+            self.push_indexed(func)
+        }
     }
 
     /// Push a synthesized `Function` (e.g. extern-callee stubs) without
@@ -546,6 +582,7 @@ mod tests {
             end_line: line,
             file,
             is_defined,
+            param_type_ids: Vec::new(),
             is_virtual: false,
             is_final: false,
             is_cpp,

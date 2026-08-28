@@ -261,15 +261,47 @@ direct edge to `TraceStateMachine::OpenTrace` when that class is in-tree.
 
 ## C9 — Template member calls (`GetNumber<T>`)
 
-DB: `fieldNum->GetNumber< uint64_t>` (~40 unresolved). Primary-name
-stripping already maps `Box<Widget>::put` → `Box::put`; template
-**methods** with explicit `<T>` in the callee text still miss.
+**Status: implemented.** `fieldNum->GetNumber<uint64_t>()` now resolves.
+`tree-sitter-cpp` parses the method slot of a call like
+`obj.GetNumber<int>()` as `template_method` (not `field_identifier`), so
+the member-call matcher had to accept it; `strip_template_args` /
+`normalize_qualified` already produce the primary name `GetNumber`.
+In-class template methods parse as `template_declaration` members inside
+the class body and are now registered as prototypes and lowered (their
+`function_definition` is unwrapped). Fixture
+`tests/fixtures/cpp_templates_overloads`.
 
-**Design sketch:** Strip `<…>` from **callee_text** / qualified names
-the same way class templates are stripped; arity-only overload pick.
+**Eval result:** those sites are direct `FieldValue::GetNumber` /
+`Box::read`, not unresolved-indirect.
 
-**Eval when done:** those sites become direct `FieldValue::GetNumber`
-(or whatever the primary is), not unresolved-indirect.
+### Overload resolution by scalar type (part of this slice)
+
+Same-arity overloads with distinct scalar parameter types stay distinct
+end-to-end:
+
+- `TypeDesc` gained `Bool`/`Short`/`LongLong`/`Float`/`Double` (previously
+  everything collapsed to `Int`/`Long`), with `ScalarKind` and full
+  layout/export support. Imprecisions: `unsigned`/`signed` collapse to
+  `Int`, `signed long long`→`LongLong`, `long double`→`Double`.
+- Cross-TU merge (`merge_unit_index` → `add_function_with_param_types`)
+  re-adds every function with *remapped* param TypeIds, but the incoming
+  `Function.params` still hold unit-local VarIds while merging, so a
+  same-unit predecessor's type probe came back `None` and the gate fell
+  back to arity-only — collapsing `f(double)` into `f(int)` during the
+  merge pass. Fixed with `Function::param_type_ids: Vec<TypeId>`: the
+  gate resolves the existing side via `param_type_ids` first, new entries
+  carry the remapped signature via `pending_param_type_ids` into
+  `push_indexed`. All `Function { … }` literals set it to `Vec::new()`.
+- Call sites rank same-arity candidates: `CallArgs.arg_desc` carries the
+  static `TypeDesc` of each argument (casts unwrapped, numeric literal
+  width, char, `true`/`false`, string, `nullptr`, and var/field/subscript
+  types resolved); a single exact match (score 0) is preferred, ties /
+  unknowns fall back to the full arity set (may-approx).
+
+**Known limitation:** 0-arg member overload calls (e.g. the 1-arg vs
+0-arg `GetNumber`) resolve through the `functions_named` primary only, so
+they emit one edge; 1-arg member calls resolve exactly via the generic
+path (`GetNumber(7L)` → the `long` overload). Not a regression.
 
 ---
 
@@ -422,6 +454,6 @@ plugins without `dlsym` is C3 (static `REGISTER` ctors).
 | C5 | `map<string, shared_ptr<Plugin>>` + `find("Foo")->second->OnEventProxy()` |
 | C6 | Proxy field filled by factory, then `proxy->OnEvent()` |
 | C7 | `map<int, int(*)(Msg*)>` + `parser(msg)` |
-| C9 | `obj.GetNumber<uint64_t>()` → `GetNumber` |
+| C9 | `obj.GetNumber<uint64_t>()` → `GetNumber`; overlay done — see `tests/fixtures/cpp_templates_overloads` |
 | C10 | `.c` includes `class` header, `.cpp` defines methods; virtual call still CHA |
 | C11 | `dlsym(h, "target")` then call; `extern "C" int target()` in-tree |

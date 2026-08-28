@@ -1,3 +1,5 @@
 /target
 *.db
 *.db.tmp
+__pycache__/
+*.pyc
