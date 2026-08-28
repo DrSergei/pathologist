@@ -16,6 +16,12 @@ counts. Two intended moves are now visible in the aggregates:
   (observed on camera: 22,289 ± 29 functions, 43,312 ± 228 edges across identical binaries),
   so exact counts can wiggle between runs.
 
+Performance was re-measured with the current binary (fresh runs, `--jobs 8`; stage timers
+are stable, wall-clock varies with cache so values are rounded). The declarator-shaping
+fixes (`int **p` params, multi-level pointer casts) leave the `index` stage flat on all
+three corpora; the only solver delta is hdf `analyze` (1.3s → ~2.1s) from modeling depth-2
+pointer chains for real `int**` parameters.
+
 Each corpus is a separate section: **performance first**, then the **complete case list**. A case is file, line, function, and the full list of resolved function-pointer (or CHA virtual) targets from this binary.
 
 C++ fixture coverage (`cpp_basic`, `cpp_dispatch`, `cpp_callable`, `cpp_flow`, …) lives under `tests/fixtures/` and is exercised by `cargo test`, not as a corpus below.
@@ -31,24 +37,24 @@ C++ fixture coverage (`cpp_basic`, `cpp_dispatch`, `cpp_callable`, `cpp_flow`, �
 
 | Step | Time |
 |------|-----:|
-| Index | 3.7s |
-| Analyze | 1.3s |
-| Export | 0.7s |
-| **Wall** | **5.9s** |
+| Index | 3.9s |
+| Analyze | 2.1s |
+| Export | 0.8s |
+| **Wall** | **7.0s** |
 
 | Metric | Value |
 |--------|------:|
 | Files | 1,483 |
 | Functions | 11,721 (9,382 defined / 2,339 external) |
-| Call edges | 40,347 |
-| Direct / indirect / external | 20,916 / **4,475** / 14,956 |
-| Arg-flow edges | 32,400 |
+| Call edges | 40,344 |
+| Direct / indirect / external | 20,916 / **4,472** / 14,956 |
+| Arg-flow edges | 32,404 |
 | Parse warnings | 370 |
 | `dlsym` PAG edges | 4 |
 
 Sequential warm, then **wave-parallel PCH** (626 headers). Nested merge is **types/typedefs** from **direct** includes plus this header's preprocess `included_headers` (child units already nested-merged grandchild types). Each TU merges **symbols** from every include-graph-reachable header plus preprocess `included_headers`. After warm, preprocess `included_headers` are added as include-graph edges so a header is never PCH'd in the same wave as a nested type the raw `#include` scanner missed; headers that become reachable only then move from the orphan path into PCH. Include-graph **cycles** are indexed in order, not as a parallel leftover wave. That was the `DeviceNodeExtDispatch` 73→72 drop (`DispatchToMessage`): `hdf_wifi_core.c` designated `.object.objectId = 1, .Dispatch = DispatchToMessage` needs a complete `struct HdfObject` prefix inside `IDeviceIoService`. Parallel leaves used to intern that nested tag empty; sequential path-sort happened to PCH `hdf_object.h` first. With preprocess edges, waves keep all 73 names (including `DispatchToMessage`). `pch-done` 0.2s vs 1.0s sequential. Index also keeps a named-tag → richest-`TypeId` map (no scan of `types[]` on every intern), shares file/preprocessed text as `Arc<str>`, caches `canonicalize`, and builds each TU's header preamble from one PCH topo order (no per-TU Kahn sort or recanonicalize of graph keys).
 
-Hub unique-indirect counts are unchanged vs the previous correct snapshot: `DeviceNodeExtDispatch` **73** (includes `DispatchToMessage`), `HdfDeviceLaunchNode` **125**, `HdfSbufReadBuffer` **2**, `StreamDispatch` **24**, `HdfCameraDispatch` **23**, `HdfPmDriverDispatch` **19**, `HdfObjectManagerGetObject` **18**, `PlatformDumperDump` **13**, `SetOption` **13**, `DeviceDriverBind` 122 edges / **106** names, `GpioOnDevEventReceive` 13 edges / **12** names. Leftovers: `HdfDeviceUnlaunchNode` **112** names, linux `WorkEntry` **20**. Global indirect is **4,475** (no hub names lost; the +1 indirect edge over the previous table is one new C++ overload record split, not a hub change). Because same-name overloads now stay distinct, a hub can have more `functions` rows than names; the counts above are **unique names** (call/export rows may be a few higher).
+Hub unique-indirect counts are unchanged vs the previous correct snapshot: `DeviceNodeExtDispatch` **73** (includes `DispatchToMessage`), `HdfDeviceLaunchNode` **125**, `HdfSbufReadBuffer` **2**, `StreamDispatch` **24**, `HdfCameraDispatch` **23**, `HdfPmDriverDispatch` **19**, `HdfObjectManagerGetObject` **18**, `PlatformDumperDump` **13**, `SetOption` **13**, `DeviceDriverBind` 122 edges / **106** names, `GpioOnDevEventReceive` 13 edges / **12** names. Leftovers: `HdfDeviceUnlaunchNode` **112** names, linux `WorkEntry` **20**. Global indirect is **4,472** (no hub names lost; the +1 indirect edge over the previous table is one new C++ overload record split, not a hub change). Because same-name overloads now stay distinct, a hub can have more `functions` rows than names; the counts above are **unique names** (call/export rows may be a few higher). Since this table was refreshed, pointer-typed locals are typed through their declarator (`int *p` no longer reads as `int`); the only effect on HDF is a **−3 indirect-edge reclassification inside `framework/test/unittest`** — 18 test-harness fn-ptr targets (`OsalEventHandlerHead/Tail` dlist sentinels, PM-test `HdfPmHdfTestSuspend`/`HdfPmSampleSuspend`) were removed as non-reachable while 21 real targets were added (`OsalThreadFn` → 13 genuine thread-entry functions, `AudioPlatformDevInit → AudioUsbDmaDeviceInit`). Every hub/fns-correctness name above is unchanged.
 
 ## Cases
 
@@ -1506,10 +1512,10 @@ Same 13 drivers as case 48, `Set*Disable` stores. Complete vs source.
 
 | Step | Time |
 |------|-----:|
-| Index | 3.2s |
-| Analyze | 0.1s |
-| Export | 0.5s |
-| **Wall** | **3.9s** |
+| Index | 3.6s |
+| Analyze | 0.2s |
+| Export | 0.6s |
+| **Wall** | **4.4s** |
 
 | Metric | Value |
 |--------|------:|
@@ -1912,10 +1918,10 @@ Hang / stack-overflow checks, not dispatch-hub evals. PCH-style header IR is wha
 
 | Step | Time |
 |------|-----:|
-| Index | 8.8s |
+| Index | 9.7s |
 | Analyze | 0.3s |
-| Export | 1.5s |
-| **Wall** | **9.5s** |
+| Export | 1.7s |
+| **Wall** | **12.0s** |
 
 | Metric | Value |
 |--------|------:|

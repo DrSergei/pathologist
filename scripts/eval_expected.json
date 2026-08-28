@@ -13,7 +13,7 @@
         "functions_external": {"cmp": "band", "value": 2339, "tol": 40},
         "edges_total": {"cmp": "band", "value": 40347, "tol": 240},
         "edges_direct": {"cmp": "band", "value": 20916, "tol": 240},
-        "edges_indirect": {"cmp": "exact", "value": 4475},
+        "edges_indirect": {"cmp": "exact", "value": 4472},
         "edges_external": {"cmp": "band", "value": 14956, "tol": 200},
         "arg_flow_edges": {"cmp": "band", "value": 32400, "tol": 150},
         "diagnostics": {"cmp": "exact", "value": 370},

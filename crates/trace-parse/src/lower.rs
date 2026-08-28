@@ -1688,6 +1688,7 @@ fn lower_parameter(
         None => (String::new(), false),
     };
     let unnamed = name.is_empty();
+    let declarator = node.child_by_field_name("declarator");
     let base_desc = node
         .child_by_field_name("type")
         .map(|t| type_desc_from_node(program, ctx, source, t))
@@ -1699,10 +1700,19 @@ fn lower_parameter(
     if unnamed {
         name = format!("$arg{index}");
     }
-    let type_desc = if is_ptr {
+    // `parse_declarator_name` reduces the declarator to a single pointer
+    // bool, which would collapse `int **p` to `Ptr(Int)` and make `int**`
+    // overloads indistinguishable from `int*`. Recover the full nesting
+    // from the declarator shape instead (`int **p` -> Ptr(Ptr(Int))).
+    // References keep the single pointer level: their alias semantics are
+    // what matter, and they are not shaped by the walk.
+    let shape = declarator
+        .map(|d| walk_declarator_shape(d, base_desc.clone()))
+        .unwrap_or_else(|| base_desc.clone());
+    let type_desc = if is_ptr && !matches!(shape, TypeDesc::Ptr(_) | TypeDesc::Array { .. }) {
         TypeDesc::Ptr(Box::new(base_desc))
     } else {
-        base_desc
+        shape
     };
     let type_id = program.types.intern(type_desc);
     let var_id = program.symbols.alloc_var_id();
@@ -1745,9 +1755,11 @@ fn lower_declaration(
                 // `auto p = new T(...)`: recover the pointee class so member
                 // calls through p resolve by static type.
                 let mut eff_type_id = type_id;
+                let mut auto_new = false;
                 if type_node.kind() == "placeholder_type_specifier" {
                     if let Some(value) = child.child_by_field_name("value") {
                         if value.kind() == "new_expression" {
+                            auto_new = true;
                             if let Some(cls) = new_expression_class(program, ctx, source, value) {
                                 let inner = program.types.intern(TypeDesc::Struct {
                                     name: cls,
@@ -1759,6 +1771,14 @@ fn lower_declaration(
                             }
                         }
                     }
+                }
+                // A pointer/array declarator (`int *p`) must wrap the base
+                // type like params already do; otherwise the local reads as
+                // its base scalar and pointer args mis-rank `f(int)` over
+                // the real `f(int*)`.
+                if !auto_new {
+                    let base = program.types.get(type_id).desc.clone();
+                    eff_type_id = program.types.intern(walk_declarator_shape(decl, base));
                 }
                 lower_one_declarator(
                     program,
@@ -1786,13 +1806,17 @@ fn lower_declaration(
                     lower_function_decl(program, ctx, source, fdecl, ret, is_static);
                     continue;
                 }
+                let shaped_type_id = {
+                    let base = program.types.get(type_id).desc.clone();
+                    program.types.intern(walk_declarator_shape(child, base))
+                };
                 lower_one_declarator(
                     program,
                     ctx,
                     source,
                     child,
                     child,
-                    type_id,
+                    shaped_type_id,
                     is_static,
                     storage_override,
                     None,
@@ -2574,6 +2598,22 @@ fn arg_expr_type(program: &mut Program, ctx: &mut LowerContext, source: &str, no
     match node.kind() {
         "cast_expression" => {
             if let Some(ty) = node.child_by_field_name("type") {
+                // `type_desc_from_node` reads scalar text with `contains`,
+                // so a pointer cast would classify the value as a scalar and
+                // exactly match the wrong overload (`(float*)p` -> $f(float)$).
+                // Count the pointer levels on the type text and wrap that
+                // many times, so `(int*)p` is Ptr(Int) and `(int**)p` is
+                // Ptr(Ptr(Int)) — never one level short, which would bind
+                // `(char**)p` to a `f(char*)` overload.
+                let text = node_text(source, &ty);
+                if text.contains('*') || text.contains('[') {
+                    let wraps = text.matches('*').count() + usize::from(text.contains('['));
+                    let mut desc = type_desc_from_node(program, ctx, source, ty);
+                    for _ in 0..wraps {
+                        desc = TypeDesc::Ptr(Box::new(desc));
+                    }
+                    return desc;
+                }
                 return type_desc_from_node(program, ctx, source, ty);
             }
             TypeDesc::Unknown
@@ -2591,8 +2631,29 @@ fn arg_expr_type(program: &mut Program, ctx: &mut LowerContext, source: &str, no
                 // member is passed as its pointee (array decay), and a
                 // struct-by-value member as the struct.
                 if matches!(node.kind(), "field_expression" | "subscript_expression") {
-                    if let TypeDesc::Ptr(inner) = &desc {
-                        return (**inner).clone();
+                    match &desc {
+                        TypeDesc::Ptr(inner) if node.kind() == "subscript_expression" => {
+                            // `arr[i]`: the element value is the pointee.
+                            return (**inner).clone();
+                        }
+                        TypeDesc::Ptr(inner)
+                            if matches!(**inner, TypeDesc::Struct { .. } | TypeDesc::Union { .. }) =>
+                        {
+                            // `p->field`: the pointee is the *receiver*, not
+                            // the member's value — classifying the arg as the
+                            // struct mis-ranks `f(p->field)` with `f(int)`
+                            // overloads exactly like the `s.name` case.
+                            return TypeDesc::Unknown;
+                        }
+                        TypeDesc::Ptr(inner) => return (**inner).clone(),
+                        TypeDesc::Struct { .. } | TypeDesc::Union { .. } => {
+                            // `s.name`: `resolve_expr_var` only recovers the
+                            // receiver, so `Struct(s)` would be a confident
+                            // wrong pick for a scalar member. Degrade so
+                            // ranking keeps the full candidate set.
+                            return TypeDesc::Unknown;
+                        }
+                        _ => return desc,
                     }
                 }
                 return desc;
@@ -2625,7 +2686,6 @@ fn number_literal_desc(text: &str) -> TypeDesc {
 /// Any ambiguity (ties, no exact match, unresolvable args) keeps the whole
 /// arity-set — the may-approximation — rather than guessing.
 fn rank_overloads(program: &Program, candidates: &[FnId], arg_desc: &[TypeDesc]) -> Vec<FnId> {
-    let arg_desc = arg_desc.to_vec();
     let score = |f: FnId| -> usize {
         let params = &program.symbols.function(f).params;
         params
@@ -4673,7 +4733,7 @@ fn type_desc_from_node(
             name: extract_tag_name(source, &node, "struct"),
             fields: Vec::new(),
         }
-    } else if let Some(desc) = primitive_scalar_desc(&text) {
+    } else if let Some(desc) = primitive_scalar_desc(text) {
         desc
     } else if text.contains("char") {
         TypeDesc::Char

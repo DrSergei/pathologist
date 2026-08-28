@@ -604,7 +604,6 @@ mod tests {
             file,
             3,
         );
-        let mut proto = proto;
         let param = Variable {
             id: proto.params[0],
             name: "$arg0".into(),

@@ -846,3 +846,100 @@ fn cpp_template_member_calls_resolve_to_primary_name() {
         "template member calls must be direct, not external stubs"
     );
 }
+
+#[test]
+fn cpp_pointer_casts_rank_against_pointer_overloads() {
+    let root = fixture("cpp_pointer_cast_overloads");
+    let program = build_program(&root, &default_opts(&root)).expect("build");
+    let (_pag, analysis) = analyze(&program);
+
+    let sig_count = |name: &str, sigs: Vec<String>| {
+        analysis
+            .call_edges
+            .iter()
+            .filter(|e| {
+                fn_name(&program, e.caller) == "main" && e.resolution == ResolutionKind::Direct
+            })
+            .filter(|e| fn_name(&program, e.callee) == name)
+            .filter(|e| fn_param_descs(&program, e.callee) == sigs)
+            .count()
+    };
+    let int = vec!["Int".to_string()];
+    let ptr_int = vec!["Ptr(Int)".to_string()];
+    let ch = vec!["Char".to_string()];
+    let ptr_ch = vec!["Ptr(Char)".to_string()];
+    let ptr_ptr_int = vec!["Ptr(Ptr(Int))".to_string()];
+
+    assert_eq!(sig_count("f", int.clone()), 1, "f(i) must pick exactly f(int)");
+    assert_eq!(
+        sig_count("f", ptr_int),
+        2,
+        "f((int*)&i) and f(pi) must resolve to f(int*), not f(int)"
+    );
+    assert_eq!(
+        sig_count("f", ch.clone()),
+        1,
+        "f(c) must pick f(char), not f(char*)"
+    );
+    assert_eq!(
+        sig_count("f", ptr_ch),
+        2,
+        "f((char*)&c) and f(pc) must resolve to f(char*)"
+    );
+    assert_eq!(
+        sig_count("f", ptr_ptr_int.clone()),
+        2,
+        "f((int**)&pi) and f(pp) must resolve to f(int**), not one pointer level short"
+    );
+    let f_direct_total = analysis
+        .call_edges
+        .iter()
+        .filter(|e| {
+            fn_name(&program, e.caller) == "main"
+                && fn_name(&program, e.callee) == "f"
+                && e.resolution == ResolutionKind::Direct
+        })
+        .count();
+    assert_eq!(
+        f_direct_total, 8,
+        "all eight f() call sites must resolve to exactly one callee each"
+    );
+}
+
+#[test]
+fn cpp_unresolvable_member_args_keep_full_candidate_set() {
+    let root = fixture("cpp_pointer_cast_overloads");
+    let program = build_program(&root, &default_opts(&root)).expect("build");
+    let (_pag, analysis) = analyze(&program);
+
+    // `g(gh.val)` and `g(hp->val)` cannot be ranked past the receiver
+    // (struct or pointer-to-struct), so BOTH the int and the Holder overload
+    // stay for each member call (may-approximation) — five edges total:
+    // g(42) -> g(int) only, plus two member calls each keeping both.
+    let g_targets: Vec<Vec<String>> = analysis
+        .call_edges
+        .iter()
+        .filter(|e| {
+            fn_name(&program, e.caller) == "main"
+                && fn_name(&program, e.callee) == "g"
+                && e.resolution == ResolutionKind::Direct
+        })
+        .map(|e| fn_param_descs(&program, e.callee))
+        .collect();
+    assert_eq!(
+        g_targets.len(),
+        5,
+        "g(42) + g(gh.val) + g(hp->val) must contribute 1 + 2 + 2 edges, got {g_targets:?}"
+    );
+    let mut seen: Vec<Vec<String>> = g_targets.clone();
+    seen.sort();
+    seen.dedup();
+    assert!(
+        seen.contains(&vec!["Int".to_string()]),
+        "g(int) must be present, got {g_targets:?}"
+    );
+    assert!(
+        seen.iter().any(|s| !s.is_empty() && s[0].starts_with("Struct")),
+        "g(Holder) must be among the kept candidates (both receiver shapes), got {g_targets:?}"
+    );
+}
