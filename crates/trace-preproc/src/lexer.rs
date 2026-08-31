@@ -242,6 +242,10 @@ impl<'a> Lexer<'a> {
             {
                 s.push(ch);
                 self.advance_char();
+            } else if ch == '\'' && self.peek_char_at(1).is_ascii_alphanumeric() {
+                // C++14 digit separator (1'000'000): skip it so the whole
+                // literal stays one Number token.
+                self.advance_char();
             } else {
                 break;
             }
