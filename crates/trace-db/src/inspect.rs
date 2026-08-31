@@ -156,24 +156,32 @@ type Adjacency = FxHashMap<i64, Vec<(i64, &'static str, String)>>;
 
 fn load_call_adjacency(conn: &Connection, dir: Direction) -> Result<Adjacency> {
     let mut stmt = conn.prepare(
-        "SELECT cs.caller_fn_id, ce.callee_fn_id, ce.resolution, p.path, cs.line \
+        "SELECT ce.caller_fn_id, ce.callee_fn_id, ce.resolution, p.path, cs.line \
          FROM call_edges ce \
-         JOIN call_sites cs ON cs.id = ce.call_site_id \
-         JOIN files p ON p.id = cs.file_id",
+         LEFT JOIN call_sites cs ON cs.id = ce.call_site_id \
+         LEFT JOIN files p ON p.id = cs.file_id",
     )?;
     let mut adj: Adjacency = FxHashMap::default();
     let rows = stmt.query_map([], |row| {
+        // Synthetic edges (IPC bridges) have no call site; render them with a
+        // placeholder location rather than mis-attributing a real call site.
+        let path: Option<String> = row.get(3)?;
+        let line: Option<i64> = row.get(4)?;
+        let site = match (&path, line) {
+            (Some(p), Some(l)) => {
+                format!("{}:{}", p.rsplit('/').next().unwrap_or(p), l)
+            }
+            _ => "(ipc bridge)".to_string(),
+        };
         Ok((
             row.get::<_, i64>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, i64>(4)?,
+            site,
         ))
     })?;
     for r in rows {
-        let (caller, callee, resolution, path, line) = r?;
-        let site = format!("{}:{}", path.rsplit('/').next().unwrap_or(&path), line);
+        let (caller, callee, resolution, site) = r?;
         match dir {
             Direction::Down => {
                 adj.entry(caller)
@@ -196,6 +204,7 @@ fn leak_resolution(resolution: &str) -> &'static str {
         "indirect" => "indirect",
         "ambiguous" => "ambiguous",
         "external" => "external",
+        "ipc" => "ipc",
         _ => "call",
     }
 }
@@ -701,12 +710,12 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO call_edges (id, call_site_id, callee_fn_id, resolution) VALUES (200, 100, 11, 'direct')",
+            "INSERT INTO call_edges (id, call_site_id, caller_fn_id, callee_fn_id, resolution) VALUES (200, 100, 10, 11, 'direct')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO call_edges (id, call_site_id, callee_fn_id, resolution) VALUES (201, 101, 12, 'external')",
+            "INSERT INTO call_edges (id, call_site_id, caller_fn_id, callee_fn_id, resolution) VALUES (201, 101, 11, 12, 'external')",
             [],
         )
         .unwrap();
@@ -828,7 +837,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO call_edges (id, call_site_id, callee_fn_id, resolution) VALUES (202, 102, 10, 'direct')",
+            "INSERT INTO call_edges (id, call_site_id, caller_fn_id, callee_fn_id, resolution) VALUES (202, 102, 11, 10, 'direct')",
             [],
         )
         .unwrap();
@@ -929,12 +938,12 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO call_edges (id, call_site_id, callee_fn_id, resolution) VALUES (203, 103, 14, 'direct')",
+            "INSERT INTO call_edges (id, call_site_id, caller_fn_id, callee_fn_id, resolution) VALUES (203, 103, 13, 14, 'direct')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO call_edges (id, call_site_id, callee_fn_id, resolution) VALUES (204, 104, 13, 'direct')",
+            "INSERT INTO call_edges (id, call_site_id, caller_fn_id, callee_fn_id, resolution) VALUES (204, 104, 14, 13, 'direct')",
             [],
         )
         .unwrap();

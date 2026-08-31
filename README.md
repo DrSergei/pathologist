@@ -58,6 +58,7 @@ trace analyze [OPTIONS] <TARGET>
 | `--full-export` | Export full IR detail: all types, all variables, PAG `locations`. Slower and produces a larger database. |
 | `--debug-points-to` | Retain points-to sets during analysis and export the `points_to` debug table (requires PAG in memory). Implies keeping location data needed for export. |
 | `--models <FILE>` | Load a TOML function-model file (interprocedural summaries for bodyless callees, e.g. `memcpy_s`). Repeatable; later files override earlier entries and built-ins. See `docs/ANALYSIS.md`. |
+| `--no-ipc` | Disable IPC proxy→stub bridge edge detection (enabled by default). Bridge edges are synthetic (`resolution = 'ipc'`, `call_site_id = NULL`) and connect a `*Proxy*` method to its `*Stub*` handler across the opaque Binder boundary. See `docs/IPC_ROADMAP.md`. |
 
 **Progress output** (stderr):
 
@@ -408,9 +409,10 @@ Resolved caller → callee edges (one row per target; indirect sites may have mu
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | INTEGER PK | Edge id. |
-| `call_site_id` | INTEGER FK → `call_sites` | Call site this edge resolves. |
+| `call_site_id` | INTEGER FK → `call_sites` | Call site this edge resolves; `NULL` for synthetic IPC bridge edges. |
+| `caller_fn_id` | INTEGER FK → `functions` | Resolved caller function. |
 | `callee_fn_id` | INTEGER FK → `functions` | Resolved target function. |
-| `resolution` | TEXT | `direct`, `indirect`, `ambiguous`, or `external` (statically resolved but bodyless under the analyzed root). |
+| `resolution` | TEXT | `direct`, `indirect`, `ambiguous`, `external` (statically resolved but bodyless under the analyzed root), or `ipc` (synthetic proxy→stub bridge edge — no source call site, caller is the proxy method). |
 
 **Indexes:** `call_edges(callee_fn_id)`, `call_edges(call_site_id)`.
 

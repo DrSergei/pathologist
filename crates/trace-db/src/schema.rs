@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS call_sites (
 
 CREATE TABLE IF NOT EXISTS call_edges (
     id INTEGER PRIMARY KEY,
-    call_site_id INTEGER NOT NULL REFERENCES call_sites(id),
+    call_site_id INTEGER REFERENCES call_sites(id),
+    caller_fn_id INTEGER NOT NULL REFERENCES functions(id),
     callee_fn_id INTEGER NOT NULL REFERENCES functions(id),
     resolution TEXT NOT NULL
 );

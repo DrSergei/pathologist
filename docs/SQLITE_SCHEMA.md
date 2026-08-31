@@ -109,11 +109,20 @@ Call sites inside header-defined functions are deduplicated by
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | INTEGER PK | Edge id |
-| `call_site_id` | INTEGER FK → `call_sites` | Call site |
+| `call_site_id` | INTEGER FK → `call_sites` | Call site; **`NULL` for synthetic edges** (see below) |
+| `caller_fn_id` | INTEGER FK → `functions` | Resolved caller function |
 | `callee_fn_id` | INTEGER FK → `functions` | Resolved target |
-| `resolution` | TEXT | `direct`, `indirect`, `ambiguous`, `external` (callee statically resolved but bodyless under the analyzed root — see `functions.is_defined`) |
+| `resolution` | TEXT | `direct`, `indirect`, `ambiguous`, `external` (callee statically resolved but bodyless under the analyzed root — see `functions.is_defined`), `ipc` (synthetic proxy→stub bridge edge) |
 
 Multiple rows per call site are allowed (may-analysis indirect targets).
+
+**Synthetic edges (IPC bridges):** edges injected for a proxy→stub bridge
+carry `call_site_id = NULL` and `resolution = 'ipc'` (there is no single
+source-level call site — the proxy body only has the opaque `SendRequest`
+call). Their caller is given by `caller_fn_id` (the proxy method); consumers
+must use `ce.caller_fn_id`, not `cs.caller_fn_id`, and treat `NULL` as a
+synthetic/bridge edge with no source location. IPC detection is enabled by
+default and disabled with the `--no-ipc` analyze flag.
 
 **Indexes:** `call_edges(callee_fn_id)`, `call_edges(call_site_id)`
 

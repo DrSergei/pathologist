@@ -1,4 +1,5 @@
 use crate::constraints::{AbstractLocation, Constraint, ConstraintKind, LocKind};
+use crate::ipc::detect_ipc_pairs;
 use crate::summaries::{Effect, FnModelSet};
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -63,6 +64,9 @@ pub struct Pag {
     /// Maps callee_var load-var to the PAG node that should receive the
     /// return value of indirect calls whose function pointer is that var.
     pub indirect_return_dst: FxHashMap<VarId, PagNodeId>,
+    /// Detected IPC proxy→stub bridges (proxy method → stub handler).
+    /// The solver emits a synthetic call edge for each bridge.
+    pub ipc_bridges: Vec<trace_ir::IpcBridge>,
     pub indices: SolverIndices,
 }
 
@@ -79,6 +83,7 @@ impl Pag {
         pag.build_dlsym_constraints(program, models);
         pag.build_call_constraints(program);
         pag.build_indices(program);
+        pag.ipc_bridges = detect_ipc_pairs(program);
         pag
     }
 
