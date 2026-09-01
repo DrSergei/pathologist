@@ -941,10 +941,12 @@ impl PreprocessorState {
                 }
                 self.conditional_stack.pop();
             }
-            "line" => {
-                // #line N "file" — update location tracking
-                i = self.skip_to_newline(tokens, i);
-            }
+            // Directives whose operands we ignore: the shared skip below
+            // consumes the rest of the line. Calling skip_to_newline here as
+            // well would eat the newline AND the whole following line
+            // (e.g. `#pragma pack(push, 4)` swallowing the struct after it).
+            "line" => {}
+            "pragma" => {}
             "undef" if self.is_active() => {
                 let name = self.read_directive_ident(tokens, &mut i)?;
                 self.remove_macro(&name);
@@ -955,7 +957,6 @@ impl PreprocessorState {
                     tokens[i.saturating_sub(1)].line,
                     format!("unknown directive #{directive}"),
                 );
-                i = self.skip_to_newline(tokens, i);
             }
         }
         i = self.skip_to_newline(tokens, i);
@@ -2331,6 +2332,55 @@ mod tests {
         let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
         assert!(!result.output.contains("42"));
         assert!(result.output.contains("x = 1") || result.output.contains("int x"));
+    }
+
+    /// Regression: `#pragma pack(push, 4)` immediately followed by a struct
+    /// definition (e.g. OpenHarmony pwm_if.h) must not swallow the next line.
+    #[test]
+    fn pragma_keeps_next_line_and_does_not_warn() {
+        let src = "#pragma pack(push, 4)\nstruct PwmConfig {\n    int duty;\n};\n#pragma pack(pop)\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("struct PwmConfig"),
+            "line after #pragma was swallowed: {}",
+            result.output
+        );
+        assert!(result.output.contains("after"), "{}", result.output);
+        assert!(
+            !result.output.contains("pack"),
+            "pragma text must not leak into output: {}",
+            result.output
+        );
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("unknown directive")),
+            "#pragma is a standard directive, no warning expected: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn line_directive_keeps_next_line() {
+        let src = "#line 100 \"orig.c\"\nint kept;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+    }
+
+    #[test]
+    fn unknown_directive_warns_but_keeps_next_line() {
+        let src = "#frobnicate all the things\nint kept;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("unknown directive")),
+            "{:?}",
+            result.diagnostics
+        );
     }
 
     #[test]
