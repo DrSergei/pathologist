@@ -4,6 +4,8 @@
 **Binary:** `target/release/trace` (current tree; `cargo build --release` before the run, `cargo test --workspace` green)  
 **Re-verified 2026-08-28 (after the C++ overload/template slice):** every probe below was re-run on the new binary and is byte-identical; `cargo test --workspace` is green (25 suites, incl. 32 C++ cases + 3 new `cpp_templates_overloads` regression tests). New in this revision: Case 20 (scalar-type overload ranking at call sites) and Case 21 (template member calls) in §1.2.
 
+**Re-verified 2026-09-02 (variadic-macro preprocessor slice):** every probe below was re-run on the current binary; outputs are identical to master's, so the variadic changes alter no probe. Three blocks were refreshed for drift already present on master since 2026-08-28: the two `tie` overload records plus `Base::base_value` in Case 16, the depth-1 truncation note in Case 18, and the dependent `T` callee under `Box::read` in Case 20.
+
 **Method:** every fixture under `tests/fixtures/` that exercises indirect calls or value flow was analyzed fresh into `/tmp/*.db`, then probed with both tools. Every result was cross-checked three ways: (1) against the source files, (2) against `call_sites`/`call_edges` and `flow_nodes`/`flow_edges` in the export, (3) via recursive-CTE BFS closure queries on those tables.
 
 | Command | Data source | `--direction` meaning |
@@ -308,8 +310,8 @@ Fixture `cpp_more` (main.cpp + cpp_more.hpp `drive` at main.cpp:18-33):
 ```text
 callgraph from drive (main.cpp:18-33) (callees, depth 2):
 * drive (main.cpp:18)
-  -direct-> tie (main.cpp:5) (main.cpp:19)
-  -direct-> tie (main.cpp:5) (see above; also main.cpp:20)
+  -direct-> tie (main.cpp:4) (main.cpp:19)
+  -direct-> tie (main.cpp:5) (main.cpp:20)
   -direct-> D::D (cpp_more.hpp:46) (main.cpp:23)
     -direct-> Base::Base (main.cpp:9) (cpp_more.hpp:46)
     -direct-> Member::Member (main.cpp:11) (cpp_more.hpp:46)
@@ -322,12 +324,14 @@ callgraph from drive (main.cpp:18-33) (callees, depth 2):
   -direct-> S::Make (main.cpp:13) (see above; also main.cpp:32)
   -direct-> sink_w (main.cpp:16) (main.cpp:32)
     -direct-> Widget::make (main.cpp:7) (main.cpp:16)
-14 functions, 15 edges
+  -direct-> Base::base_value (cpp_more.hpp:7) (main.cpp:32)
+15 functions, 15 edges
 ```
 
 - `pa->fa()` (main.cpp:29) → `A::fa` **and** `AB::fa` — mult-inheritance CHA (both meanings of `fa` are reachable through an `A*`).
 - `D::D`'s ctor-init list inlines `Base::Base` + `Member::Member`.
-- Template `Box::put/get`, `S::Make`, and `sink_w → Widget::make` through the value-fn chain.
+- Template `Box::put/get`, `S::Make`, and `sink_w → Widget::make` through the value-fn chain; `w.value()` also surfaces `Base::base_value`.
+- The two `tie` calls resolve to the two distinct overload records (main.cpp:4 and main.cpp:5) instead of collapsing onto one.
 
 ### Case 17 — C/C++ interop: one call site, two implementations
 
@@ -352,6 +356,7 @@ callgraph from HdfSbufReadBuffer (hdf_sbuf.c:48-54) (callees, depth 1):
 * HdfSbufReadBuffer (hdf_sbuf.c:48)
   -indirect-> SbufRawImplReadBuffer (hdf_sbuf_impl_raw.c:12) (hdf_sbuf.c:53)
   -indirect-> SbufMParcelImplReadBuffer (hdf_sbuf_impl_hipc.cpp:49) (hdf_sbuf.c:53)
+(truncated at --depth 1; increase to see more)
 3 functions, 2 edges
 ```
 
@@ -393,14 +398,18 @@ callgraph from main (main.cpp:18-31) (callees, depth 2):
   -direct-> f (main.cpp:15) (main.cpp:26)   # f(s) -> f(short)
   -direct-> f (main.cpp:16) (main.cpp:27)   # f(1, 2) -> f(int, int)
   -direct-> Box::read (main.cpp:10) (main.cpp:29)
-8 functions, 8 edges
+    -external-> T (main.cpp:6 [external]) (main.cpp:10)
+9 functions, 9 edges
 ```
 
 `f(1)`, `f(1.5)`, `f(s)` each emit **one** direct edge to the distinct defined
 overload — `FieldValue::GetNumber` has 3 records (int / long / template primary).
 Candidates of the same name resolve independently; export `functions` keeps one
 row per overload, call sites one direct edge per exact match (ties still emit all
-candidates). Validate: `SELECT COUNT(*) ...` (see `scripts/eval_check.py`).
+candidates). The `-external-> T` edge under `Box::read` is the dependent call
+on the template parameter inside the primary (`T::read(...)`-style); with no
+concrete instantiation record it is kept as an external callee rather than
+dropped. Validate: `SELECT COUNT(*) ...` (see `scripts/eval_check.py`).
 
 ### Case 21 — template member calls (fixture `cpp_templates_overloads`)
 
