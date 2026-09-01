@@ -73,6 +73,21 @@ fn preproc_if0_dead_branch() {
 }
 
 #[test]
+fn preproc_object_macro_paren_fixture() {
+    let path = fixture("preproc/object_macro_paren.c");
+    let result = trace_preproc::preprocess_file(&path, &PreprocessOptions::new()).unwrap();
+    let flat = result.output.replace([' ', '\n'], "");
+    assert!(flat.contains("half=(.5);"), "{}", result.output);
+    assert!(flat.contains("origin=(.x=0,.y=0);"), "{}", result.output);
+    assert!(flat.contains("alias=(42);"), "{}", result.output);
+    assert!(flat.contains("wrap=(x)x(1);"), "{}", result.output);
+    assert!(flat.contains("square=((3)*(3));"), "{}", result.output);
+    assert!(flat.contains("spliced=(7);"), "{}", result.output);
+    assert!(flat.contains("intafter;"), "{}", result.output);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+}
+
+#[test]
 fn builtin_macro_fallbacks_fixture() {
     let root = fixture("builtin_macros");
     let opts = PreprocessOptions::new().with_include(root.clone());

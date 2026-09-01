@@ -1185,28 +1185,15 @@ impl PreprocessorState {
     }
 
     fn handle_define(&mut self, tokens: &[Token], mut i: usize) -> Result<usize, PreprocessError> {
-        while i < tokens.len() && matches!(tokens[i].kind, TokenKind::Newline) {
-            i += 1;
-        }
         let name = self.read_directive_ident(tokens, &mut i)?;
-        let paren_start = i;
-        if matches!(tokens.get(i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if s == "(")
-            && self.looks_like_function_macro_params(tokens, i + 1)
-        {
-            i += 1;
+        // `read_directive_ident` consumed exactly the name token.
+        if let Some(open) = parameter_list_open(tokens, i - 1) {
+            i = open + 1;
             let Some((params, variadic)) = self.parse_macro_param_list(tokens, &mut i) else {
                 skip_directive_line(tokens, &mut i);
                 return Ok(i);
             };
-            let mut replacement = Vec::new();
-            while i < tokens.len() && !matches!(tokens[i].kind, TokenKind::Newline) {
-                if is_line_continuation(tokens, i) {
-                    i += 2;
-                    continue;
-                }
-                replacement.push(tokens[i].clone());
-                i += 1;
-            }
+            let mut replacement = read_replacement_list(tokens, &mut i);
             // Normalize at define time: a named GNU variadic (`args...`)
             // whose body nevertheless spells `__VA_ARGS__` (gcc rejects the
             // mix; real corpora contain it) aliases the tail parameter, so
@@ -1232,37 +1219,9 @@ impl PreprocessorState {
             );
             return Ok(i);
         }
-
-        if matches!(tokens.get(i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if s == "(") {
-            // `#define NAME (...)` — object macro, replacement starts with `(`.
-            i = paren_start;
-        }
-
-        let mut replacement = Vec::new();
-        while i < tokens.len() && !matches!(tokens[i].kind, TokenKind::Newline) {
-            if is_line_continuation(tokens, i) {
-                i += 2;
-                continue;
-            }
-            replacement.push(tokens[i].clone());
-            i += 1;
-        }
+        let replacement = read_replacement_list(tokens, &mut i);
         self.insert_macro(name, MacroDef::Object { replacement });
         Ok(i)
-    }
-
-    fn looks_like_function_macro_params(&self, tokens: &[Token], mut i: usize) -> bool {
-        while i < tokens.len() && matches!(tokens[i].kind, TokenKind::Newline) {
-            i += 1;
-        }
-        match tokens.get(i).map(|t| &t.kind) {
-            Some(TokenKind::Identifier(_)) => true,
-            Some(TokenKind::Punct(s)) if s == ")" => true,
-            Some(TokenKind::Punct(s)) if s == "..." => true,
-            // The lexer emits `...` as three `.` tokens (`#define ANY(...)`).
-            Some(TokenKind::Punct(s)) if s == "." => true,
-            _ => false,
-        }
     }
 
     /// Parse the parameter list after `NAME(`. `None` means the list was
@@ -1716,6 +1675,47 @@ fn varargs_omitted(args: &[Vec<Token>], idx: usize) -> bool {
         return true;
     }
     idx == 0 && args.len() == 1 && arg_is_blank(&args[0])
+}
+
+/// Index of the `(` that opens a function-like macro's parameter list, if
+/// the token after the macro name at `name_idx` is one. C11 6.10.3p10: the
+/// definition is function-like only when `(` immediately follows the macro
+/// name with no intervening whitespace, so `#define ALIAS (VALUE)` and
+/// `#define HALF (.5)` are object macros whose replacement starts with `(`.
+/// Tokens carry no whitespace, so adjacency is decided from positions (the
+/// lexer counts columns per character). A `\`-newline pair is deleted in
+/// translation phase 2 and therefore zero-width: `F\`-newline-`(x)` is
+/// function-like when `(` starts the next line.
+fn parameter_list_open(tokens: &[Token], name_idx: usize) -> Option<usize> {
+    let name = &tokens[name_idx];
+    let TokenKind::Identifier(ident) = &name.kind else {
+        return None;
+    };
+    let (mut line, mut col) = (name.line, name.col + ident.chars().count() as u32);
+    let mut i = name_idx + 1;
+    while is_line_continuation(tokens, i) && tokens[i].line == line && tokens[i].col == col {
+        i += 2;
+        line += 1;
+        col = 1;
+    }
+    let next = tokens.get(i)?;
+    let adjacent = next.line == line && next.col == col;
+    (adjacent && matches!(&next.kind, TokenKind::Punct(s) if s == "(")).then_some(i)
+}
+
+/// Collect a `#define` replacement list up to the end of the line, splicing
+/// `\`-newline continuations.
+fn read_replacement_list(tokens: &[Token], i: &mut usize) -> Vec<Token> {
+    let mut replacement = Vec::new();
+    while *i < tokens.len() && !matches!(tokens[*i].kind, TokenKind::Newline) {
+        if is_line_continuation(tokens, *i) {
+            *i += 2;
+            continue;
+        }
+        replacement.push(tokens[*i].clone());
+        *i += 1;
+    }
+    replacement
 }
 
 fn substitute_macro(
@@ -2601,6 +2601,57 @@ mod tests {
         let result = preprocess_string("int *p = NULL;", Path::new("test.c"), &opts);
         assert!(result.output.contains("int") && result.output.contains("0"));
         assert!(!result.output.contains("NULL"));
+    }
+
+    /// Regression (#6): a body starting with `(.` is an object macro, not a
+    /// function-like macro whose parameter list begins with `...`. The old
+    /// classifier matched a bare `.` and then aborted the whole file when the
+    /// parameter list failed to parse.
+    #[test]
+    fn object_macro_body_starting_with_dot_does_not_abort() {
+        let src = "#define HALF (.5)\n#define ORIGIN (.x = 0, .y = 0)\nint x = HALF;\nstruct p o = ORIGIN;\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        let flat = result.output.replace([' ', '\n'], "");
+        assert!(flat.contains("intx=(.5);"), "{}", result.output);
+        assert!(flat.contains("o=(.x=0,.y=0);"), "{}", result.output);
+        assert!(flat.contains("intafter;"), "{}", result.output);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    /// Regression (#7): `#define ALIAS (VALUE)` is an object macro whose body
+    /// is `(VALUE)`. Whitespace separates the `(` from the name, so it does
+    /// not open a parameter list (C11 6.10.3p10).
+    #[test]
+    fn object_macro_parenthesized_identifier_expands() {
+        let src = "#define VALUE 42\n#define ALIAS (VALUE)\nint x = ALIAS;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        let flat = result.output.replace([' ', '\n'], "");
+        assert!(flat.contains("intx=(42);"), "{}", result.output);
+        assert!(!result.output.contains("ALIAS"), "{}", result.output);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    /// `#define F (x) x` is an object macro even though `(x)` would be a
+    /// valid parameter list; `F(1)` therefore expands to `(x) x(1)` (gcc).
+    #[test]
+    fn function_like_macro_requires_paren_adjacent_to_name() {
+        let src = "#define F (x) x\nint y = F(1);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        let flat = result.output.replace([' ', '\n'], "");
+        assert!(flat.contains("inty=(x)x(1);"), "{}", result.output);
+    }
+
+    /// `\`-newline is spliced before the `(` adjacency test (translation
+    /// phase 2), so `F\` + `(x)` on the next line is function-like, while a
+    /// space before the `\` still separates the `(` from the name.
+    #[test]
+    fn function_like_macro_name_split_by_line_splice() {
+        let src = "#define F\\\n(x) x\n#define G \\\n(x) x\nint a = F(7);\nint b = G(7);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        let flat = result.output.replace([' ', '\n'], "");
+        assert!(flat.contains("inta=7;"), "{}", result.output);
+        assert!(flat.contains("intb=(x)x(7);"), "{}", result.output);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     }
 
     #[test]

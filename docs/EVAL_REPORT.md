@@ -16,6 +16,15 @@ counts. Two intended moves are now visible in the aggregates:
   (observed on camera: 22,289 ± 29 functions, 43,312 ± 228 edges across identical binaries),
   so exact counts can wiggle between runs.
 
+**Re-verified 2026-09-02 (object-macro `(` classification fix, #6/#7):** all three corpora were
+re-analyzed with the master (`c7c6def`) and post-fix binaries at the same corpus checkouts.
+hiview and camera are identical. hdf differs only by **+6 direct call edges** to `HcsIsByteAlign`
+(`hcs_blob_if.c`, `hcs_generate_tree.c`, `hcs_tree_if.c`): the `HCS_PREFIX_LENGTH` /
+`HCS_BYTE_LENGTH` / `HCS_WORD_LENGTH` object macros, whose bodies start with
+`(HcsIsByteAlign() ? …)`, were dropped as malformed function-like definitions and now expand.
+Every hub target set, the indirect-edge count, diagnostics, and the parse-failure file sets are
+unchanged, so `scripts/eval_expected.json` and the tables below are not touched by this change.
+
 Performance was re-measured with the current binary (fresh runs, `--jobs 8`; stage timers
 are stable, wall-clock varies with cache so values are rounded). The declarator-shaping
 fixes (`int **p` params, multi-level pointer casts) leave the `index` stage flat on all

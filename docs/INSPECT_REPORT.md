@@ -6,6 +6,8 @@
 
 **Re-verified 2026-09-02 (variadic-macro preprocessor slice):** every probe below was re-run on the current binary; outputs are identical to master's, so the variadic changes alter no probe. Three blocks were refreshed for drift already present on master since 2026-08-28: the two `tie` overload records plus `Base::base_value` in Case 16, the depth-1 truncation note in Case 18, and the dependent `T` callee under `Box::read` in Case 20.
 
+**Re-verified 2026-09-02 (object-macro `(` classification fix, #6/#7):** every fixture directory under `tests/fixtures/` (67 directories) was analyzed with the pre-fix and post-fix binaries and the two SQLite exports compared as full `.dump`s; all 67 are byte-identical, so every probe below is unchanged. No fixture used by this report defines a macro whose body starts with `(`; the new `preproc/object_macro_paren.c` fixture is covered by `cargo test`, not by a probe here.
+
 **Method:** every fixture under `tests/fixtures/` that exercises indirect calls or value flow was analyzed fresh into `/tmp/*.db`, then probed with both tools. Every result was cross-checked three ways: (1) against the source files, (2) against `call_sites`/`call_edges` and `flow_nodes`/`flow_edges` in the export, (3) via recursive-CTE BFS closure queries on those tables.
 
 | Command | Data source | `--direction` meaning |
