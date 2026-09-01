@@ -2016,7 +2016,9 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             std::env::temp_dir().join(format!("trace_preproc_{}_{}", tag, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir
+        // Canonicalize so fixture paths match cache keys, which are stored
+        // canonicalized; on macOS temp_dir() is behind the /var symlink.
+        dir.canonicalize().unwrap()
     }
 
     /// Regression: a nested include whose expansion is fully skipped by an
