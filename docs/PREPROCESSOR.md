@@ -50,7 +50,7 @@ flowchart LR
 | Expansion depth cap | 256 nested expansions; further expansion is skipped with a warning (backstop if hide-set does not apply) |
 | Runaway caps | Per-file limits (defaults): 64 nested `#include`s, 32 MiB live output, 8M token-loop iterations (macro rescan included). Exceeding output/token budget stops that file with an error diagnostic; include-depth skips the nested include. CLI `--timeout-secs N` aborts the whole process. |
 | `##` token pasting | In macro bodies after argument substitution |
-| Conditionals | `#ifdef`, `#ifndef`, `#if` / `#elif` (macro-expanded), `#else`, `#endif` |
+| Conditionals | `#ifdef`, `#ifndef`, `#if` / `#elif` / `#else` / `#endif`. `#if` conditions get full constant-expression evaluation: the `defined X` / `defined(X)` operator is resolved over unexpanded tokens (C11 6.10.1p4), object **and** function-like macros expand (hide-set painted, depth-capped), and the result is parsed with C operator precedence (`?:`, `\|\|`, `&&`, bitwise, `==`/`!=`, relationals, shifts, arithmetic, unary `!`/`~`/`-`/`+`, parens). Integer literals accept `0x`/`0b`/octal prefixes and `u`/`U`/`l`/`L` suffixes; arithmetic models 64-bit intmax_t/uintmax_t with the usual arithmetic conversions (an operand mixed with an unsigned one converts to unsigned, so `-1 < 1U` is false; `>>` is arithmetic for signed, logical for unsigned; a literal is unsigned when suffixed `u`/`U` or too large for intmax_t). Identifiers surviving expansion evaluate to 0; malformed expressions (trailing tokens, unbalanced parens) conservatively skip the branch; per chain at most one branch activates. `\`-newline continuations inside conditions are spliced. Conditions in skipped groups are not evaluated (and malformed `#ifdef` operands there are tolerated). Condition macro expansion runs under its own budget (64K tokens / 1M steps); exceeding it warns and conservatively skips the branch. `#elif` after `#else` warns and is ignored. |
 | `#line` | Location tracking in `LineMap` |
 | `#undef` | |
 | Predefined | `__FILE__`, `__LINE__`; empty object macro `__UNUSED` (applied even when the shared warm table is cloned, so `T &x __UNUSED` is not left as an identifier that breaks tree-sitter function definitions) |
@@ -58,7 +58,6 @@ flowchart LR
 
 ### P1 (planned)
 
-- Full `#if` integer constant expression evaluation
 - `#pragma once` / include-guard detection
 - Variadic macros (`...`, `__VA_ARGS__`)
 - `#` stringize operator

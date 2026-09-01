@@ -36,7 +36,7 @@ struct PreprocessorState {
     macros: MacroTable,
     include_stack: Vec<PathBuf>,
     included_guard: HashSet<PathBuf>,
-    conditional_stack: Vec<bool>,
+    conditional_stack: Vec<CondFrame>,
     output: String,
     line_map: LineMap,
     diagnostics: Vec<Diagnostic>,
@@ -62,6 +62,22 @@ struct PreprocessorState {
     cache_frames: Vec<CacheFrame>,
 }
 
+/// One level of `#if`/`#elif`/`#else` nesting. A per-level bool is not
+/// enough: `#elif`/`#else` must know whether *any* earlier branch in the
+/// chain was taken (else the `#else` re-activates after a taken `#elif`),
+/// and whether the enclosing context is active at all.
+#[derive(Debug, Clone, Copy)]
+struct CondFrame {
+    /// Was the enclosing context active when the `#if` was seen?
+    parent_active: bool,
+    /// Is the branch currently being processed emitting tokens?
+    active: bool,
+    /// Has any branch of this chain been taken yet?
+    taken: bool,
+    /// Has `#else` been seen (a later `#elif` is malformed)?
+    else_seen: bool,
+}
+
 /// One cached header being constructed.
 #[derive(Debug)]
 struct CacheFrame {
@@ -76,7 +92,7 @@ impl PreprocessorState {
             macros: MacroTable::new(),
             include_stack: vec![file.clone()],
             included_guard: HashSet::new(),
-            conditional_stack: vec![true],
+            conditional_stack: Vec::new(),
             output: String::new(),
             line_map: LineMap::new(),
             diagnostics: Vec::new(),
@@ -162,7 +178,20 @@ impl PreprocessorState {
     }
 
     fn is_active(&self) -> bool {
-        self.conditional_stack.iter().all(|&b| b)
+        // A frame's `active` already folds in its parent's state at push /
+        // re-evaluation time, so only the innermost frame needs checking.
+        self.conditional_stack.last().is_none_or(|f| f.active)
+    }
+
+    fn push_cond(&mut self, cond: bool) {
+        let parent_active = self.is_active();
+        let active = parent_active && cond;
+        self.conditional_stack.push(CondFrame {
+            parent_active,
+            active,
+            taken: active,
+            else_seen: false,
+        });
     }
 
     fn push_expansion(&mut self, line: u32) -> bool {
@@ -845,55 +874,79 @@ impl PreprocessorState {
                 i = self.handle_define(tokens, i)?;
             }
             "include" | "define" if !self.is_active() => {}
+            // Inside a skipped group only the nesting matters (C11
+            // 6.10.1p6): a malformed operand there must not abort the file.
             "ifdef" => {
-                let name = self.read_directive_ident(tokens, &mut i)?;
-                let defined = self.macros.contains_key(&name);
-                self.conditional_stack.push(self.is_active() && defined);
+                if self.is_active() {
+                    let name = self.read_directive_ident(tokens, &mut i)?;
+                    let defined = self.macros.contains_key(&name);
+                    self.push_cond(defined);
+                } else {
+                    self.push_cond(false);
+                }
             }
             "ifndef" => {
-                let name = self.read_directive_ident(tokens, &mut i)?;
-                let defined = self.macros.contains_key(&name);
-                self.conditional_stack.push(self.is_active() && !defined);
+                if self.is_active() {
+                    let name = self.read_directive_ident(tokens, &mut i)?;
+                    let defined = self.macros.contains_key(&name);
+                    self.push_cond(!defined);
+                } else {
+                    self.push_cond(false);
+                }
             }
             "if" => {
-                let cond = self.expand_and_eval_condition(tokens, &mut i);
-                self.conditional_stack.push(self.is_active() && cond);
+                // Conditions in skipped groups are not evaluated (C11
+                // 6.10.1p6); the frame still pushes to keep nesting balanced.
+                let cond = if self.is_active() {
+                    self.expand_and_eval_condition(tokens, &mut i)
+                } else {
+                    self.skip_condition_tokens(tokens, &mut i);
+                    false
+                };
+                self.push_cond(cond);
             }
             "elif" => {
-                if self.conditional_stack.len() <= 1 {
+                if self.conditional_stack.is_empty() {
                     return Err(self.error(tokens[i.saturating_sub(1)].line, "#elif without #if"));
                 }
-                let parent_active = self.conditional_stack[..self.conditional_stack.len() - 1]
-                    .iter()
-                    .all(|&b| b);
-                let current = self.conditional_stack.pop().unwrap();
-                if !parent_active || current {
-                    self.conditional_stack.push(false);
+                let frame = *self.conditional_stack.last().unwrap();
+                let cond = if frame.parent_active && !frame.taken && !frame.else_seen {
+                    self.expand_and_eval_condition(tokens, &mut i)
                 } else {
-                    let cond = self.expand_and_eval_condition(tokens, &mut i);
-                    self.conditional_stack.push(parent_active && cond);
+                    self.skip_condition_tokens(tokens, &mut i);
+                    false
+                };
+                if frame.else_seen {
+                    self.warn(
+                        tokens[i.saturating_sub(1)].line,
+                        "#elif after #else; branch ignored".to_string(),
+                    );
                 }
+                let f = self.conditional_stack.last_mut().unwrap();
+                f.active = f.parent_active && !f.taken && cond;
+                f.taken |= f.active;
             }
             "else" => {
-                if self.conditional_stack.len() <= 1 {
+                if self.conditional_stack.is_empty() {
                     return Err(self.error(tokens[i.saturating_sub(1)].line, "#else without #if"));
                 }
-                let parent_active = self.conditional_stack[..self.conditional_stack.len() - 1]
-                    .iter()
-                    .all(|&b| b);
-                let current = self.conditional_stack.pop().unwrap();
-                self.conditional_stack.push(parent_active && !current);
+                let f = self.conditional_stack.last_mut().unwrap();
+                f.active = f.parent_active && !f.taken;
+                f.taken = true;
+                f.else_seen = true;
             }
             "endif" => {
-                if self.conditional_stack.len() <= 1 {
+                if self.conditional_stack.is_empty() {
                     return Err(self.error(tokens[i.saturating_sub(1)].line, "#endif without #if"));
                 }
                 self.conditional_stack.pop();
             }
-            "line" => {
-                // #line N "file" — update location tracking
-                i = self.skip_to_newline(tokens, i);
-            }
+            // Directives whose operands we ignore: the shared skip below
+            // consumes the rest of the line. Calling skip_to_newline here as
+            // well would eat the newline AND the whole following line
+            // (e.g. `#pragma pack(push, 4)` swallowing the struct after it).
+            "line" => {}
+            "pragma" => {}
             "undef" if self.is_active() => {
                 let name = self.read_directive_ident(tokens, &mut i)?;
                 self.remove_macro(&name);
@@ -904,7 +957,6 @@ impl PreprocessorState {
                     tokens[i.saturating_sub(1)].line,
                     format!("unknown directive #{directive}"),
                 );
-                i = self.skip_to_newline(tokens, i);
             }
         }
         i = self.skip_to_newline(tokens, i);
@@ -1142,6 +1194,8 @@ impl PreprocessorState {
             Some(TokenKind::Identifier(_)) => true,
             Some(TokenKind::Punct(s)) if s == ")" => true,
             Some(TokenKind::Punct(s)) if s == "..." => true,
+            // The lexer emits `...` as three `.` tokens (`#define ANY(...)`).
+            Some(TokenKind::Punct(s)) if s == "." => true,
             _ => false,
         }
     }
@@ -1306,33 +1360,147 @@ impl PreprocessorState {
         }
     }
 
-    fn expand_and_eval_condition(&self, tokens: &[Token], i: &mut usize) -> bool {
-        let mut expanded = String::new();
-        while *i < tokens.len() && !matches!(tokens[*i].kind, TokenKind::Newline) {
-            if !expanded.is_empty() {
-                expanded.push(' ');
-            }
+    /// Evaluate the controlling expression of `#if` / `#elif`.
+    ///
+    /// `defined X` / `defined(X)` is resolved as an operator over the
+    /// *unexpanded* tokens (C11 6.10.1p4: the operand of `defined` is never
+    /// macro-expanded), object macros are expanded recursively (hide-set
+    /// painted, depth-capped), and the result is parsed with C operator
+    /// precedence by `eval_pp_tokens`.
+    fn expand_and_eval_condition(&mut self, tokens: &[Token], i: &mut usize) -> bool {
+        // The lexer does not splice `\`-newline, so conditions spanning
+        // continuation lines must be stitched here (same handling as
+        // `parse_macro_args`), else the tail tokens leak as ordinary output.
+        let mut cond: Vec<Token> = Vec::new();
+        while *i < tokens.len() {
             match &tokens[*i].kind {
-                TokenKind::Identifier(name) => {
-                    if let Some(MacroDef::Object { replacement }) = self.macros.get(name) {
-                        for rt in replacement {
-                            if !expanded.is_empty()
-                                && !expanded.ends_with(' ')
-                                && !matches!(rt.kind, TokenKind::Newline)
-                            {
-                                expanded.push(' ');
-                            }
-                            expanded.push_str(&token_to_string(&rt.kind));
+                TokenKind::Newline | TokenKind::Eof => break,
+                TokenKind::Punct(p)
+                    if p == "\\"
+                        && matches!(
+                            tokens.get(*i + 1).map(|t| &t.kind),
+                            Some(TokenKind::Newline)
+                        ) =>
+                {
+                    *i += 2;
+                }
+                _ => {
+                    cond.push(tokens[*i].clone());
+                    *i += 1;
+                }
+            }
+        }
+        match self.expand_condition_tokens(&cond) {
+            Some(expanded) => eval_pp_tokens(&expanded),
+            None => false,
+        }
+    }
+
+    /// Macro-expand condition tokens, treating `defined` as an operator
+    /// whose operand is consumed unexpanded. `defined` introduced *by* an
+    /// expansion is also resolved here (common `#define HAS_X defined(X)`
+    /// pattern; undefined behavior per C11, resolved like gcc/clang do).
+    /// Object and function-like macros expand on a flat worklist with
+    /// rescanning, so an object macro naming a function-like macro still
+    /// sees the `(args)` that follow it in the condition. Hide sets stop
+    /// self-reference; explicit step/size budgets stop pathological growth
+    /// (this engine bypasses the text path's `check_resource_limits`), in
+    /// which case `None` is returned and the condition evaluates false.
+    fn expand_condition_tokens(&mut self, toks: &[Token]) -> Option<Vec<Token>> {
+        const MAX_TOKENS: usize = 1 << 16;
+        const MAX_STEPS: u64 = 1 << 20;
+        let mut work: Vec<Token> = toks.to_vec();
+        let mut out: Vec<Token> = Vec::new();
+        let mut i = 0usize;
+        let mut steps: u64 = 0;
+        while i < work.len() {
+            steps += 1;
+            if steps > MAX_STEPS || work.len() > MAX_TOKENS || out.len() > MAX_TOKENS {
+                let line = work.get(i).map(|t| t.line).unwrap_or(1);
+                self.warn(
+                    line,
+                    "macro expansion budget exceeded in #if condition; treating as false"
+                        .to_string(),
+                );
+                return None;
+            }
+            let tok = work[i].clone();
+            if let TokenKind::Identifier(name) = &tok.kind {
+                if name == "defined" {
+                    let (val, consumed) = defined_operand(&work, i, &self.macros);
+                    out.push(Token::new(
+                        TokenKind::Number(if val { "1" } else { "0" }.into()),
+                        tok.line,
+                        tok.col,
+                    ));
+                    i += consumed;
+                    continue;
+                }
+                if name == "__LINE__" {
+                    out.push(Token::new(
+                        TokenKind::Number(tok.line.to_string()),
+                        tok.line,
+                        tok.col,
+                    ));
+                    i += 1;
+                    continue;
+                }
+                if !tok.is_hidden(name) {
+                    match self.macros.get(name) {
+                        Some(MacroDef::Object { replacement }) => {
+                            let painted = Self::paint_replacement(replacement, &tok, name);
+                            work.splice(i..i + 1, painted);
+                            continue; // rescan at i
                         }
-                    } else {
-                        expanded.push_str(name);
+                        Some(MacroDef::Function {
+                            params,
+                            replacement,
+                            variadic,
+                        }) => {
+                            if let Some((args, next)) = parse_cond_macro_args(&work, i + 1) {
+                                let substituted = apply_concatenation(substitute_macro(
+                                    name,
+                                    &tok,
+                                    replacement,
+                                    params,
+                                    &args,
+                                    *variadic,
+                                ));
+                                work.splice(i..next, substituted);
+                                continue; // rescan at i
+                            }
+                        }
+                        None => {}
                     }
                 }
-                other => expanded.push_str(&token_to_string(other)),
             }
-            *i += 1;
+            out.push(tok);
+            i += 1;
         }
-        eval_pp_condition(&expanded, &self.macros)
+        Some(out)
+    }
+
+    /// Advance past a condition's tokens, including `\`-newline
+    /// continuations, without evaluating anything — used for `#if`/`#elif`
+    /// in skipped groups (C11 6.10.1p6). Must consume exactly what
+    /// `expand_and_eval_condition`'s collector would, or the conditional
+    /// stack desyncs when a continuation line starts with a directive.
+    fn skip_condition_tokens(&self, tokens: &[Token], i: &mut usize) {
+        while *i < tokens.len() {
+            match &tokens[*i].kind {
+                TokenKind::Newline | TokenKind::Eof => break,
+                TokenKind::Punct(p)
+                    if p == "\\"
+                        && matches!(
+                            tokens.get(*i + 1).map(|t| &t.kind),
+                            Some(TokenKind::Newline)
+                        ) =>
+                {
+                    *i += 2;
+                }
+                _ => *i += 1,
+            }
+        }
     }
 
     fn skip_to_newline(&self, tokens: &[Token], mut i: usize) -> usize {
@@ -1562,54 +1730,533 @@ fn token_to_string(kind: &TokenKind) -> String {
     }
 }
 
-fn eval_pp_condition(cond: &str, macros: &MacroTable) -> bool {
-    let cond = cond.trim();
-    if cond.is_empty() {
-        return false;
+/// Collect a function-like macro invocation's arguments from condition
+/// tokens. `i` points just past the macro name; returns the argument token
+/// lists and the index after the closing `)`, or `None` when the next token
+/// is not `(` (uninvoked name) or the list is unterminated.
+fn parse_cond_macro_args(toks: &[Token], mut i: usize) -> Option<(Vec<Vec<Token>>, usize)> {
+    if !matches!(toks.get(i).map(|t| &t.kind), Some(TokenKind::Punct(p)) if p == "(") {
+        return None;
     }
-    if let Some(rest) = cond.strip_prefix('!') {
-        return !eval_pp_condition(rest.trim(), macros);
+    i += 1;
+    let mut args: Vec<Vec<Token>> = Vec::new();
+    let mut current: Vec<Token> = Vec::new();
+    let mut depth = 0u32;
+    while i < toks.len() {
+        match &toks[i].kind {
+            TokenKind::Punct(p) if p == "(" => {
+                depth += 1;
+                current.push(toks[i].clone());
+            }
+            TokenKind::Punct(p) if p == ")" && depth == 0 => {
+                args.push(current);
+                return Some((args, i + 1));
+            }
+            TokenKind::Punct(p) if p == ")" => {
+                depth -= 1;
+                current.push(toks[i].clone());
+            }
+            TokenKind::Punct(p) if p == "," && depth == 0 => {
+                args.push(current);
+                current = Vec::new();
+            }
+            _ => current.push(toks[i].clone()),
+        }
+        i += 1;
     }
-    if cond.starts_with("defined(") || cond.starts_with("defined (") {
-        let inner = cond
-            .trim_start_matches("defined")
-            .trim()
-            .trim_start_matches('(')
-            .trim_end_matches(')')
-            .trim();
-        return macros.contains_key(inner);
-    }
-    if let Some((lhs, rhs)) = cond.split_once("&&") {
-        return eval_pp_condition(lhs, macros) && eval_pp_condition(rhs, macros);
-    }
-    if let Some((lhs, rhs)) = cond.split_once("||") {
-        return eval_pp_condition(lhs, macros) || eval_pp_condition(rhs, macros);
-    }
-    if let Some((lhs, rhs)) = cond.split_once("==") {
-        return eval_pp_atom(lhs) == eval_pp_atom(rhs);
-    }
-    if let Some((lhs, rhs)) = cond.split_once("!=") {
-        return eval_pp_atom(lhs) != eval_pp_atom(rhs);
-    }
-    eval_pp_atom(cond) != 0
+    None
 }
 
-fn eval_pp_atom(atom: &str) -> i64 {
-    let atom = atom.trim();
-    if atom == "0" || atom.eq_ignore_ascii_case("false") {
-        return 0;
+/// Resolve one `defined X` / `defined(X)` operator at `toks[i]`
+/// (which is the `defined` identifier). Returns the truth value and how
+/// many tokens the operator consumed; malformed operands conservatively
+/// evaluate to false.
+fn defined_operand(toks: &[Token], i: usize, macros: &MacroTable) -> (bool, usize) {
+    match toks.get(i + 1).map(|t| &t.kind) {
+        Some(TokenKind::Punct(p)) if p == "(" => {
+            if let (Some(TokenKind::Identifier(n)), Some(TokenKind::Punct(c))) = (
+                toks.get(i + 2).map(|t| &t.kind),
+                toks.get(i + 3).map(|t| &t.kind),
+            ) {
+                if c == ")" {
+                    return (macros.contains_key(n), 4);
+                }
+            }
+            (false, 2)
+        }
+        Some(TokenKind::Identifier(n)) => (macros.contains_key(n), 2),
+        _ => (false, 1),
     }
-    if atom == "1" || atom.eq_ignore_ascii_case("true") {
-        return 1;
-    }
-    if let Ok(v) = atom.parse::<i64>() {
-        return v;
-    }
-    if atom.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !atom.is_empty() {
-        return 1;
-    }
-    0
 }
+
+/// Evaluate a fully expanded `#if` condition with C operator precedence.
+/// Identifiers that survived expansion evaluate to 0 (C11 6.10.1p4), with
+/// `true`/`false` as boolean literals (C++/C23; also the previous
+/// evaluator's behavior); an unexpanded function-like call form
+/// `ident(...)` swallows its argument list and evaluates to 0. Errors are
+/// conservative: malformed input (parse error or trailing tokens) yields
+/// false (branch skipped).
+fn eval_pp_tokens(toks: &[Token]) -> bool {
+    let mut p = PpExprParser {
+        toks,
+        pos: 0,
+        err: false,
+    };
+    let v = p.ternary();
+    // Malformed input is conservative: a parse error or unconsumed trailing
+    // tokens must not activate a branch.
+    if p.err || p.pos != p.toks.len() {
+        return false;
+    }
+    v.truthy()
+}
+
+/// A preprocessor arithmetic value: 64-bit two's-complement bits plus the
+/// C signedness of the expression, modeling intmax_t/uintmax_t evaluation
+/// (C11 6.10.1p4). Binary operators apply the usual arithmetic
+/// conversions: if either operand is unsigned the operation is unsigned
+/// (so `-1 < 1U` is false — the -1 converts to uintmax_t).
+#[derive(Clone, Copy)]
+struct PpVal {
+    bits: u64,
+    unsigned_: bool,
+}
+
+impl PpVal {
+    fn signed(v: i64) -> Self {
+        Self {
+            bits: v as u64,
+            unsigned_: false,
+        }
+    }
+
+    fn from_bool(b: bool) -> Self {
+        Self::signed(b as i64)
+    }
+
+    fn truthy(self) -> bool {
+        self.bits != 0
+    }
+
+    fn as_i64(self) -> i64 {
+        self.bits as i64
+    }
+
+    fn either_unsigned(self, other: Self) -> bool {
+        self.unsigned_ || other.unsigned_
+    }
+}
+
+struct PpExprParser<'a> {
+    toks: &'a [Token],
+    pos: usize,
+    /// Set on any syntax error (missing `)`/`:`, dangling operator,
+    /// unterminated call form, non-expression token).
+    err: bool,
+}
+
+impl<'a> PpExprParser<'a> {
+    fn peek_punct(&self) -> Option<&str> {
+        match self.toks.get(self.pos).map(|t| &t.kind) {
+            Some(TokenKind::Punct(s)) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    fn eat(&mut self, p: &str) -> bool {
+        if self.peek_punct() == Some(p) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn ternary(&mut self) -> PpVal {
+        let c = self.logical_or();
+        if self.eat("?") {
+            let a = self.ternary();
+            let b = if self.eat(":") {
+                self.ternary()
+            } else {
+                self.err = true;
+                PpVal::signed(0)
+            };
+            // The result type is the common type of BOTH arms (usual
+            // arithmetic conversions), regardless of which arm is taken:
+            // `1 ? -1 : 1U` is unsigned.
+            let chosen = if c.truthy() { a } else { b };
+            return PpVal {
+                bits: chosen.bits,
+                unsigned_: a.either_unsigned(b),
+            };
+        }
+        c
+    }
+
+    fn logical_or(&mut self) -> PpVal {
+        let mut v = self.logical_and();
+        while self.eat("||") {
+            let r = self.logical_and();
+            v = PpVal::from_bool(v.truthy() || r.truthy());
+        }
+        v
+    }
+
+    fn logical_and(&mut self) -> PpVal {
+        let mut v = self.bit_or();
+        while self.eat("&&") {
+            let r = self.bit_or();
+            v = PpVal::from_bool(v.truthy() && r.truthy());
+        }
+        v
+    }
+
+    fn bit_or(&mut self) -> PpVal {
+        let mut v = self.bit_xor();
+        while self.peek_punct() == Some("|") {
+            self.pos += 1;
+            let r = self.bit_xor();
+            v = PpVal {
+                bits: v.bits | r.bits,
+                unsigned_: v.either_unsigned(r),
+            };
+        }
+        v
+    }
+
+    fn bit_xor(&mut self) -> PpVal {
+        let mut v = self.bit_and();
+        while self.eat("^") {
+            let r = self.bit_and();
+            v = PpVal {
+                bits: v.bits ^ r.bits,
+                unsigned_: v.either_unsigned(r),
+            };
+        }
+        v
+    }
+
+    fn bit_and(&mut self) -> PpVal {
+        let mut v = self.equality();
+        while self.peek_punct() == Some("&") {
+            self.pos += 1;
+            let r = self.equality();
+            v = PpVal {
+                bits: v.bits & r.bits,
+                unsigned_: v.either_unsigned(r),
+            };
+        }
+        v
+    }
+
+    fn equality(&mut self) -> PpVal {
+        let mut v = self.relational();
+        loop {
+            if self.eat("==") {
+                v = PpVal::from_bool(v.bits == self.relational().bits);
+            } else if self.eat("!=") {
+                v = PpVal::from_bool(v.bits != self.relational().bits);
+            } else {
+                return v;
+            }
+        }
+    }
+
+    fn relational(&mut self) -> PpVal {
+        // Comparisons follow the converted common type: unsigned if either
+        // side is unsigned, else signed.
+        fn lt(a: PpVal, b: PpVal) -> bool {
+            if a.either_unsigned(b) {
+                a.bits < b.bits
+            } else {
+                a.as_i64() < b.as_i64()
+            }
+        }
+        let mut v = self.shift();
+        loop {
+            if self.eat("<=") {
+                let r = self.shift();
+                v = PpVal::from_bool(!lt(r, v));
+            } else if self.eat(">=") {
+                let r = self.shift();
+                v = PpVal::from_bool(!lt(v, r));
+            } else if self.eat("<") {
+                let r = self.shift();
+                v = PpVal::from_bool(lt(v, r));
+            } else if self.eat(">") {
+                let r = self.shift();
+                v = PpVal::from_bool(lt(r, v));
+            } else {
+                return v;
+            }
+        }
+    }
+
+    fn shift(&mut self) -> PpVal {
+        // Result type follows the left operand; `>>` is logical for
+        // unsigned, arithmetic for signed. Amounts are masked to 0..63
+        // (out-of-range shifts are UB in C).
+        let mut v = self.additive();
+        loop {
+            if self.eat("<<") {
+                let sh = self.additive().bits as u32 & 63;
+                v = PpVal {
+                    bits: v.bits.wrapping_shl(sh),
+                    unsigned_: v.unsigned_,
+                };
+            } else if self.eat(">>") {
+                let sh = self.additive().bits as u32 & 63;
+                v = PpVal {
+                    bits: if v.unsigned_ {
+                        v.bits.wrapping_shr(sh)
+                    } else {
+                        v.as_i64().wrapping_shr(sh) as u64
+                    },
+                    unsigned_: v.unsigned_,
+                };
+            } else {
+                return v;
+            }
+        }
+    }
+
+    fn additive(&mut self) -> PpVal {
+        let mut v = self.multiplicative();
+        loop {
+            if self.eat("+") {
+                let r = self.multiplicative();
+                v = PpVal {
+                    bits: v.bits.wrapping_add(r.bits),
+                    unsigned_: v.either_unsigned(r),
+                };
+            } else if self.eat("-") {
+                let r = self.multiplicative();
+                v = PpVal {
+                    bits: v.bits.wrapping_sub(r.bits),
+                    unsigned_: v.either_unsigned(r),
+                };
+            } else {
+                return v;
+            }
+        }
+    }
+
+    fn multiplicative(&mut self) -> PpVal {
+        let mut v = self.unary();
+        loop {
+            if self.eat("*") {
+                let r = self.unary();
+                v = PpVal {
+                    bits: v.bits.wrapping_mul(r.bits),
+                    unsigned_: v.either_unsigned(r),
+                };
+            } else if self.eat("/") {
+                let r = self.unary();
+                v = self.divide(v, r, false);
+            } else if self.eat("%") {
+                let r = self.unary();
+                v = self.divide(v, r, true);
+            } else {
+                return v;
+            }
+        }
+    }
+
+    /// `/` and `%` under the usual arithmetic conversions; division by
+    /// zero conservatively yields 0.
+    fn divide(&mut self, a: PpVal, b: PpVal, rem: bool) -> PpVal {
+        let unsigned_ = a.either_unsigned(b);
+        if b.bits == 0 {
+            return PpVal { bits: 0, unsigned_ };
+        }
+        let bits = if unsigned_ {
+            if rem {
+                a.bits % b.bits
+            } else {
+                a.bits / b.bits
+            }
+        } else if rem {
+            a.as_i64().wrapping_rem(b.as_i64()) as u64
+        } else {
+            a.as_i64().wrapping_div(b.as_i64()) as u64
+        };
+        PpVal { bits, unsigned_ }
+    }
+
+    fn unary(&mut self) -> PpVal {
+        if self.eat("!") {
+            return PpVal::from_bool(!self.unary().truthy());
+        }
+        if self.eat("~") {
+            let v = self.unary();
+            return PpVal {
+                bits: !v.bits,
+                unsigned_: v.unsigned_,
+            };
+        }
+        if self.eat("-") {
+            // Negation keeps the operand's signedness (`-1U` stays
+            // unsigned in C and wraps).
+            let v = self.unary();
+            return PpVal {
+                bits: v.bits.wrapping_neg(),
+                unsigned_: v.unsigned_,
+            };
+        }
+        if self.eat("+") {
+            return self.unary();
+        }
+        self.primary()
+    }
+
+    fn primary(&mut self) -> PpVal {
+        let Some(tok) = self.toks.get(self.pos) else {
+            // Dangling operator with no operand.
+            self.err = true;
+            return PpVal::signed(0);
+        };
+        match &tok.kind {
+            TokenKind::Number(s) => {
+                let v = parse_pp_int(s);
+                self.pos += 1;
+                v
+            }
+            TokenKind::Char(s) => {
+                let v = PpVal::signed(char_value(s));
+                self.pos += 1;
+                v
+            }
+            TokenKind::Punct(p) if p == "(" => {
+                self.pos += 1;
+                let v = self.ternary();
+                if !self.eat(")") {
+                    self.err = true;
+                }
+                v
+            }
+            TokenKind::Identifier(name) => {
+                // C++ / C23 boolean literals (also matches the previous
+                // evaluator's behavior for `#if true`).
+                if name == "true" {
+                    self.pos += 1;
+                    return PpVal::signed(1);
+                }
+                if name == "false" {
+                    self.pos += 1;
+                    return PpVal::signed(0);
+                }
+                self.pos += 1;
+                // Unexpanded function-like form: swallow the balanced
+                // argument list so the caller's operator loop resumes
+                // cleanly after it.
+                if self.peek_punct() == Some("(") {
+                    let mut depth = 0i32;
+                    let mut closed = false;
+                    while let Some(t) = self.toks.get(self.pos) {
+                        match &t.kind {
+                            TokenKind::Punct(p) if p == "(" => depth += 1,
+                            TokenKind::Punct(p) if p == ")" => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    self.pos += 1;
+                                    closed = true;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        self.pos += 1;
+                    }
+                    if !closed {
+                        self.err = true;
+                    }
+                }
+                PpVal::signed(0)
+            }
+            // Non-expression token (string literal, stray punct): malformed.
+            _ => {
+                self.pos += 1;
+                self.err = true;
+                PpVal::signed(0)
+            }
+        }
+    }
+}
+
+/// Parse a C preprocessor integer literal (decimal, hex, octal, binary,
+/// with optional u/U/l/L suffixes). Unparseable text evaluates to 0.
+/// The value is unsigned when it carries a `u`/`U` suffix or does not fit
+/// in a signed 64-bit intmax_t (hex/octal ladder reaching uintmax_t).
+fn parse_pp_int(s: &str) -> PpVal {
+    let t = s.trim_end_matches(['u', 'U', 'l', 'L']);
+    let unsigned_suffix = s[t.len()..].contains(['u', 'U']);
+    let (digits, radix) = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        (h, 16)
+    } else if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        (b, 2)
+    } else if t.len() > 1 && t.starts_with('0') {
+        (&t[1..], 8)
+    } else {
+        (t, 10)
+    };
+    match u128::from_str_radix(digits, radix) {
+        Ok(v) => PpVal {
+            bits: v as u64,
+            unsigned_: unsigned_suffix || v > i64::MAX as u128,
+        },
+        Err(_) => PpVal::signed(0),
+    }
+}
+
+/// Value of a character constant's content (quotes already stripped by the
+/// lexer; escapes kept verbatim).
+fn char_value(s: &str) -> i64 {
+    let mut chars = s.chars().peekable();
+    match chars.next() {
+        Some('\\') => match chars.next() {
+            Some('n') => 10,
+            Some('t') => 9,
+            Some('r') => 13,
+            Some('a') => 7,
+            Some('b') => 8,
+            Some('f') => 12,
+            Some('v') => 11,
+            Some('\\') => 92,
+            Some('\'') => 39,
+            Some('"') => 34,
+            Some('?') => 63,
+            // \x… hexadecimal escape.
+            Some('x') => {
+                let mut v: i64 = 0;
+                while let Some(d) = chars.peek().and_then(|c| c.to_digit(16)) {
+                    v = v.wrapping_mul(16).wrapping_add(d as i64);
+                    chars.next();
+                }
+                v
+            }
+            // \ooo octal escape (1-3 digits, first already consumed).
+            Some(d @ '0'..='7') => {
+                let mut v: i64 = d as i64 - '0' as i64;
+                for _ in 0..2 {
+                    match chars.peek().and_then(|c| c.to_digit(8)) {
+                        Some(o) => {
+                            v = v * 8 + o as i64;
+                            chars.next();
+                        }
+                        None => break,
+                    }
+                }
+                v
+            }
+            Some(c) => c as i64,
+            None => 0,
+        },
+        Some(c) => c as i64,
+        None => 0,
+    }
+}
+
 
 pub fn preprocess_file(
     path: &Path,
@@ -1685,6 +2332,55 @@ mod tests {
         let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
         assert!(!result.output.contains("42"));
         assert!(result.output.contains("x = 1") || result.output.contains("int x"));
+    }
+
+    /// Regression: `#pragma pack(push, 4)` immediately followed by a struct
+    /// definition (e.g. OpenHarmony pwm_if.h) must not swallow the next line.
+    #[test]
+    fn pragma_keeps_next_line_and_does_not_warn() {
+        let src = "#pragma pack(push, 4)\nstruct PwmConfig {\n    int duty;\n};\n#pragma pack(pop)\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("struct PwmConfig"),
+            "line after #pragma was swallowed: {}",
+            result.output
+        );
+        assert!(result.output.contains("after"), "{}", result.output);
+        assert!(
+            !result.output.contains("pack"),
+            "pragma text must not leak into output: {}",
+            result.output
+        );
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("unknown directive")),
+            "#pragma is a standard directive, no warning expected: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn line_directive_keeps_next_line() {
+        let src = "#line 100 \"orig.c\"\nint kept;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+    }
+
+    #[test]
+    fn unknown_directive_warns_but_keeps_next_line() {
+        let src = "#frobnicate all the things\nint kept;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("unknown directive")),
+            "{:?}",
+            result.diagnostics
+        );
     }
 
     #[test]
@@ -2345,5 +3041,320 @@ int x = A;
             common.text
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn if_defined_true_when_macro_defined() {
+        let src = "#define FEATURE 1\n#if defined(FEATURE)\nint kept;\n#endif\n#if defined FEATURE\nint kept_noparen;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+        assert!(result.output.contains("kept_noparen"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_defined_false_when_macro_undefined() {
+        let src = "#if defined(MISSING)\nint dropped;\n#endif\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+        assert!(result.output.contains("after"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_not_defined_false_when_macro_defined() {
+        let src = "#define FEATURE 1\n#if !defined(FEATURE)\nint dropped;\n#endif\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+        assert!(result.output.contains("after"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_defined_conjunction_requires_both() {
+        let both = "#define A 1\n#define B 1\n#if defined(A) && defined(B)\nint kept;\n#endif\n";
+        let result = preprocess_string(both, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+        let one = "#define A 1\n#if defined(A) && defined(B)\nint dropped;\n#endif\n";
+        let result = preprocess_string(one, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_not_defined_binds_tighter_than_and() {
+        // (!defined A) && (defined B): A defined, B defined -> false && true = false.
+        let src = "#define A 1\n#define B 1\n#if !defined(A) && defined(B)\nint dropped;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+        // A undefined, B defined -> true && true = true.
+        let src = "#define B 1\n#if !defined(A) && defined(B)\nint kept;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+    }
+
+    #[test]
+    fn elif_not_taken_after_taken_if() {
+        let src = "#if 1\nint first;\n#elif 1\nint second;\n#else\nint third;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("first"), "{}", result.output);
+        assert!(!result.output.contains("second"), "{}", result.output);
+        assert!(!result.output.contains("third"), "{}", result.output);
+    }
+
+    #[test]
+    fn else_not_taken_after_taken_elif() {
+        let src = "#if 0\nint first;\n#elif 1\nint second;\n#elif 1\nint third;\n#else\nint fourth;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(!result.output.contains("first"), "{}", result.output);
+        assert!(result.output.contains("second"), "{}", result.output);
+        assert!(!result.output.contains("third"), "{}", result.output);
+        assert!(!result.output.contains("fourth"), "{}", result.output);
+    }
+
+    #[test]
+    fn else_taken_when_no_branch_matched() {
+        let src = "#if 0\nint first;\n#elif 0\nint second;\n#else\nint third;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(!result.output.contains("first"), "{}", result.output);
+        assert!(!result.output.contains("second"), "{}", result.output);
+        assert!(result.output.contains("third"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_comparisons_and_parens() {
+        let src = "#define VERSION 3\n#if (VERSION >= 2) && !defined(MISSING)\nint kept;\n#endif\n#if VERSION == 2\nint dropped;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_or_precedence_over_and() {
+        // C precedence: 1 || 0 && 0 == 1 || (0 && 0) -> true.
+        let src = "#if 1 || 0 && 0\nint kept;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_unknown_identifier_evaluates_to_zero() {
+        let src = "#if TOTALLY_UNDEFINED_NAME\nint dropped;\n#endif\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+        assert!(result.output.contains("after"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_defined_chained_macro_definition() {
+        // Operand of defined() must not be macro-expanded (C11 6.10.1p4).
+        let src = "#define ON 1\n#define FEATURE ON\n#if defined(FEATURE)\nint kept;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_function_like_macro_expands_in_condition() {
+        let src = "#define GE(a, b) ((a) >= (b))\n#if GE(3, 2)\nint kept;\n#else\nint dropped;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_function_like_macro_uses_object_macro_args() {
+        let src = "#define V 3\n#define ATLEAST(x) (V >= (x))\n#if ATLEAST(2)\nint kept;\n#else\nint dropped;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_trailing_garbage_is_false() {
+        let src = "#if 1 garbage\nint dropped;\n#endif\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+        assert!(result.output.contains("after"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_unbalanced_paren_is_false() {
+        let src = "#if (0 || 1\nint dropped;\n#endif\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+        assert!(result.output.contains("after"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_condition_spans_line_continuation() {
+        let src = "#if 0 || \\\n    1\nint kept;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+        assert!(!result.output.contains("\n1"), "continuation line must not leak: {}", result.output);
+    }
+
+    #[test]
+    fn if_unsigned_64bit_literal_is_positive() {
+        let src = "#if 0xffffffffffffffffULL > 0\nint big_ok;\n#endif\n#if 0xFFFFFFFF & 0x80000000\nint mask_ok;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("big_ok"), "{}", result.output);
+        assert!(result.output.contains("mask_ok"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_defined_elif_fixture() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/preproc/if_defined_elif.c");
+        let result = preprocess_file(&path, &PreprocessOptions::new()).unwrap();
+        assert!(result.output.contains("feature_on"), "{}", result.output);
+        assert!(!result.output.contains("feature_off"), "{}", result.output);
+        assert!(!result.output.contains("b1"), "{}", result.output);
+        assert!(result.output.contains("b2"), "{}", result.output);
+        assert!(!result.output.contains("b3"), "{}", result.output);
+        assert!(!result.output.contains("b4"), "{}", result.output);
+        assert!(result.output.contains("compound_ok"), "{}", result.output);
+        assert!(result.output.contains("fnlike_ok"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_unsigned_conversion_semantics() {
+        // Usual arithmetic conversions at uintmax width (C11 6.10.1p4):
+        // a signed operand converts to unsigned when the other is unsigned.
+        let src = "#if -1 < 1U\nint sc_dropped;\n#endif\n\
+#if ~0U > 65535\nint probe_ok;\n#endif\n\
+#if -1 > 0U\nint wrap_ok;\n#endif\n\
+#if (0x8000000000000000 >> 63) == 1\nint shr_u_ok;\n#endif\n\
+#if (-2 >> 1) == -1\nint shr_s_ok;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(!result.output.contains("sc_dropped"), "{}", result.output);
+        assert!(result.output.contains("probe_ok"), "{}", result.output);
+        assert!(result.output.contains("wrap_ok"), "{}", result.output);
+        assert!(result.output.contains("shr_u_ok"), "{}", result.output);
+        assert!(result.output.contains("shr_s_ok"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_true_false_keywords() {
+        let src = "#if true\nint t_kept;\n#endif\n#if false\nint f_dropped;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
+        assert!(result.output.contains("t_kept"), "{}", result.output);
+        assert!(!result.output.contains("f_dropped"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_ternary_combines_branch_types() {
+        // The ternary result type is the common type of BOTH arms (int +
+        // unsigned -> unsigned), even for the untaken arm.
+        let src = "#if (1 ? -1 : 1U) < 0\nint uns_dropped;\n#endif\n#if (1 ? -1 : 1) < 0\nint sgn_kept;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(!result.output.contains("uns_dropped"), "{}", result.output);
+        assert!(result.output.contains("sgn_kept"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_object_macro_aliasing_function_like_rescans() {
+        let src = "#define GE(a, b) ((a) >= (b))\n#define CALL GE\n#if CALL(3, 2)\nint kept;\n#else\nint dropped;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+    }
+
+    #[test]
+    fn skipped_group_tolerates_malformed_ifdef() {
+        let src = "#if 0\n#ifdef 123\nint x;\n#endif\n#endif\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("after"), "{}", result.output);
+        assert!(!result.output.contains("int x"), "{}", result.output);
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("expected identifier")),
+            "{:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn skipped_elif_condition_consumes_continuation() {
+        let src = "#if 1\nint a;\n#elif 0 && \\\n#endif\nint x;\n#endif\nint tail;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("int a"), "{}", result.output);
+        assert!(!result.output.contains("int x"), "{}", result.output);
+        assert!(result.output.contains("tail"), "{}", result.output);
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("without #if")),
+            "{:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn if_char_escapes() {
+        let src = "#if '\\x41' == 65\nint hex_ok;\n#endif\n#if '\\101' == 65\nint oct_ok;\n#endif\n#if '\\012' == 10\nint oct2_ok;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("hex_ok"), "{}", result.output);
+        assert!(result.output.contains("oct_ok"), "{}", result.output);
+        assert!(result.output.contains("oct2_ok"), "{}", result.output);
+    }
+
+    #[test]
+    fn if_line_builtin_positive() {
+        let src = "#if __LINE__ > 0\nint kept;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+    }
+
+    #[test]
+    fn variadic_macro_definition_expands_in_condition() {
+        let src = "#define ANY(...) 1\n#if ANY(x)\nint kept;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+    }
+
+    #[test]
+    fn cpp_digit_separators_in_condition() {
+        let src = "#if 1'000'000 > 999999\nint kept;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
+        assert!(result.output.contains("kept"), "{}", result.output);
+    }
+
+    #[test]
+    fn elif_after_else_is_diagnosed() {
+        let src = "#if 0\n#elif 0\n#else\nint a;\n#elif 1\nint b;\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("int a"), "{}", result.output);
+        assert!(!result.output.contains("int b"), "{}", result.output);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("#elif after #else")),
+            "{:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn condition_expansion_bomb_hits_budget() {
+        // 2^27 tokens if fully expanded; the budget must stop it quickly,
+        // warn, and conservatively skip the branch. (Regression guard for
+        // the budget itself: the unguarded expander OOMed on this input.)
+        let mut src = String::from("#define Z0 z z\n");
+        for n in 1..=27 {
+            src.push_str(&format!("#define Z{n} Z{} Z{}\n", n - 1, n - 1));
+        }
+        src.push_str("#if Z27\nint dropped;\n#endif\nint after;\n");
+        let result = preprocess_string(&src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+        assert!(result.output.contains("after"), "{}", result.output);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("expansion budget exceeded in #if")),
+            "{:?}",
+            result.diagnostics
+        );
     }
 }
