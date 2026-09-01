@@ -8,6 +8,7 @@ mod merge;
 mod parse;
 
 pub use deps::*;
+pub use index_cache::IndexSourceCache;
 
 pub use discover::*;
 pub use lower::*;

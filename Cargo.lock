@@ -655,6 +655,7 @@ dependencies = [
  "trace-ir",
  "trace-parse",
  "trace-preproc",
+ "tree-sitter",
  "walkdir",
 ]
 
