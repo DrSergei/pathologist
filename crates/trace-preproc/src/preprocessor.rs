@@ -1,9 +1,9 @@
-use crate::macros::{MacroDef, MacroTable};
+use crate::macros::{lex_macro_body, MacroDef, MacroOp, MacroTable};
 use crate::{Diagnostic, DiagnosticSeverity, Lexer, LineMap, PreprocessOptions, Token, TokenKind};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use thiserror::Error;
 
 /// Nested macro-expansion cap (C11 hide-set is the primary recursion brake;
@@ -34,6 +34,12 @@ pub struct PreprocessResult {
 struct PreprocessorState {
     opts: PreprocessOptions,
     macros: MacroTable,
+    /// Names in `macros` defined only by a builtin fallback (see
+    /// `install_builtin_macros`). These expand normally but are invisible to
+    /// `#ifdef` / `#ifndef` / `defined()` so an `#ifndef`-guarded real
+    /// definition in source still takes effect; any source (re)definition or
+    /// `#undef` clears the mark. Only ever shrinks during a run.
+    fallback_macros: HashSet<String>,
     include_stack: Vec<PathBuf>,
     included_guard: HashSet<PathBuf>,
     conditional_stack: Vec<CondFrame>,
@@ -60,6 +66,11 @@ struct PreprocessorState {
     /// without copying them into live `output` (that exponentiates on
     /// diamond include graphs).
     cache_frames: Vec<CacheFrame>,
+    /// Macro directives executed while any cache frame is open (nested
+    /// replays included), in order. Each frame remembers its start index
+    /// and captures its suffix into `IncludeExpansion::ops`; cleared when
+    /// the last frame closes.
+    macro_ops: Vec<MacroOp>,
 }
 
 /// One level of `#if`/`#elif`/`#else` nesting. A per-level bool is not
@@ -90,6 +101,7 @@ impl PreprocessorState {
         let mut state = Self {
             opts,
             macros: MacroTable::new(),
+            fallback_macros: HashSet::new(),
             include_stack: vec![file.clone()],
             included_guard: HashSet::new(),
             conditional_stack: Vec::new(),
@@ -104,11 +116,17 @@ impl PreprocessorState {
             expansion_limit_warned: false,
             tokens_processed: 0,
             cache_frames: Vec::new(),
+            macro_ops: Vec::new(),
         };
         if let Some(shared) = &state.opts.shared_macros {
             if let Ok(guard) = shared.read() {
                 state.macros = guard.clone();
             }
+            // The warm table is normally seeded from the CLI defines, but a
+            // name it never accumulated must still beat the builtin fallback
+            // installed below. First-wins keeps definitions the warm pass
+            // picked up from source.
+            state.init_cli_defines_missing_only();
         } else {
             state.init_cli_defines();
         }
@@ -119,18 +137,23 @@ impl PreprocessorState {
         state
     }
 
-    /// GNU/MSVC unused-parameter markers. Without this, an undefined
-    /// `__UNUSED` after a reference declarator (`T &event __UNUSED`) is
-    /// parsed as a broken `declaration` and the function body is dropped.
+    /// Install `BUILTIN_FALLBACK_MACROS`, each only when not already defined
+    /// and marked in `fallback_macros` so conditionals do not see it and any
+    /// real definition (CLI `-D`, source `#define`, cached include delta)
+    /// replaces it.
     fn install_builtin_macros(&mut self) {
-        if !self.macros.contains_key("__UNUSED") {
-            self.macros.insert(
-                "__UNUSED".to_string(),
-                MacroDef::Object {
-                    replacement: Vec::new(),
-                },
-            );
+        for (name, def) in BUILTIN_FALLBACK_MACROS.iter() {
+            if !self.macros.contains_key(name.as_str()) {
+                self.macros.insert(name.clone(), def.clone());
+                self.fallback_macros.insert(name.clone());
+            }
         }
+    }
+
+    /// A name only a builtin fallback defines does not count as defined for
+    /// `#ifdef` / `#ifndef` / `defined()`.
+    fn is_defined_for_conditionals(&self, name: &str) -> bool {
+        self.macros.contains_key(name) && !self.fallback_macros.contains(name)
     }
 
     fn init_cli_defines(&mut self) {
@@ -141,21 +164,46 @@ impl PreprocessorState {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         for (name, val) in defines {
-            let tokens = Lexer::new(&val).tokenize();
-            let filtered: Vec<Token> = tokens
-                .into_iter()
-                .filter(|t| !matches!(t.kind, TokenKind::Eof))
-                .collect();
             self.insert_macro(
                 name,
                 MacroDef::Object {
-                    replacement: filtered,
+                    replacement: lex_macro_body(&val),
                 },
             );
         }
     }
 
+    fn init_cli_defines_missing_only(&mut self) {
+        let defines: Vec<_> = self
+            .opts
+            .defines
+            .iter()
+            .filter(|(k, _)| !self.macros.contains_key(k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (name, val) in defines {
+            self.insert_macro(
+                name,
+                MacroDef::Object {
+                    replacement: lex_macro_body(&val),
+                },
+            );
+        }
+    }
+
+    /// Record a directive for the enclosing cached-header entries, if any.
+    /// Logged unconditionally within a frame — even a `#undef` of an absent
+    /// name is a no-op only locally and can still take effect in a
+    /// translation unit that replays the entry.
+    fn log_macro_op(&mut self, op: MacroOp) {
+        if !self.cache_frames.is_empty() {
+            self.macro_ops.push(op);
+        }
+    }
+
     fn insert_macro(&mut self, name: String, def: MacroDef) {
+        self.log_macro_op(MacroOp::Define(name.clone(), def.clone()));
+        self.fallback_macros.remove(&name);
         self.macros.insert(name.clone(), def.clone());
         if self.opts.accumulate_macros {
             if let Some(shared) = &self.opts.shared_macros {
@@ -167,6 +215,8 @@ impl PreprocessorState {
     }
 
     fn remove_macro(&mut self, name: &str) {
+        self.log_macro_op(MacroOp::Undef(name.to_string()));
+        self.fallback_macros.remove(name);
         self.macros.shift_remove(name);
         if self.opts.accumulate_macros {
             if let Some(shared) = &self.opts.shared_macros {
@@ -323,11 +373,7 @@ impl PreprocessorState {
             return false;
         };
         if !self.opts.inline_include_bodies {
-            for (name, def) in entry.macros.iter() {
-                self.macros
-                    .entry(name.clone())
-                    .or_insert_with(|| def.clone());
-            }
+            self.replay_macro_delta(&entry);
             self.included_guard.insert(canonical.to_path_buf());
             self.included_guard.extend(entry.files.iter().cloned());
             return true;
@@ -351,13 +397,8 @@ impl PreprocessorState {
         // consumer sees none of the macros the header defines — later
         // warm passes then expand dependent headers against a starved
         // table and freeze unexpanded invocations into their own cache
-        // entries. First-wins: a table that already defines the name
-        // (e.g. TUs seeded from the union table) keeps its definition.
-        for (name, def) in entry.macros.iter() {
-            self.macros
-                .entry(name.clone())
-                .or_insert_with(|| def.clone());
-        }
+        // entries. Replay mirrors live execution (see replay_macro_delta).
+        self.replay_macro_delta(&entry);
         if self.opts.track_line_map {
             // Renumber the cached expansion's file indices into this run's
             // intern table, then splice its entries.
@@ -370,6 +411,21 @@ impl PreprocessorState {
         }
         self.included_guard.extend(entry.files.iter().cloned());
         true
+    }
+
+    /// Replay a cached include's macro directives in program order, through
+    /// the same mutation helpers live `#define` / `#undef` use — so a cache
+    /// hit and a cache miss agree on everything a directive touches: the
+    /// local table (overwrite semantics), the fallback marks, the shared
+    /// table under `accumulate_macros`, and the op log feeding an enclosing
+    /// cached header's own entry.
+    fn replay_macro_delta(&mut self, entry: &crate::IncludeExpansion) {
+        for op in entry.ops.iter() {
+            match op {
+                MacroOp::Undef(name) => self.remove_macro(name),
+                MacroOp::Define(name, def) => self.insert_macro(name.clone(), def.clone()),
+            }
+        }
     }
 
     fn cached_expansion(&self, canonical: &Path) -> Option<crate::IncludeExpansion> {
@@ -522,11 +578,12 @@ impl PreprocessorState {
         } else {
             HashSet::new()
         };
-        // Snapshot for the entry's macro delta: everything this header's
-        // processing adds relative to its starting table is replayed by
-        // `splice_cached` (see `IncludeExpansion::macros`).
-        let macros_snapshot = if cache_header && !self.opts.frozen_expansion_cache {
-            Some(self.macros.clone())
+        // Everything this header's processing executes (`#define`/`#undef`,
+        // nested replays included) from here on lands in `macro_ops`; the
+        // suffix becomes the entry's `IncludeExpansion::ops`, replayed by
+        // `splice_cached`.
+        let ops_start = if cache_header && !self.opts.frozen_expansion_cache {
+            Some(self.macro_ops.len())
         } else {
             None
         };
@@ -619,29 +676,25 @@ impl PreprocessorState {
                     .cloned()
                     .collect();
                 new_files.extend(extra_files);
-                let macro_defs: Arc<Vec<(String, crate::MacroDef)>> = match &macros_snapshot {
-                    Some(snap) => {
-                        let mut v: Vec<(String, crate::MacroDef)> = self
-                            .macros
-                            .iter()
-                            .filter(|(k, _)| !snap.contains_key(k.as_str()))
-                            .map(|(k, val)| (k.clone(), val.clone()))
-                            .collect();
-                        v.shrink_to_fit();
-                        Arc::new(v)
-                    }
+                let ops: Arc<Vec<MacroOp>> = match ops_start {
+                    Some(start) => Arc::new(self.macro_ops[start..].to_vec()),
                     None => Arc::default(),
                 };
-                if !composed.is_empty() || !macro_defs.is_empty() || !new_files.is_empty() {
+                if !composed.is_empty() || !ops.is_empty() || !new_files.is_empty() {
                     if let Ok(mut guard) = cache.write() {
                         guard.entry(canonical).or_insert(crate::IncludeExpansion {
                             text: composed.into(),
                             files: Arc::new(new_files),
                             line_map: Arc::new(composed_map),
-                            macros: macro_defs,
+                            ops,
                         });
                     }
                 }
+            }
+            // The log only feeds open frames; once the outermost cached
+            // header closes, nothing references these entries any more.
+            if self.cache_frames.is_empty() {
+                self.macro_ops.clear();
             }
         }
 
@@ -879,7 +932,7 @@ impl PreprocessorState {
             "ifdef" => {
                 if self.is_active() {
                     let name = self.read_directive_ident(tokens, &mut i)?;
-                    let defined = self.macros.contains_key(&name);
+                    let defined = self.is_defined_for_conditionals(&name);
                     self.push_cond(defined);
                 } else {
                     self.push_cond(false);
@@ -888,7 +941,7 @@ impl PreprocessorState {
             "ifndef" => {
                 if self.is_active() {
                     let name = self.read_directive_ident(tokens, &mut i)?;
-                    let defined = self.macros.contains_key(&name);
+                    let defined = self.is_defined_for_conditionals(&name);
                     self.push_cond(!defined);
                 } else {
                     self.push_cond(false);
@@ -1427,7 +1480,8 @@ impl PreprocessorState {
             let tok = work[i].clone();
             if let TokenKind::Identifier(name) = &tok.kind {
                 if name == "defined" {
-                    let (val, consumed) = defined_operand(&work, i, &self.macros);
+                    let (val, consumed) =
+                        defined_operand(&work, i, &self.macros, &self.fallback_macros);
                     out.push(Token::new(
                         TokenKind::Number(if val { "1" } else { "0" }.into()),
                         tok.line,
@@ -1445,7 +1499,11 @@ impl PreprocessorState {
                     i += 1;
                     continue;
                 }
-                if !tok.is_hidden(name) {
+                // A fallback must behave as undefined throughout conditional
+                // evaluation: expanding it here (often to nothing) would
+                // mangle the expression (`1 || __init` -> `1 ||`), while an
+                // unexpanded identifier correctly evaluates to 0.
+                if !tok.is_hidden(name) && !self.fallback_macros.contains(name.as_str()) {
                     match self.macros.get(name) {
                         Some(MacroDef::Object { replacement }) => {
                             let painted = Self::paint_replacement(replacement, &tok, name);
@@ -1569,8 +1627,9 @@ fn substitute_macro(
     let mut out: Vec<Token> = Vec::new();
     let mut i = 0;
     while i < body.len() {
-        if i + 1 < body.len() && matches!(&body[i].kind, TokenKind::Punct(s) if s == "##") {
-            if let TokenKind::Identifier(name) = &body[i + 1].kind {
+        let concat_width = concat_width_at(body, i);
+        if concat_width > 0 && i + concat_width < body.len() {
+            if let TokenKind::Identifier(name) = &body[i + concat_width].kind {
                 if let Some(idx) = params.iter().position(|p| p == name) {
                     let arg = if variadic && idx + 1 == params.len() && idx < args.len() {
                         args[idx..].concat()
@@ -1583,7 +1642,7 @@ fn substitute_macro(
                                 out.pop();
                             }
                         }
-                        i += 2;
+                        i += concat_width + 1;
                         continue;
                     }
                 }
@@ -1632,23 +1691,35 @@ fn substitute_macro(
 /// Apply `##` token pasting after parameter substitution.
 fn apply_concatenation(mut tokens: Vec<Token>) -> Vec<Token> {
     loop {
-        let mut next = Vec::new();
-        let mut changed = false;
+        let mut next: Vec<Token> = Vec::new();
+        let mut pasted = false;
         let mut i = 0;
         while i < tokens.len() {
-            if i + 2 < tokens.len() && concat_width_at(&tokens, i + 1) > 0 {
-                next.push(paste_two_tokens(&tokens[i], &tokens[i + 2]));
-                i += 3;
-                changed = true;
-            } else if concat_width_at(&tokens, i) > 0 {
-                i += concat_width_at(&tokens, i);
-                changed = true;
+            let width = concat_width_at(&tokens, i);
+            if width > 0 {
+                // Paste the previously emitted token with the operand after
+                // `##`, so chains (`a ## b ## c`) collapse left to right. A
+                // dangling `##` with no operand on either side is dropped.
+                if let Some(left) = next.pop() {
+                    if i + width < tokens.len() {
+                        next.push(paste_two_tokens(&left, &tokens[i + width]));
+                        i += width + 1;
+                        pasted = true;
+                    } else {
+                        next.push(left);
+                        i += width;
+                    }
+                } else {
+                    i += width;
+                }
             } else {
                 next.push(tokens[i].clone());
                 i += 1;
             }
         }
-        if !changed {
+        // Rescan only when a paste ran: pasting `#` with `#` can re-form a
+        // `##` operator; merely dropping a dangling `##` cannot.
+        if !pasted {
             return next;
         }
         tokens = next;
@@ -1667,6 +1738,84 @@ fn concat_width_at(tokens: &[Token], i: usize) -> usize {
     }
     0
 }
+
+/// Fallback definitions for macros whose real definitions live in headers the
+/// indexed tree does not ship (gtest, kernel headers, `<inttypes.h>`). Left
+/// unexpanded they produce tree-sitter ERROR nodes and whole functions get
+/// dropped from the index (docs/PARSE_FAILURES.md catalogs the impact).
+/// Built once; `install_builtin_macros` clones entries per preprocess.
+static BUILTIN_FALLBACK_MACROS: LazyLock<Vec<(String, MacroDef)>> = LazyLock::new(|| {
+    let object = |name: &str, replacement: &str| {
+        (
+            name.to_string(),
+            MacroDef::Object {
+                replacement: lex_macro_body(replacement),
+            },
+        )
+    };
+    let function = |name: &str, params: &[&str], replacement: &str| {
+        (
+            name.to_string(),
+            MacroDef::Function {
+                params: params.iter().map(|s| s.to_string()).collect(),
+                replacement: lex_macro_body(replacement),
+                variadic: false,
+            },
+        )
+    };
+    let mut table = Vec::new();
+    // GNU/MSVC unused-parameter markers. Without this, an undefined
+    // `__UNUSED` after a reference declarator (`T &event __UNUSED`) is
+    // parsed as a broken `declaration` and the function body is dropped.
+    table.push(object("__UNUSED", ""));
+    // Linux kernel address-space / section annotations: `char __user *buf`
+    // and `int __init foo(void)` are syntax errors when unexpanded.
+    for name in [
+        "__user",
+        "__iomem",
+        "__percpu",
+        "__rcu",
+        "__force",
+        "__init",
+        "__exit",
+        "__initdata",
+        "__exitdata",
+        "__read_mostly",
+    ] {
+        table.push(object(name, ""));
+    }
+    // <inttypes.h> format-specifier strings: `"%" PRIu64` must expand to
+    // a string literal or the adjacent-literal concatenation mis-parses.
+    for (width, prefix) in [("8", "hh"), ("16", "h"), ("32", ""), ("64", "ll")] {
+        for conv in ["d", "i", "u", "x", "X", "o"] {
+            table.push(object(
+                &format!("PRI{conv}{width}"),
+                &format!("\"{prefix}{conv}\""),
+            ));
+        }
+    }
+    // `container_of(ptr, struct T, member)` puts a type keyword in
+    // expression position; keep the pointer flow and the target type. The
+    // `member` argument is deliberately dropped: an offsetof-shaped body
+    // yields no additional call/flow facts and routes the pointer through
+    // arithmetic the flow analysis tracks less precisely.
+    table.push(function(
+        "container_of",
+        &["ptr", "type", "member"],
+        "( ( type * ) ( void * ) ( ptr ) )",
+    ));
+    // gtest/OpenHarmony test macros: `HWTEST_F(Suite, Name, TestSize.Level1)`
+    // followed by a body is unparseable unexpanded and every test body is
+    // lost. Expand to a plain function definition so bodies get indexed.
+    for name in ["HWTEST", "HWTEST_F", "HWTEST_P"] {
+        table.push(function(
+            name,
+            &["a", "b", "level"],
+            "static void a ## _ ## b ()",
+        ));
+    }
+    table
+});
 
 fn paste_two_tokens(left: &Token, right: &Token) -> Token {
     let text = format!(
@@ -1771,7 +1920,13 @@ fn parse_cond_macro_args(toks: &[Token], mut i: usize) -> Option<(Vec<Vec<Token>
 /// (which is the `defined` identifier). Returns the truth value and how
 /// many tokens the operator consumed; malformed operands conservatively
 /// evaluate to false.
-fn defined_operand(toks: &[Token], i: usize, macros: &MacroTable) -> (bool, usize) {
+fn defined_operand(
+    toks: &[Token],
+    i: usize,
+    macros: &MacroTable,
+    fallbacks: &HashSet<String>,
+) -> (bool, usize) {
+    let is_defined = |n: &str| macros.contains_key(n) && !fallbacks.contains(n);
     match toks.get(i + 1).map(|t| &t.kind) {
         Some(TokenKind::Punct(p)) if p == "(" => {
             if let (Some(TokenKind::Identifier(n)), Some(TokenKind::Punct(c))) = (
@@ -1779,12 +1934,12 @@ fn defined_operand(toks: &[Token], i: usize, macros: &MacroTable) -> (bool, usiz
                 toks.get(i + 3).map(|t| &t.kind),
             ) {
                 if c == ")" {
-                    return (macros.contains_key(n), 4);
+                    return (is_defined(n), 4);
                 }
             }
             (false, 2)
         }
-        Some(TokenKind::Identifier(n)) => (macros.contains_key(n), 2),
+        Some(TokenKind::Identifier(n)) => (is_defined(n), 2),
         _ => (false, 1),
     }
 }
@@ -2257,7 +2412,6 @@ fn char_value(s: &str) -> i64 {
     }
 }
 
-
 pub fn preprocess_file(
     path: &Path,
     opts: &PreprocessOptions,
@@ -2316,6 +2470,13 @@ mod tests {
             result.output
         );
         assert!(!result.output.contains("CAT"));
+    }
+
+    #[test]
+    fn expands_chained_token_paste() {
+        let src = "#define CAT3(a,b,c) a ## b ## c\nint CAT3(x, y, z);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("xyz"), "{}", result.output);
     }
 
     #[test]
@@ -2578,6 +2739,312 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         assert!(
             !result.output.contains("__UNUSED"),
             "builtins must apply after cloning the shared table: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn kernel_annotation_macros_predefined_empty() {
+        let src = "static long Read(struct file* f, char __user* buf);\n\
+                   static int __init DriverInit(void) { return 0; }\n\
+                   static void __exit DriverExit(void) {}\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        for name in ["__user", "__init", "__exit"] {
+            assert!(
+                !result.output.contains(name),
+                "{name} must expand away: {}",
+                result.output
+            );
+        }
+        assert!(result.output.contains("DriverInit"), "{}", result.output);
+    }
+
+    #[test]
+    fn container_of_macro_predefined() {
+        let src = "void f(struct Node* p) { struct Dev* d = container_of(p, struct Dev, node); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            !result.output.contains("container_of"),
+            "container_of must expand away: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("struct Dev *") || result.output.contains("struct Dev*"),
+            "expansion must cast to the requested type: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn pri_format_macros_predefined() {
+        let src = "void f(unsigned long long v) { printf(\"val %\" PRIu64 \"\\n\", v); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            !result.output.contains("PRIu64"),
+            "PRIu64 must expand to a string literal: {}",
+            result.output
+        );
+        assert!(result.output.contains("\"llu\""), "{}", result.output);
+    }
+
+    #[test]
+    fn hwtest_macros_predefined_as_functions() {
+        let src = "HWTEST_F(FooTest, Bar, TestSize.Level1)\n{\n    int x = 0;\n    (void)x;\n}\n";
+        let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
+        assert!(
+            !result.output.contains("HWTEST_F"),
+            "HWTEST_F must expand away: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("FooTest_Bar"),
+            "expansion must produce a pasted function name: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("TestSize"),
+            "the level argument must be dropped: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn ifndef_guard_defines_real_macro_over_builtin() {
+        let src = "#ifndef container_of\n\
+                   #define container_of(p, t, m) CUSTOM_CONTAINER(p)\n\
+                   #endif\n\
+                   int x = container_of(q, struct D, f);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("CUSTOM_CONTAINER"),
+            "an #ifndef-guarded real definition must beat the builtin fallback: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn builtin_fallback_invisible_to_conditionals() {
+        let src = "#ifdef __user\nint user_visible;\n#endif\n\
+                   #if defined(__init)\nint init_visible;\n#endif\n\
+                   int done;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            !result.output.contains("user_visible") && !result.output.contains("init_visible"),
+            "builtin fallbacks must not satisfy #ifdef/defined(): {}",
+            result.output
+        );
+        assert!(result.output.contains("done"), "{}", result.output);
+    }
+
+    #[test]
+    fn cli_define_overrides_builtin_with_shared_table() {
+        let shared = Arc::new(RwLock::new(MacroTable::new()));
+        let opts = PreprocessOptions::new()
+            .with_shared_macros(shared)
+            .with_define("__init", "KEEP_ME");
+        let result = preprocess_string("int __init x;\n", Path::new("t.c"), &opts);
+        assert!(
+            result.output.contains("KEEP_ME"),
+            "a -D define must override the builtin even in the shared-table path: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn cached_include_delta_carries_guarded_redefinition() {
+        let dir = unique_tmp_dir("fallback_delta");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("c.h"),
+            "#ifndef container_of\n#define container_of(p, t, m) REAL_CONTAINER(p)\n#endif\n",
+        )
+        .unwrap();
+        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = PreprocessOptions::new()
+            .with_include(dir.clone())
+            .with_include_expansion_cache(cache);
+        let src = "#include \"c.h\"\nint a = container_of(x, struct D, f);\n";
+        let r1 = preprocess_string(src, &dir.join("a.c"), &opts);
+        assert!(
+            r1.output.contains("REAL_CONTAINER"),
+            "first TU must use the header's definition: {}",
+            r1.output
+        );
+        // Second TU replays the cached include; the header's redefinition
+        // must survive the delta capture and beat this TU's fallback.
+        let r2 = preprocess_string(src, &dir.join("b.c"), &opts);
+        assert!(
+            r2.output.contains("REAL_CONTAINER"),
+            "cache replay must carry the header's redefinition over the fallback: {}",
+            r2.output
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fallback_stays_identifier_in_if_expression() {
+        let src = "#if 1 || __init\nint kept;\n#endif\n\
+                   #if __init\nint dropped;\n#endif\n\
+                   int done;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("kept"),
+            "a fallback in a #if expression must evaluate as an undefined \
+             identifier (0), not expand to nothing and mangle the expression: {}",
+            result.output
+        );
+        assert!(!result.output.contains("dropped"), "{}", result.output);
+        assert!(result.output.contains("done"), "{}", result.output);
+    }
+
+    #[test]
+    fn cached_header_replays_undef_of_fallback() {
+        let dir = unique_tmp_dir("fallback_undef");
+        fs::create_dir_all(&dir).unwrap();
+        // The declaration makes the header content-bearing so a cache entry
+        // is actually stored and the second TU takes the replay path.
+        fs::write(dir.join("u.h"), "int u_decl;\n#undef __init\n").unwrap();
+        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = PreprocessOptions::new()
+            .with_include(dir.clone())
+            .with_include_expansion_cache(cache);
+        let src = "#include \"u.h\"\nint __init marker;\n";
+        let r1 = preprocess_string(src, &dir.join("a.c"), &opts);
+        assert!(
+            r1.output.contains("__init"),
+            "after the header's #undef the name must stay an identifier: {}",
+            r1.output
+        );
+        // Cache hit must replay the #undef, not leave the fallback installed.
+        let r2 = preprocess_string(src, &dir.join("b.c"), &opts);
+        assert!(
+            r2.output.contains("__init"),
+            "cache replay must apply the header's #undef of the fallback: {}",
+            r2.output
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_header_replays_noop_undef() {
+        let dir = unique_tmp_dir("noop_undef");
+        fs::create_dir_all(&dir).unwrap();
+        // X is undefined when the entry is created, so a state diff records
+        // nothing — only a log of executed directives catches this #undef.
+        fs::write(dir.join("u.h"), "int u_decl;\n#undef X\n").unwrap();
+        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = PreprocessOptions::new()
+            .with_include(dir.clone())
+            .with_include_expansion_cache(cache);
+        let warm = preprocess_string("#include \"u.h\"\n", &dir.join("a.c"), &opts);
+        assert!(warm.output.contains("u_decl"), "{}", warm.output);
+        let src = "#define X 7\n#include \"u.h\"\nint arr = X;\n";
+        let hit = preprocess_string(src, &dir.join("b.c"), &opts);
+        assert!(
+            hit.output.contains('X') && !hit.output.contains('7'),
+            "cache replay must apply the header's #undef even though X was \
+             absent when the entry was created: {}",
+            hit.output
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_header_replays_undef_then_redefine_of_existing_macro() {
+        let dir = unique_tmp_dir("undef_redef");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("r.h"), "int r_decl;\n#undef X\n#define X 9\n").unwrap();
+        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = PreprocessOptions::new()
+            .with_include(dir.clone())
+            .with_include_expansion_cache(cache);
+        let src = "#define X 1\n#include \"r.h\"\nint a = X;\n";
+        let miss = preprocess_string(src, &dir.join("a.c"), &opts);
+        assert!(
+            miss.output.contains('9') && !miss.output.contains('1'),
+            "{}",
+            miss.output
+        );
+        // X existed at header entry AND exit, so a state diff records
+        // neither the undef nor the redefinition.
+        let hit = preprocess_string(src, &dir.join("b.c"), &opts);
+        assert!(
+            hit.output.contains('9') && !hit.output.contains('1'),
+            "cache replay must reproduce undef-then-redefine of a macro that \
+             existed when the entry was created: {}",
+            hit.output
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_header_define_overwrites_like_live_execution() {
+        let dir = unique_tmp_dir("replay_overwrite");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("r.h"), "int r_decl;\n#define X 9\n").unwrap();
+        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = PreprocessOptions::new()
+            .with_include(dir.clone())
+            .with_include_expansion_cache(cache);
+        let src = "#define X 1\n#include \"r.h\"\nint a = X;\n";
+        let miss = preprocess_string(src, &dir.join("a.c"), &opts);
+        assert!(
+            miss.output.contains('9') && !miss.output.contains('1'),
+            "{}",
+            miss.output
+        );
+        let hit = preprocess_string(src, &dir.join("b.c"), &opts);
+        assert!(
+            hit.output.contains('9') && !hit.output.contains('1'),
+            "a replayed #define must overwrite like live execution: {}",
+            hit.output
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_replay_accumulates_to_shared_table() {
+        let dir = unique_tmp_dir("replay_accum");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("m.h"), "int m_decl;\n#define FROM_HDR 5\n").unwrap();
+        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let src = "#include \"m.h\"\n";
+        let shared1 = Arc::new(RwLock::new(MacroTable::new()));
+        let opts1 = PreprocessOptions::new()
+            .with_include(dir.clone())
+            .with_include_expansion_cache(Arc::clone(&cache))
+            .with_shared_macros(shared1)
+            .with_accumulate_macros(true);
+        preprocess_string(src, &dir.join("a.c"), &opts1);
+        // The second run hits the cache; the replayed #define must reach the
+        // shared table exactly as a live #define would.
+        let shared2 = Arc::new(RwLock::new(MacroTable::new()));
+        let opts2 = PreprocessOptions::new()
+            .with_include(dir.clone())
+            .with_include_expansion_cache(cache)
+            .with_shared_macros(Arc::clone(&shared2))
+            .with_accumulate_macros(true);
+        preprocess_string(src, &dir.join("b.c"), &opts2);
+        assert!(
+            shared2.read().unwrap().contains_key("FROM_HDR"),
+            "cache replay must accumulate macros into the shared table"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn builtin_fallback_yields_to_source_definition() {
+        let src = "#define __init KEEP_ME\nint __init x;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("KEEP_ME"),
+            "a source #define must override the builtin fallback: {}",
             result.output
         );
     }
@@ -3151,7 +3618,8 @@ int x = A;
 
     #[test]
     fn if_function_like_macro_expands_in_condition() {
-        let src = "#define GE(a, b) ((a) >= (b))\n#if GE(3, 2)\nint kept;\n#else\nint dropped;\n#endif\n";
+        let src =
+            "#define GE(a, b) ((a) >= (b))\n#if GE(3, 2)\nint kept;\n#else\nint dropped;\n#endif\n";
         let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
         assert!(result.output.contains("kept"), "{}", result.output);
         assert!(!result.output.contains("dropped"), "{}", result.output);
@@ -3186,7 +3654,11 @@ int x = A;
         let src = "#if 0 || \\\n    1\nint kept;\n#endif\n";
         let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
         assert!(result.output.contains("kept"), "{}", result.output);
-        assert!(!result.output.contains("\n1"), "continuation line must not leak: {}", result.output);
+        assert!(
+            !result.output.contains("\n1"),
+            "continuation line must not leak: {}",
+            result.output
+        );
     }
 
     #[test]

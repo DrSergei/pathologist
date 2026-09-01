@@ -71,3 +71,25 @@ fn preproc_if0_dead_branch() {
     assert!(!result.output.contains("42"));
     assert!(result.output.contains("visible = 1") || result.output.contains("int visible"));
 }
+
+#[test]
+fn builtin_macro_fallbacks_fixture() {
+    let root = fixture("builtin_macros");
+    let opts = PreprocessOptions::new().with_include(root.clone());
+    let program = build_program(&root, &opts).expect("build program");
+    let parse_diags: Vec<_> = program
+        .diagnostics
+        .iter()
+        .filter(|d| d.stage == "parse")
+        .collect();
+    assert!(
+        parse_diags.is_empty(),
+        "expected no parse diagnostics, got: {parse_diags:?}"
+    );
+    for name in ["FooTest_Bar", "DevRead", "DevInit", "DevExit"] {
+        assert!(
+            program.symbols.functions.iter().any(|f| f.name == name),
+            "function {name} missing from index"
+        );
+    }
+}

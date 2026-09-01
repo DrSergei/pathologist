@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -12,25 +13,29 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "docs" / "PARSE_FAILURES.md"
 
+# Directory holding checkouts of the eval corpora (one subdirectory per
+# corpus, named as below — clones of github.com/openharmony/<name>).
+CORPUS_BASE = Path(os.environ.get("PARSE_CORPUS_BASE", "/home/sergei"))
+
 CORPORA = [
     {
         "id": "hdf",
         "name": "drivers_hdf_core",
-        "root": Path("/home/sergei/drivers_hdf_core"),
+        "root": CORPUS_BASE / "drivers_hdf_core",
         "db": Path("/tmp/hdf_parse_check.db"),
         "tsv": Path("/tmp/parse_failures_hdf.tsv"),
     },
     {
         "id": "hiview",
         "name": "hiviewdfx_hiview",
-        "root": Path("/home/sergei/hiviewdfx_hiview"),
+        "root": CORPUS_BASE / "hiviewdfx_hiview",
         "db": Path("/tmp/hiview_parse_check.db"),
         "tsv": Path("/tmp/parse_failures_hiview.tsv"),
     },
     {
         "id": "camera",
         "name": "multimedia_camera_framework",
-        "root": Path("/home/sergei/multimedia_camera_framework"),
+        "root": CORPUS_BASE / "multimedia_camera_framework",
         "db": Path("/tmp/camera_parse_check.db"),
         "tsv": Path("/tmp/parse_failures_camera.tsv"),
     },
