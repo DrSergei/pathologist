@@ -49,11 +49,11 @@ flowchart LR
 | Macro hide set | Replacement-list tokens are painted with the macro name (and the invoking token's hide set) so self-referential macros such as `#define FOO FOO, BAR` terminate; nested `MIN(MIN(a,b),c)` still expands because argument tokens are not painted |
 | Expansion depth cap | 256 nested expansions; further expansion is skipped with a warning (backstop if hide-set does not apply) |
 | Runaway caps | Per-file limits (defaults): 64 nested `#include`s, 32 MiB live output, 8M token-loop iterations (macro rescan included). Exceeding output/token budget stops that file with an error diagnostic; include-depth skips the nested include. CLI `--timeout-secs N` aborts the whole process. |
-| `##` token pasting | In macro bodies after argument substitution |
+| `##` token pasting | In macro bodies after argument substitution; chained pastes (`a ## b ## c`) collapse left to right, a dangling `##` with no operand is dropped |
 | Conditionals | `#ifdef`, `#ifndef`, `#if` / `#elif` / `#else` / `#endif`. `#if` conditions get full constant-expression evaluation: the `defined X` / `defined(X)` operator is resolved over unexpanded tokens (C11 6.10.1p4), object **and** function-like macros expand (hide-set painted, depth-capped), and the result is parsed with C operator precedence (`?:`, `\|\|`, `&&`, bitwise, `==`/`!=`, relationals, shifts, arithmetic, unary `!`/`~`/`-`/`+`, parens). Integer literals accept `0x`/`0b`/octal prefixes and `u`/`U`/`l`/`L` suffixes; arithmetic models 64-bit intmax_t/uintmax_t with the usual arithmetic conversions (an operand mixed with an unsigned one converts to unsigned, so `-1 < 1U` is false; `>>` is arithmetic for signed, logical for unsigned; a literal is unsigned when suffixed `u`/`U` or too large for intmax_t). Identifiers surviving expansion evaluate to 0; malformed expressions (trailing tokens, unbalanced parens) conservatively skip the branch; per chain at most one branch activates. `\`-newline continuations inside conditions are spliced. Conditions in skipped groups are not evaluated (and malformed `#ifdef` operands there are tolerated). Condition macro expansion runs under its own budget (64K tokens / 1M steps); exceeding it warns and conservatively skips the branch. `#elif` after `#else` warns and is ignored. |
 | `#line` | Location tracking in `LineMap` |
 | `#undef` | |
-| Predefined | `__FILE__`, `__LINE__`; empty object macro `__UNUSED` (applied even when the shared warm table is cloned, so `T &x __UNUSED` is not left as an identifier that breaks tree-sitter function definitions) |
+| Predefined | `__FILE__`, `__LINE__`; builtin fallback macros for headers the indexed tree does not ship (see [Builtin fallback macros](#builtin-fallback-macros)) |
 | Token spacing | No space before `)` / `]`; space between `>` and `&` / `*` so `operator()` and `shared_ptr<T> &p` survive re-lexing |
 
 ### P1 (planned)
@@ -65,6 +65,47 @@ flowchart LR
 ### P2 (planned)
 
 - `_Pragma`, additional standard predefined macros
+
+## Builtin fallback macros
+
+Code is indexed without a real toolchain, so macros whose definitions live in
+headers the tree does not ship (gtest, Linux kernel headers, `<inttypes.h>`)
+survive preprocessing, produce tree-sitter ERROR nodes, and can drop whole
+functions from the index (`docs/PARSE_FAILURES.md` catalogs the impact on the
+eval corpora). The preprocessor installs fallback definitions for the common
+offenders:
+
+| Macros | Fallback | Failure mode avoided |
+|--------|----------|----------------------|
+| `__UNUSED` | empty | `T &x __UNUSED` breaks the function definition |
+| `__user`, `__iomem`, `__percpu`, `__rcu`, `__force`, `__init`, `__exit`, `__initdata`, `__exitdata`, `__read_mostly` | empty | kernel address-space/section annotations are syntax errors in declarators (`char __user *buf`, `int __init foo(void)`) |
+| `PRI[diuxXo](8\|16\|32\|64)` | format-specifier string literal (e.g. `PRIu64` → `"llu"`) | `"%" PRIu64` leaves an identifier between string literals |
+| `container_of(ptr, type, member)` | `((type *)(void *)(ptr))` | a type keyword in expression position; the fallback keeps the pointer flow and target type |
+| `HWTEST(a, b, level)`, `HWTEST_F`, `HWTEST_P` | `static void a##_##b()` | gtest/OpenHarmony test macros followed by a body are unparseable, losing every test body in a file |
+
+Semantics — a fallback is a definition of last resort, never an answer to
+"is this defined?":
+
+- Each fallback is installed only when the name is not already defined; any
+  real definition — CLI `-D`, source or header `#define`, a cached include's
+  macro delta — **overrides** it.
+- Fallbacks behave as **undefined** throughout conditional evaluation: they do
+  not satisfy `#ifdef` / `#ifndef` / `defined()` — so the ubiquitous guard
+  idiom (`#ifndef container_of` + `#define container_of(...)`) takes its
+  branch and the tree's genuine definition wins — and inside a `#if`
+  expression they stay unexpanded identifiers evaluating to 0 (`#if 1 ||
+  __init` is true; an empty expansion would mangle the expression). A source
+  `#define` of the name then makes it a normal macro.
+- Installation happens per preprocess, after cloning the shared warm table, so
+  fallbacks apply even in warm-cache runs (and stay overridden if the warm
+  table carries a real definition). CLI `-D` defines absent from the warm
+  table are re-applied first-wins so they beat fallbacks in that path too.
+- The include-expansion cache records the **ordered log** of `#define` /
+  `#undef` directives a header executed (nested replays included), not a
+  before/after table diff, and replays it through the same mutation helpers
+  live directives use — so a cache hit and a cache miss agree on macro state,
+  fallbacks included (see [Macro operations in cached
+  entries](#macro-operations-in-cached-entries)).
 
 ## LineMap
 
@@ -117,11 +158,11 @@ Grammar follows the including language, not the extension alone: `.hpp`/`.hh`/`.
 
 Standalone `preprocess_file` still inlines by default so a single-file expansion remains self-contained.
 
-### Macro deltas in cached entries
+### Macro operations in cached entries
 
-A cached expansion replays its text **without** executing the `#define`s it contains, so a header whose body *invokes* macros defined by an earlier-included header would starve: at warm time the dependency was processed inline (fine), but a consumer warmed later splices the dependency's cached body and never learns its macros. Therefore each `IncludeExpansion` also records a **macro delta**: every macro *name* that is new relative to the snapshot taken when entry construction began (`IncludeExpansion.macros`). `splice_cached` re-applies these into the current table first-wins (`or_insert_with`), so later headers warm with the definitions they were built against.
+A cached expansion replays its text **without** executing the `#define`s it contains, so a header whose body *invokes* macros defined by an earlier-included header would starve: at warm time the dependency was processed inline (fine), but a consumer warmed later splices the dependency's cached body and never learns its macros. Therefore each `IncludeExpansion` records the **ordered log** of `#define` / `#undef` directives its processing executed, nested replays included (`IncludeExpansion::ops`). An ordered log rather than a table diff: a diff cannot represent a no-op `#undef` (name absent at capture, defined in a later consumer) or an undef-then-redefine of a name present at both boundaries.
 
-Limitation: the delta captures new names only. `#undef` of an inherited name, or redefinition of a macro that already existed in the warm table, is not replayed — such patterns across include boundaries are unsupported (v1).
+`splice_cached` replays the log through the same mutation helpers live directives use, so a cache hit and a cache miss agree on everything a directive touches: the local table (a replayed `#define` overwrites, like live execution), builtin-fallback marks, the shared table under `accumulate_macros`, and the op log feeding an enclosing cached header's own entry.
 
 ### Cache self-containment
 
