@@ -43,6 +43,10 @@ struct PreprocessorState {
     include_stack: Vec<PathBuf>,
     included_guard: HashSet<PathBuf>,
     conditional_stack: Vec<CondFrame>,
+    /// Depth of `conditional_stack` when the current file started. Frames
+    /// below it belong to includers: `#elif`/`#else`/`#endif` in this file
+    /// may only act on frames at or above it (see `process_file_tokens`).
+    cond_base: usize,
     output: String,
     line_map: LineMap,
     diagnostics: Vec<Diagnostic>,
@@ -87,6 +91,8 @@ struct CondFrame {
     taken: bool,
     /// Has `#else` been seen (a later `#elif` is malformed)?
     else_seen: bool,
+    /// Line of the opening `#if`/`#ifdef`/`#ifndef`, for the EOF diagnostic.
+    line: u32,
 }
 
 /// One cached header being constructed.
@@ -105,6 +111,7 @@ impl PreprocessorState {
             include_stack: vec![file.clone()],
             included_guard: HashSet::new(),
             conditional_stack: Vec::new(),
+            cond_base: 0,
             output: String::new(),
             line_map: LineMap::new(),
             diagnostics: Vec::new(),
@@ -233,7 +240,13 @@ impl PreprocessorState {
         self.conditional_stack.last().is_none_or(|f| f.active)
     }
 
-    fn push_cond(&mut self, cond: bool) {
+    /// Does the current file have an open conditional of its own for a
+    /// `#elif`/`#else`/`#endif` to act on? Includer frames do not count.
+    fn has_own_cond(&self) -> bool {
+        self.conditional_stack.len() > self.cond_base
+    }
+
+    fn push_cond(&mut self, cond: bool, line: u32) {
         let parent_active = self.is_active();
         let active = parent_active && cond;
         self.conditional_stack.push(CondFrame {
@@ -241,6 +254,7 @@ impl PreprocessorState {
             active,
             taken: active,
             else_seen: false,
+            line,
         });
     }
 
@@ -316,23 +330,24 @@ impl PreprocessorState {
         }
     }
 
-    fn warn(&mut self, line: u32, message: impl Into<String>) {
+    fn report(&mut self, severity: DiagnosticSeverity, line: u32, message: String) {
         self.diagnostics.push(Diagnostic {
-            severity: DiagnosticSeverity::Warning,
+            severity,
             file: Some(self.current_file.clone()),
             line,
-            message: message.into(),
+            message,
         });
     }
 
+    fn warn(&mut self, line: u32, message: impl Into<String>) {
+        self.report(DiagnosticSeverity::Warning, line, message.into());
+    }
+
+    /// Records an error diagnostic and returns the matching hard error for
+    /// callers that abort the current file.
     fn error(&mut self, line: u32, message: impl Into<String>) -> PreprocessError {
         let msg = message.into();
-        self.diagnostics.push(Diagnostic {
-            severity: DiagnosticSeverity::Error,
-            file: Some(self.current_file.clone()),
-            line,
-            message: msg.clone(),
-        });
+        self.report(DiagnosticSeverity::Error, line, msg.clone());
         PreprocessError::Message { message: msg }
     }
 
@@ -620,7 +635,7 @@ impl PreprocessorState {
         self.include_stack.push(path.to_path_buf());
 
         let tokens = Lexer::new(&content).tokenize();
-        if let Err(e) = self.process_tokens(&tokens) {
+        if let Err(e) = self.process_file_tokens(&tokens) {
             // Attribute the stop to the file being processed when it failed,
             // not the including TU — downstream consumers key fallback and
             // reporting decisions off this message.
@@ -699,6 +714,38 @@ impl PreprocessorState {
         }
 
         Ok(())
+    }
+
+    /// Runs one file's token stream with `conditional_stack` fenced at the
+    /// depth it had on entry. In the C11 6.10 grammar an `if-section` is a
+    /// group of the `preprocessing-file` that contains it, so a conditional
+    /// cannot span files in either direction: a closing or branch directive
+    /// here may not act on an includer's frame (`cond_base`), and frames
+    /// still open at the end belong to this file alone. Report each of
+    /// those at its directive and pop them, leaving the includer in the
+    /// state it had at the `#include`. Without this an unterminated `#if 0`
+    /// in a header silently blanked the rest of the translation unit, and a
+    /// stray `#endif` in a header consumed the includer's frame so its own
+    /// `#endif` then failed (#8). A file that stopped early is rebalanced
+    /// the same way but keeps only its stop diagnostic: its unprocessed
+    /// remainder may still hold the `#endif`.
+    fn process_file_tokens(&mut self, tokens: &[Token]) -> Result<(), PreprocessError> {
+        let depth = self.conditional_stack.len();
+        let outer_base = std::mem::replace(&mut self.cond_base, depth);
+        let result = self.process_tokens(tokens);
+        self.cond_base = outer_base;
+        if result.is_ok() {
+            for idx in depth..self.conditional_stack.len() {
+                let line = self.conditional_stack[idx].line;
+                self.report(
+                    DiagnosticSeverity::Error,
+                    line,
+                    "unterminated #if; conditional closed at end of file".into(),
+                );
+            }
+        }
+        self.conditional_stack.truncate(depth);
+        result
     }
 
     fn process_tokens(&mut self, tokens: &[Token]) -> Result<(), PreprocessError> {
@@ -917,6 +964,7 @@ impl PreprocessorState {
                 return Err(self.error(tokens[i].line, "expected directive name after #"));
             }
         };
+        let line = tokens[i].line;
         i += 1;
 
         match directive.as_str() {
@@ -933,18 +981,18 @@ impl PreprocessorState {
                 if self.is_active() {
                     let name = self.read_directive_ident(tokens, &mut i)?;
                     let defined = self.is_defined_for_conditionals(&name);
-                    self.push_cond(defined);
+                    self.push_cond(defined, line);
                 } else {
-                    self.push_cond(false);
+                    self.push_cond(false, line);
                 }
             }
             "ifndef" => {
                 if self.is_active() {
                     let name = self.read_directive_ident(tokens, &mut i)?;
                     let defined = self.is_defined_for_conditionals(&name);
-                    self.push_cond(!defined);
+                    self.push_cond(!defined, line);
                 } else {
-                    self.push_cond(false);
+                    self.push_cond(false, line);
                 }
             }
             "if" => {
@@ -956,11 +1004,11 @@ impl PreprocessorState {
                     self.skip_condition_tokens(tokens, &mut i);
                     false
                 };
-                self.push_cond(cond);
+                self.push_cond(cond, line);
             }
             "elif" => {
-                if self.conditional_stack.is_empty() {
-                    return Err(self.error(tokens[i.saturating_sub(1)].line, "#elif without #if"));
+                if !self.has_own_cond() {
+                    return Err(self.error(line, "#elif without #if"));
                 }
                 let frame = *self.conditional_stack.last().unwrap();
                 let cond = if frame.parent_active && !frame.taken && !frame.else_seen {
@@ -970,18 +1018,15 @@ impl PreprocessorState {
                     false
                 };
                 if frame.else_seen {
-                    self.warn(
-                        tokens[i.saturating_sub(1)].line,
-                        "#elif after #else; branch ignored".to_string(),
-                    );
+                    self.warn(line, "#elif after #else; branch ignored");
                 }
                 let f = self.conditional_stack.last_mut().unwrap();
                 f.active = f.parent_active && !f.taken && cond;
                 f.taken |= f.active;
             }
             "else" => {
-                if self.conditional_stack.is_empty() {
-                    return Err(self.error(tokens[i.saturating_sub(1)].line, "#else without #if"));
+                if !self.has_own_cond() {
+                    return Err(self.error(line, "#else without #if"));
                 }
                 let f = self.conditional_stack.last_mut().unwrap();
                 f.active = f.parent_active && !f.taken;
@@ -989,8 +1034,8 @@ impl PreprocessorState {
                 f.else_seen = true;
             }
             "endif" => {
-                if self.conditional_stack.is_empty() {
-                    return Err(self.error(tokens[i.saturating_sub(1)].line, "#endif without #if"));
+                if !self.has_own_cond() {
+                    return Err(self.error(line, "#endif without #if"));
                 }
                 self.conditional_stack.pop();
             }
@@ -2540,7 +2585,7 @@ pub fn preprocess_file(
 pub fn preprocess_string(source: &str, file: &Path, opts: &PreprocessOptions) -> PreprocessResult {
     let mut state = PreprocessorState::new(opts.clone(), file.to_path_buf());
     let tokens = Lexer::new(source).tokenize();
-    if let Err(e) = state.process_tokens(&tokens) {
+    if let Err(e) = state.process_file_tokens(&tokens) {
         state.warn(1, format!("preprocess stopped: {e}"));
     }
     state.finish()
@@ -4291,6 +4336,132 @@ int x = A;
                 .iter()
                 .any(|d| d.message.contains("expansion budget exceeded in #if")),
             "{:?}",
+            result.diagnostics
+        );
+    }
+
+    /// Issue #8: a header ending inside an open `#if` must not leave its
+    /// frame on the stack. The includer continues in its own (active)
+    /// state, its own `#endif` still matches its own `#if`, and the
+    /// truncated header is diagnosed at the offending directive.
+    #[test]
+    fn unterminated_if_in_header_keeps_includer_active() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/preproc/unterminated_if_include.c");
+        let result = preprocess_file(&path, &PreprocessOptions::new()).unwrap();
+        assert!(
+            result.output.contains("int main"),
+            "includer content after the #include vanished: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("int after"),
+            "includer content after its own #endif vanished: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("int dead"),
+            "skipped group leaked: {}",
+            result.output
+        );
+        let unterminated: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.message.contains("unterminated #if"))
+            .collect();
+        assert_eq!(unterminated.len(), 1, "{:?}", result.diagnostics);
+        let d = unterminated[0];
+        assert_eq!(d.severity, DiagnosticSeverity::Error);
+        assert_eq!(d.line, 1, "diagnostic must point at the open #if");
+        assert!(
+            d.file
+                .as_deref()
+                .is_some_and(|f| f.ends_with("unterminated_if_header.h")),
+            "diagnostic must name the truncated header: {d:?}"
+        );
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("#endif without #if")),
+            "includer's #endif must match its own #if: {:?}",
+            result.diagnostics
+        );
+    }
+
+    /// The root file gets the same EOF check, and every open frame is
+    /// reported exactly once at the line of its own directive.
+    #[test]
+    fn unterminated_if_at_root_eof_reports_each_open_frame() {
+        let src = "int before;\n#if 1\n#ifdef NOT_SET\nint hidden;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("int before"), "{}", result.output);
+        assert!(!result.output.contains("int hidden"), "{}", result.output);
+        let mut lines: Vec<u32> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.message.contains("unterminated #if"))
+            .map(|d| d.line)
+            .collect();
+        lines.sort_unstable();
+        assert_eq!(lines, vec![2, 3], "{:?}", result.diagnostics);
+    }
+
+    /// Balanced (nested) conditionals must not trip the EOF check.
+    #[test]
+    fn balanced_nested_conditionals_emit_no_eof_diagnostic() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/preproc/nested_if.c");
+        let result = preprocess_file(&path, &PreprocessOptions::new()).unwrap();
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("unterminated #if")),
+            "{:?}",
+            result.diagnostics
+        );
+    }
+
+    /// A closing or branch directive can only act on a frame opened in the
+    /// same file. A header that starts with a stray `#endif` / `#else` /
+    /// `#elif` must be diagnosed and must not pop or mutate the includer's
+    /// frame, otherwise the includer's own `#endif` fails to match and the
+    /// rest of the translation unit is lost.
+    #[test]
+    fn stray_closing_directives_in_header_do_not_touch_includer_frame() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/preproc/stray_closer_include.c");
+        let result = preprocess_file(&path, &PreprocessOptions::new()).unwrap();
+        assert!(result.output.contains("survived"), "{}", result.output);
+        assert!(result.output.contains("tail"), "{}", result.output);
+        for (header, directive) in [
+            ("stray_endif.h", "#endif"),
+            ("stray_else.h", "#else"),
+            ("stray_elif.h", "#elif"),
+        ] {
+            let expected = format!("{directive} without #if");
+            assert!(
+                result.diagnostics.iter().any(|d| {
+                    d.message == expected
+                        && d.line == 1
+                        && d.file.as_deref().is_some_and(|f| f.ends_with(header))
+                }),
+                "missing `{expected}` attributed to {header}: {:?}",
+                result.diagnostics
+            );
+        }
+        assert!(
+            !result.diagnostics.iter().any(|d| {
+                d.message.contains("without #if")
+                    && d.file
+                        .as_deref()
+                        .is_some_and(|f| f.ends_with("stray_closer_include.c"))
+            }),
+            "includer's #endif must still match its own #if: {:?}",
             result.diagnostics
         );
     }

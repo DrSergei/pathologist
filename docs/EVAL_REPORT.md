@@ -33,6 +33,19 @@ hiview and camera are identical. hdf differs only by **+6 direct call edges** to
 Every hub target set, the indirect-edge count, diagnostics, and the parse-failure file sets are
 unchanged, so `scripts/eval_expected.json` and the tables below are not touched by this change.
 
+**Re-verified 2026-09-02 (file-scoped conditional fence, #8):** all three corpora were re-analyzed
+at the pinned checkouts with the master (`24e093f`) and post-fix binaries. The two are
+**metric-identical** — every global, every hub target set, every diagnostic count — so
+`scripts/eval_expected.json` and the tables below are untouched by this change and
+`scripts/eval_check.py` still passes **67/67**. That is the expected result rather than a weak
+one: `trace analyze` does not export preprocessor diagnostics, so the absence of a new
+`unterminated #if` error was checked directly against the sources instead. Every C/C++ file in
+the three checkouts was scanned (comments and string/char literals stripped, line continuations
+joined) for a mismatch between its `#if`/`#ifdef`/`#ifndef` count and its `#endif` count:
+**0 of 4,504 files** are unbalanced, which also rules out the stray `#elif`/`#else`/`#endif` case
+the same fence covers. These corpora simply contain no instance of the bug; the fix is carried by
+the fixtures and unit tests.
+
 Performance was re-measured with the current binary (fresh runs, `--jobs 8`; stage timers
 are stable, wall-clock varies with cache so values are rounded).
 
