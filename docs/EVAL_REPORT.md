@@ -2142,7 +2142,23 @@ Base `CaptureSession::CanAddOutput` plus every session subclass that overrides i
 
 # Appendix — Re-runnable regression checks
 
-`scripts/eval_check.py` re-analyzes the three corpora fresh and asserts:
+The corpora are pinned to fixed upstream revisions in `scripts/eval_expected.json`
+(`repo` + `rev` + checkout `dir`), so the counts below can be re-captured by anyone:
+
+| Corpus | Repository | Revision |
+|--------|------------|----------|
+| `drivers_hdf_core` | `github.com/openharmony/drivers_hdf_core` | `cdc75a20bb8f` |
+| `hiviewdfx_hiview` | `github.com/openharmony/hiviewdfx_hiview` | `92408e2072bd` |
+| `multimedia_camera_framework` | `github.com/openharmony/multimedia_camera_framework` | `8ffd69dcd47f` |
+
+`scripts/fetch_corpora.py` shallow-fetches each corpus at its pinned revision into the
+corpus base (`~` by default, or `--base` / `$TRACE_CORPUS_BASE`); with `--update` it moves
+a clean existing checkout to the pin; it never touches a non-empty directory that is not a
+git checkout. `scripts/eval_check.py` first verifies every checkout is at the pinned revision
+**and clean** (`git status --porcelain` empty — analysis discovers files from the worktree, so
+edits or untracked sources move the counts just like another revision); either problem fails
+that corpus unless `--skip-rev-check` / `--allow-dirty` downgrade it to a warning. It then
+re-analyzes the three corpora fresh and asserts:
 
 1. **Global metrics** — files, functions (defined/external), call edges by resolution
    (direct/indirect/external), arg-flow, diagnostics, `dlsym` PAG edges. Diagnostics,
@@ -2150,7 +2166,7 @@ Base `CaptureSession::CanAddOutput` plus every session subclass that overrides i
    invariants); bulk function/edge/arg-flow totals use tolerance bands because the
    parallel index drifts a little run-to-run.
 2. **Dispatch-site checks (exact, name-based)** — the 12 HDF hubs
-   (`DeviceNodeExtDispatch` 73 … `WorkEntry` 20, linux `osal_workqueue.c`), the 7
+   (`DeviceNodeExtDispatch` 74 … `WorkEntry` 20, linux `osal_workqueue.c`), the 7
    hiview CHA/fn-ptr sites (`Plugin::OnEventProxy`→23 … `GetHandlerInfo`→2 at line 62),
    and the 5 camera cases (`Command::Do` 31/30, `CFilter::PrepareDone` 18,
    `Pipeline::LinkFilters` 18, `CaptureSession::AddOutput` 18). These are the
@@ -2159,11 +2175,15 @@ Base `CaptureSession::CanAddOutput` plus every session subclass that overrides i
    (hiview ≥120, camera ≥240), template member call sites that carry resolution
    records (camera ≥15 distinct `…<…>` callee texts), and a **calibration probe**:
    external-class template sites (`MetaHdr` `Set<Tag>`/`Get<Tag>`) must stay
-   unresolved (~1,178) instead of degrading into noise edges.
+   unresolved (~1,243) instead of degrading into noise edges.
 
 ```bash
+python3 scripts/fetch_corpora.py              # once; --base DIR to keep the checkouts elsewhere
 python3 scripts/eval_check.py                 # all three corpora, 800k pops, --jobs 8
-python3 scripts/eval_check.py hdf camera      # subset
+python3 scripts/eval_check.py hdf camera      # subset (--corpus-base DIR if not under ~)
 ```
 
-Exit 0 = all checks pass (current: **64 checks, 0 failures**).
+Exit 0 = all checks pass (current: **67 checks, 0 failures** — the three extra checks are
+the revision pins). The expectation values were re-captured on 2026-09-02 from master (`c7c6def`, after #12) at the
+pinned revisions; the metric tables in the corpus sections above still show the 2026-08-28
+snapshot and are refreshed by the preprocessor PRs that change them.

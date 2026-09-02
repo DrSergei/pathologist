@@ -72,6 +72,7 @@ Register external function summaries in `trace-analysis/src/summaries.rs`. Docum
 - Integration fixtures in `tests/fixtures/<name>/`
 - Each fixture: `*.c` sources + optional `expected.json` metadata
 - Run: `cargo test --workspace`
+- Eval corpora (OpenHarmony trees pinned by revision in `scripts/eval_expected.json`): `python3 scripts/fetch_corpora.py` once, then `python3 scripts/eval_check.py`; re-capture the expectations when a change legitimately moves the counts
 
 ## Do not
 

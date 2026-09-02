@@ -3,6 +3,7 @@
 Files that fail tree-sitter parsing during `trace analyze`. Regenerate TSV with:
 
 ```bash
+python3 scripts/fetch_corpora.py   # corpora at the revisions pinned in scripts/eval_expected.json
 trace analyze <ROOT> -o /tmp/out.db --jobs 8
 cargo run -p trace-cli --release --example parse_failures -- <ROOT> --from-db /tmp/out.db > /tmp/parse_failures.tsv
 python3 scripts/gen_parse_failures_report.py
