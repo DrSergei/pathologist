@@ -50,16 +50,16 @@ flowchart LR
 | Expansion depth cap | 256 nested expansions; further expansion is skipped with a warning (backstop if hide-set does not apply) |
 | Runaway caps | Per-file limits (defaults): 64 nested `#include`s, 32 MiB live output, 8M token-loop iterations (macro rescan included). Exceeding output/token budget stops that file with an error diagnostic; include-depth skips the nested include. CLI `--timeout-secs N` aborts the whole process. |
 | `##` token pasting | In macro bodies after argument substitution; chained pastes (`a ## b ## c`) collapse left to right, a dangling `##` with no operand is dropped |
+| `#` stringize | `#param` in a function-like body becomes one string literal spelling the argument **as written** (C11 6.10.3.2): token spellings with the inter-token whitespace collapsed to a single space (tokens carry no whitespace, so "was there a gap" is decided from their positions; a newline inside the argument counts as a space, but a `\`-newline splice does not — phase 2 deletes it before tokenizing, so `STR(a\`-newline-`b)` is `"ab"` while `STR(a \`-newline-`b)` keeps the real space and is `"a b"`), `"` and `\` inside string and character literals escaped, and `#__VA_ARGS__` spelling the variadic arguments with their commas exactly as written (the argument parser keeps the top-level `,` tokens, so `F(p,q)` gives `"p,q"` and `F(p , q)` gives `"p , q"`). The literal maps to the expansion site (the invoking macro name) in the LineMap. The argument is not macro-expanded first, so `STR(VALUE)` is `"VALUE"`; the two-level `XSTR(x) STR(x)` idiom that expands first needs C11 argument prescan (unsupported, see below) and also yields `"VALUE"`. A `#` not followed by a parameter is emitted verbatim. Before #13 the `#` and its argument were deleted, leaving `#(`/stray-`)` parse errors in every stringizing log/assert macro |
 | Conditionals | `#ifdef`, `#ifndef`, `#if` / `#elif` / `#else` / `#endif`. `#if` conditions get full constant-expression evaluation: the `defined X` / `defined(X)` operator is resolved over unexpanded tokens (C11 6.10.1p4), object **and** function-like macros expand (hide-set painted, depth-capped), and the result is parsed with C operator precedence (`?:`, `\|\|`, `&&`, bitwise, `==`/`!=`, relationals, shifts, arithmetic, unary `!`/`~`/`-`/`+`, parens). Integer literals accept `0x`/`0b`/octal prefixes and `u`/`U`/`l`/`L` suffixes; arithmetic models 64-bit intmax_t/uintmax_t with the usual arithmetic conversions (an operand mixed with an unsigned one converts to unsigned, so `-1 < 1U` is false; `>>` is arithmetic for signed, logical for unsigned; a literal is unsigned when suffixed `u`/`U` or too large for intmax_t). Identifiers surviving expansion evaluate to 0; malformed expressions (trailing tokens, unbalanced parens) conservatively skip the branch; per chain at most one branch activates. `\`-newline continuations inside conditions are spliced. Conditions in skipped groups are not evaluated (and malformed `#ifdef` operands there are tolerated). Condition macro expansion runs under its own budget (64K tokens / 1M steps); exceeding it warns and conservatively skips the branch. `#elif` after `#else` warns and is ignored. Conditional groups are **file-scoped** in both directions: a group must be closed in the file that opened it, so at the end of every file (root or `#include`d) the frames it left open are reported as unterminated and popped, and the includer resumes in the state it had at the `#include`; and `#elif` / `#else` / `#endif` may only act on a group opened in the same file — in a header they never see the includer's frames, so a stray one is a `… without #if` error there even when the includer is inside an `#if` (before this, a header ending inside `#if 0` silently swallowed the rest of the translation unit, and a header starting with `#endif` consumed the includer's frame so the includer's own `#endif` failed — #8). A header that *stops early* (budget, malformed argument list) is rebalanced the same way but reports only its stop diagnostic, since its unprocessed remainder may still hold the `#endif`. |
 | `#line` | Location tracking in `LineMap` |
 | `#undef` | |
-| Predefined | `__FILE__`, `__LINE__`; builtin fallback macros for headers the indexed tree does not ship (see [Builtin fallback macros](#builtin-fallback-macros)) |
+| Predefined | `__FILE__`, `__LINE__` — inside a macro body `__LINE__` is the line of the (outermost) invocation, C11 6.10.8.1, and both work in object-like as well as function-like bodies; builtin fallback macros for headers the indexed tree does not ship (see [Builtin fallback macros](#builtin-fallback-macros)) |
 | Token spacing | No space before `)` / `]`; space between `>` and `&` / `*` so `operator()` and `shared_ptr<T> &p` survive re-lexing |
 
 ### P1 (planned)
 
 - `#pragma once` / include-guard detection
-- `#` stringize operator
 - `__VA_OPT__` (C23)
 
 ### P2 (planned)
@@ -111,7 +111,7 @@ Semantics — a fallback is a definition of last resort, never an answer to
 
 The preprocessor records mappings from **output byte offsets** to original `(file, line, col)` in `LineMap`.
 
-**Current behavior:** tree-sitter parses **preprocessed** source; IR spans (`Span` in `trace-ir`) are resolved through the `LineMap` to original `(file, line, col)` — `#include`d code attributes to its header, TU-local code keeps its original pre-expansion position, and macro-expanded code attributes to the expansion site's origin (identical coordinates when nothing was expanded). Cached `#include` expansions store their own sub-`LineMap`, which is spliced back on replay so origins survive caching.
+**Current behavior:** tree-sitter parses **preprocessed** source; IR spans (`Span` in `trace-ir`) are resolved through the `LineMap` to original `(file, line, col)` — `#include`d code attributes to its header, TU-local code keeps its original pre-expansion position, and macro-expanded code attributes to the expansion site's origin (identical coordinates when nothing was expanded). Every token that comes out of a replacement list carries the `(line, col)` of the **outermost** invocation that produced it (`Token::origin`, set when the token is painted with its hide set and inherited through forwarding macros such as `#define WRAP(x) STR(x)`), while its own `line`/`col` keep the definition-site coordinates that whitespace-adjacency decisions need; the LineMap and `__LINE__` read the former. Argument tokens are not painted and keep their source position. Cached `#include` expansions store their own sub-`LineMap`, which is spliced back on replay so origins survive caching.
 
 The `LineMap` must keep byte-accurate offset mapping when extending the preprocessor.
 
@@ -204,11 +204,21 @@ A mid-run stop inside ONE nested header must not invalidate the whole TU: indexi
 - `#import` (Objective-C)
 - `#warning` / `#error` (partially recognized)
 - Full C11 macro prescan/rescan semantics
+- **General translation phase 2 (`\`-newline splicing).** The lexer does not delete
+  `\`-newline before tokenizing; consumers skip the `\`+newline token pair where it matters
+  (`parameter_list_open` for the `(` that makes a `#define` function-like, `read_replacement_list`
+  for macro bodies, the `#if` condition stitcher, and `parse_macro_args` for the adjacency `#`
+  stringizing needs). Everywhere else a splice is still visible: a spliced identifier in ordinary
+  code stays two tokens and the `\` is emitted verbatim (`int c\`-newline-`d;` becomes
+  `int c\ d;`, where a conforming preprocessor gives `int cd;`), and the same argument spliced
+  into a non-stringized parameter expands to `a b` rather than `ab`. Splicing properly means
+  moving it into the lexer, which in turn means adjacency can no longer be read off physical
+  `line`/`col` — every positional adjacency test above would need a logical position instead.
 - System include paths outside project tree (unless copied into tree)
 
 ## Testing
 
 - Unit tests: `trace-preproc/src/`
-- Integration fixtures: `tests/fixtures/preproc/` (including `self_ref_macro.c` for C11 hide-set / X-macro lists, `include_macro.c` for `#include FOO`, `unterminated_if_include.c` + `unterminated_if_header.h` for an `#if` left open by a header, `stray_closer_include.c` + `stray_{endif,else,elif}.h` for closers that would otherwise act on the includer's frame)
+- Integration fixtures: `tests/fixtures/preproc/` (including `self_ref_macro.c` for C11 hide-set / X-macro lists, `include_macro.c` for `#include FOO`, `unterminated_if_include.c` + `unterminated_if_header.h` for an `#if` left open by a header, `stray_closer_include.c` + `stray_{endif,else,elif}.h` for closers that would otherwise act on the includer's frame, `stringize.c` for `#param` in log/assert-shaped macros; the `\`-newline splice cases are unit tests, checked against gcc/clang)
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how preprocessing fits the full workflow.

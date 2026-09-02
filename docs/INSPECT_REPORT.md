@@ -10,6 +10,13 @@
 
 **Re-verified 2026-09-02 (file-scoped conditional fence, #8):** every fixture directory under `tests/fixtures/` (69 directories) was analyzed with the master (`24e093f`) and post-fix binaries and the two SQLite exports compared as full `.dump`s. **68 are byte-identical**, so every probe below is unchanged. The one that differs is `preproc`, which now carries this change's fixtures — `unterminated_if_include.c` + `unterminated_if_header.h` and `stray_closer_include.c` + `stray_{endif,else,elif}.h`: the master binary blanks the includer after the header's open `#if 0` (no `main`) and loses `tail` once a header's stray `#endif` has consumed the includer's frame, while the fixed binary keeps `main`, `survived` and `tail`. The `unterminated #if` error itself is a preprocessor diagnostic, and `trace analyze` does not export those (pre-existing: the index path keeps only the preprocessed text, the LineMap and the included headers), so it is asserted by `cargo test` rather than visible in the `.dump`. No probe here uses these fixtures.
 
+**Re-verified 2026-09-02 (`#` stringize and expansion-site attribution, #13):** the same 69 fixture directories were analyzed with the `#8` binary and this one and the `.dump`s compared. **60 are byte-identical.** Nine differ:
+
+- `preproc` gains `stringize.c`, whose `f()` is now indexed at all — its stringized log/assert macros no longer produce `#(` parse errors.
+- eight macro fixtures (`builtin_macros`, `macro_field`, `macro_fnlike`, `macro_indirect`, `macro_nested_field`, `macro_paste`, `macro_xmacro`, `union_macro`) differ **only in line/column values**, in `functions`, `variables`, `call_sites` and `flow_nodes`: macro-expanded entities now attribute to the invocation instead of the `#define`. For example `builtin_macros`' `FooTest_Bar` moves from the macro definition at line 1 to its `HWTEST` invocation at line 8, and `macro_xmacro`'s `alpha_handler` / `beta_handler` from 9 to 12. No row is added, removed or renamed in any of the eight.
+
+The one probe that prints such a position, Case 7 below, was re-run against both binaries — `main.c:1` → `main.c:11` — and the case text below shows the new output; every other probe is unchanged.
+
 **Method:** every fixture under `tests/fixtures/` that exercises indirect calls or value flow was analyzed fresh into `/tmp/*.db`, then probed with both tools. Every result was cross-checked three ways: (1) against the source files, (2) against `call_sites`/`call_edges` and `flow_nodes`/`flow_edges` in the export, (3) via recursive-CTE BFS closure queries on those tables.
 
 | Command | Data source | `--direction` meaning |
@@ -168,11 +175,11 @@ Fixture `macro_indirect` — `#define INVOKE(f) ((f)())`:
 ```text
 callgraph from via_macro_indirect (main.c:9-12) (callees, depth 2):
 * via_macro_indirect (main.c:9)
-  -indirect-> target (main.c:3) (main.c:1)
+  -indirect-> target (main.c:3) (main.c:11)
 2 functions, 1 edges
 ```
 
-`INVOKE(fp)` (source line 11) resolves through the function-like macro to `target`; the reported call site `main.c:1` is the macro definition site (expansion-origin attribution, per the LineMap invariant). `decoy` is never reached — only the stored `&target` cell feeds the call.
+`INVOKE(fp)` (source line 11) resolves through the function-like macro to `target`; the reported call site `main.c:11` is the invocation (expansion-site attribution, per the LineMap invariant — until the #13 follow-up it was reported at the `#define` on line 1). `decoy` is never reached — only the stored `&target` cell feeds the call.
 
 ### Case 8 — `dlsym` / `GetProcAddress` (all positive + negative patterns)
 

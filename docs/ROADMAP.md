@@ -86,7 +86,7 @@ C1→C11 there with fixtures.
 | **Original-source line remapping** | Done for `#include`d code: header-origin entities carry original file/line via `LineMap` and are deduplicated across TUs |
 | **`compile_commands.json`** | Include paths / defines today via CLI only |
 | **Heap allocation modeling** | `malloc` family stubs don't allocate fresh locs yet; C++ `new T` is `NewHeap` |
-| **Macro stringize / `__VA_OPT__`** | `#` stringize operator, C23 `__VA_OPT__` (variadics + GNU `, ##args` elision are done) |
+| **`__VA_OPT__`** | C23 `__VA_OPT__` (variadics, GNU `, ##args` elision and the `#` stringize operator are done) |
 | **Constant array index refinement** | Avoid merging all fn-ptr table slots |
 | **Points-to visualization** | Beyond `--debug-points-to` SQL dump |
 

@@ -1,5 +1,5 @@
 {
-  "note": "Regression expectations for scripts/eval_check.py. Each corpus pins repo + rev (commit SHA) and its checkout dir under the corpus base (~ by default, or $TRACE_CORPUS_BASE / --corpus-base); scripts/fetch_corpora.py checks the pinned revisions out and eval_check.py refuses a checkout at any other revision. 'exact' must match; 'band' compares abs(actual-expected) <= N; 'min' requires actual >= N. Site checks count distinct callee NAMES at one dispatch call_site (caller name LIKE, line). Values were re-captured 2026-09-02 from current HEAD (1982d5c, after 'Improve cpp name lookup') at the pinned revisions (see docs/EVAL_REPORT.md); bulk function/edge totals drift a little run-to-run (parallel index), correctness numbers do not.",
+  "note": "Regression expectations for scripts/eval_check.py. Each corpus pins repo + rev (commit SHA) and its checkout dir under the corpus base (~ by default, or $TRACE_CORPUS_BASE / --corpus-base); scripts/fetch_corpora.py checks the pinned revisions out and eval_check.py refuses a checkout at any other revision. 'exact' must match; 'band' compares abs(actual-expected) <= N; 'min' requires actual >= N. Site checks count distinct callee NAMES at one dispatch call_site (caller name LIKE, line). Values were re-captured 2026-09-02 on top of 24e093f ('Improve cpp name lookup', #21) after the file-scoped conditional fence and `#` stringize fixes (#8, #13) at the pinned revisions (see docs/EVAL_REPORT.md); bulk function/edge totals drift a little run-to-run (parallel index), correctness numbers do not. The large hdf/camera edge growth is the expansion-site LineMap attribution fix shipped with #13: call sites are deduped on (file, line, col, callee), so macro-expanded sites that used to collide on their #define coordinates are now distinct.",
   "budget_pops": 800000,
   "jobs": 8,
   "corpora": {
@@ -10,15 +10,15 @@
       "dir": "drivers_hdf_core",
       "globals": {
         "files": {"cmp": "exact", "value": 1483},
-        "functions_total": {"cmp": "band", "value": 12557, "tol": 40},
+        "functions_total": {"cmp": "band", "value": 12555, "tol": 40},
         "functions_defined": {"cmp": "band", "value": 10223, "tol": 40},
-        "functions_external": {"cmp": "band", "value": 2334, "tol": 40},
-        "edges_total": {"cmp": "band", "value": 42444, "tol": 240},
-        "edges_direct": {"cmp": "band", "value": 22648, "tol": 240},
-        "edges_indirect": {"cmp": "exact", "value": 4621},
-        "edges_external": {"cmp": "band", "value": 15175, "tol": 200},
-        "arg_flow_edges": {"cmp": "band", "value": 34057, "tol": 150},
-        "diagnostics": {"cmp": "exact", "value": 191},
+        "functions_external": {"cmp": "band", "value": 2332, "tol": 40},
+        "edges_total": {"cmp": "band", "value": 72170, "tol": 240},
+        "edges_direct": {"cmp": "band", "value": 37427, "tol": 240},
+        "edges_indirect": {"cmp": "exact", "value": 4643},
+        "edges_external": {"cmp": "band", "value": 30100, "tol": 200},
+        "arg_flow_edges": {"cmp": "band", "value": 63471, "tol": 150},
+        "diagnostics": {"cmp": "exact", "value": 182},
         "dlsym_edges": {"cmp": "exact", "value": 4}
       },
       "sites": [
@@ -37,7 +37,7 @@
       ],
       "probes": [
         {"name": "flow_graph_nodes", "sql": "SELECT COUNT(*) FROM flow_nodes", "cmp": "min", "value": 100000},
-        {"name": "arg_flow_rows_per_call_edge", "sql": "SELECT COUNT(*) FROM arg_flow_edges a JOIN call_sites cs ON cs.id=a.call_site_id", "cmp": "band", "value": 34057, "tol": 150}
+        {"name": "arg_flow_rows_per_call_edge", "sql": "SELECT COUNT(*) FROM arg_flow_edges a JOIN call_sites cs ON cs.id=a.call_site_id", "cmp": "band", "value": 63471, "tol": 150}
       ]
     },
     "hiview": {
@@ -50,11 +50,11 @@
         "functions_total": {"cmp": "band", "value": 11472, "tol": 120},
         "functions_defined": {"cmp": "band", "value": 7727, "tol": 120},
         "functions_external": {"cmp": "band", "value": 3745, "tol": 120},
-        "edges_total": {"cmp": "band", "value": 27935, "tol": 160},
-        "edges_direct": {"cmp": "band", "value": 7652, "tol": 160},
+        "edges_total": {"cmp": "band", "value": 28075, "tol": 160},
+        "edges_direct": {"cmp": "band", "value": 7693, "tol": 160},
         "edges_indirect": {"cmp": "exact", "value": 24},
-        "edges_external": {"cmp": "band", "value": 20259, "tol": 160},
-        "arg_flow_edges": {"cmp": "band", "value": 9029, "tol": 120},
+        "edges_external": {"cmp": "band", "value": 20358, "tol": 160},
+        "arg_flow_edges": {"cmp": "band", "value": 9107, "tol": 120},
         "diagnostics": {"cmp": "exact", "value": 57},
         "dlsym_edges": {"cmp": "exact", "value": 1}
       },
@@ -82,10 +82,10 @@
         "functions_total": {"cmp": "band", "value": 25771, "tol": 120},
         "functions_defined": {"cmp": "band", "value": 18964, "tol": 120},
         "functions_external": {"cmp": "band", "value": 6807, "tol": 120},
-        "edges_total": {"cmp": "band", "value": 64511, "tol": 420},
-        "edges_direct": {"cmp": "band", "value": 19511, "tol": 420},
+        "edges_total": {"cmp": "band", "value": 72929, "tol": 420},
+        "edges_direct": {"cmp": "band", "value": 19513, "tol": 420},
         "edges_indirect": {"cmp": "exact", "value": 109},
-        "edges_external": {"cmp": "band", "value": 44891, "tol": 420},
+        "edges_external": {"cmp": "band", "value": 53307, "tol": 420},
         "arg_flow_edges": {"cmp": "band", "value": 17334, "tol": 250},
         "diagnostics": {"cmp": "exact", "value": 93},
         "dlsym_edges": {"cmp": "exact", "value": 0}
@@ -95,7 +95,7 @@
         {"case": "Command::Do Executing", "caller": "%DeferredProcessing::Command::Do", "line": 37, "resolution": "all", "expected": 30},
         {"case": "CFilter::PrepareDone DoPrepare", "caller": "%CFilter::PrepareDone", "line": 101, "resolution": "all", "expected": 18},
         {"case": "Pipeline::LinkFilters LinkNext", "caller": "%Pipeline::LinkFilters", "line": 243, "resolution": "all", "expected": 18},
-        {"case": "CaptureSession::AddOutput CanAddOutput", "caller": "%CaptureSession::AddOutput", "line": 1272, "resolution": "all", "expected": 18}
+        {"case": "CaptureSession::AddOutput CanAddOutput", "caller": "%CaptureSession::AddOutput", "line": 1272, "resolution": "all", "expected": 19}
       ],
       "probes": [
         {"name": "defined overload groups (C++ overload splitting)", "sql": "SELECT COUNT(*) FROM (SELECT name FROM functions WHERE is_defined=1 GROUP BY name HAVING COUNT(*)>1)", "cmp": "min", "value": 240},

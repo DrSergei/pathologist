@@ -314,7 +314,8 @@ impl PreprocessorState {
         self.output.push_str(&text);
         if self.opts.track_line_map {
             let fid = self.lm_current_file();
-            self.line_map.push(offset, fid, tok.line, tok.col);
+            let (line, col) = tok.expansion_site();
+            self.line_map.push(offset, fid, line, col);
         }
         if matches!(tok.kind, TokenKind::Newline) {
             self.current_line += 1;
@@ -327,6 +328,26 @@ impl PreprocessorState {
         if self.opts.track_line_map {
             let fid = self.lm_current_file();
             self.line_map.push(offset, fid, line, col);
+        }
+    }
+
+    /// Emit `__FILE__` / `__LINE__` for `tok` if `name` is one of them.
+    /// `__LINE__` is the line of the invocation (C11 6.10.8.1), also when
+    /// the token comes from a macro body: `expansion_site` carries that
+    /// through nested expansions.
+    fn emit_predefined(&mut self, tok: &Token, name: &str) -> bool {
+        let (line, col) = tok.expansion_site();
+        match name {
+            "__FILE__" => {
+                let text = format!("\"{}\"", self.current_file.display());
+                self.emit_str(&text, line, col);
+                true
+            }
+            "__LINE__" => {
+                self.emit_str(&line.to_string(), line, col);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -757,35 +778,14 @@ impl PreprocessorState {
                 break;
             }
 
-            if matches!(tok.kind, TokenKind::Hash) {
-                if at_beginning_of_line(tokens, i) {
-                    i = self.handle_directive(tokens, i)?;
-                    continue;
-                }
-                if let Some(TokenKind::Identifier(name)) = tokens.get(i + 1).map(|t| &t.kind) {
-                    self.emit_str(
-                        &format!("\"{name}\""),
-                        tokens[i + 1].line,
-                        tokens[i + 1].col,
-                    );
-                    i += 2;
-                    continue;
-                }
+            if matches!(tok.kind, TokenKind::Hash) && at_beginning_of_line(tokens, i) {
+                i = self.handle_directive(tokens, i)?;
+                continue;
             }
 
             if self.is_active() {
                 if let TokenKind::Identifier(name) = &tok.kind {
-                    if name == "__FILE__" {
-                        self.emit_str(
-                            &format!("\"{}\"", self.current_file.display()),
-                            tok.line,
-                            tok.col,
-                        );
-                        i += 1;
-                        continue;
-                    }
-                    if name == "__LINE__" {
-                        self.emit_str(&tok.line.to_string(), tok.line, tok.col);
+                    if self.emit_predefined(tok, name) {
                         i += 1;
                         continue;
                     }
@@ -855,7 +855,9 @@ impl PreprocessorState {
         Ok(())
     }
 
-    /// Expand macro replacement tokens: no `#` directives; `#x` stringizes; recurse into object macros.
+    /// Expand macro replacement tokens: no `#` directives (a `#` here is
+    /// emitted verbatim — `#param` was already stringized by
+    /// `substitute_macro`); recurse into object macros.
     fn expand_tokens_no_directives(&mut self, tokens: &[Token]) -> Result<(), PreprocessError> {
         let mut i = 0;
         while i < tokens.len() {
@@ -865,21 +867,16 @@ impl PreprocessorState {
                 break;
             }
             if matches!(tok.kind, TokenKind::Hash) {
-                if let Some(TokenKind::Identifier(name)) = tokens.get(i + 1).map(|t| &t.kind) {
-                    self.emit_str(
-                        &format!("\"{name}\""),
-                        tokens[i + 1].line,
-                        tokens[i + 1].col,
-                    );
-                    i += 2;
-                    continue;
-                }
                 self.emit_token(tok);
                 i += 1;
                 continue;
             }
             if self.is_active() {
                 if let TokenKind::Identifier(name) = &tok.kind {
+                    if self.emit_predefined(tok, name) {
+                        i += 1;
+                        continue;
+                    }
                     if !tok.is_hidden(name) {
                         match self.macros.get(name).cloned() {
                             Some(MacroDef::Object { replacement }) => {
@@ -1391,48 +1388,72 @@ impl PreprocessorState {
         &mut self,
         tokens: &[Token],
         i: &mut usize,
-    ) -> Result<Vec<Vec<Token>>, PreprocessError> {
+    ) -> Result<MacroArgs, PreprocessError> {
         while *i < tokens.len() && matches!(tokens[*i].kind, TokenKind::Newline) {
             *i += 1;
         }
         if !matches!(tokens.get(*i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if s == "(") {
-            return Ok(Vec::new());
+            return Ok(MacroArgs::default());
         }
         *i += 1;
-        let mut args: Vec<Vec<Token>> = Vec::new();
+        let mut args = MacroArgs::default();
         let mut current: Vec<Token> = Vec::new();
         let mut depth = 0u32;
+        // Carries a tight `\`-newline run (see below) onto the token that
+        // follows it, which is the only place its zero width is observable.
+        let mut spliced_before = false;
         while *i < tokens.len() {
             if is_line_continuation(tokens, *i) {
-                *i += 2;
+                // Phase 2 deletes `\`-newline before tokenizing (C11
+                // 5.1.1.2p1), so a continuation is zero-width: with no gap
+                // on either side its neighbours are adjacent in the spliced
+                // source and `#` must spell them with no space, while a
+                // space before the `\` or after the newline is real
+                // whitespace. Walking a run of them tracks the position the
+                // next character would occupy, exactly as
+                // `parameter_list_open` does for the `(` that makes a
+                // `#define` function-like.
+                let mut adjacent = current.last().map(token_end);
+                while is_line_continuation(tokens, *i) {
+                    if adjacent != Some((tokens[*i].line, tokens[*i].col)) {
+                        adjacent = None;
+                    }
+                    *i += 2;
+                    adjacent = adjacent.map(|(line, _)| (line + 1, 1));
+                }
+                spliced_before = matches!((adjacent, tokens.get(*i)),
+                    (Some(pos), Some(next)) if (next.line, next.col) == pos);
                 continue;
             }
-            match &tokens[*i].kind {
+            let mut tok = tokens[*i].clone();
+            tok.spliced_before = std::mem::take(&mut spliced_before);
+            match &tok.kind {
                 TokenKind::Punct(s) if s == "(" => {
                     depth += 1;
-                    current.push(tokens[*i].clone());
+                    current.push(tok);
                     *i += 1;
                 }
                 TokenKind::Punct(s) if s == ")" && depth == 0 => {
-                    args.push(current);
+                    args.args.push(current);
                     *i += 1;
                     break;
                 }
                 TokenKind::Punct(s) if s == ")" => {
                     depth -= 1;
-                    current.push(tokens[*i].clone());
+                    current.push(tok);
                     *i += 1;
                 }
                 TokenKind::Punct(s) if s == "," && depth == 0 => {
-                    args.push(current);
+                    args.args.push(current);
+                    args.separators.push(tok);
                     current = Vec::new();
                     *i += 1;
                 }
                 TokenKind::Eof => {
-                    return Err(self.error(tokens[*i].line, "unterminated macro argument list"));
+                    return Err(self.error(tok.line, "unterminated macro argument list"));
                 }
                 _ => {
-                    current.push(tokens[*i].clone());
+                    current.push(tok);
                     *i += 1;
                 }
             }
@@ -1540,7 +1561,7 @@ impl PreprocessorState {
                 }
                 if name == "__LINE__" {
                     out.push(Token::new(
-                        TokenKind::Number(tok.line.to_string()),
+                        TokenKind::Number(tok.expansion_site().0.to_string()),
                         tok.line,
                         tok.col,
                     ));
@@ -1763,12 +1784,37 @@ fn read_replacement_list(tokens: &[Token], i: &mut usize) -> Vec<Token> {
     replacement
 }
 
+/// The arguments of one function-like macro invocation. `separators[k]` is
+/// the top-level `,` token between `args[k]` and `args[k + 1]`; keeping it
+/// lets the variadic collector be re-spelled exactly as written
+/// (`#__VA_ARGS__` on `F(p,q)` is `"p,q"`, on `F(p , q)` it is `"p , q"`).
+#[derive(Debug, Default)]
+struct MacroArgs {
+    args: Vec<Vec<Token>>,
+    separators: Vec<Token>,
+}
+
+impl MacroArgs {
+    /// The variadic collector's tokens from `idx` on, commas included, in
+    /// source order — the one argument C11 6.10.3p12 says they form.
+    fn variadic_tokens(&self, idx: usize) -> Vec<Token> {
+        let mut out = Vec::new();
+        for (ai, arg) in self.args.iter().enumerate().skip(idx) {
+            if ai > idx {
+                out.push(self.separators[ai - 1].clone());
+            }
+            out.extend(arg.iter().cloned());
+        }
+        out
+    }
+}
+
 fn substitute_macro(
     macro_name: &str,
     origin: &Token,
     body: &[Token],
     params: &[String],
-    args: &[Vec<Token>],
+    args: &MacroArgs,
     variadic: bool,
 ) -> Vec<Token> {
     debug_assert!(
@@ -1797,7 +1843,7 @@ fn substitute_macro(
                         // (destroying string/char literals and breaking
                         // rescan). An explicitly empty argument substitutes
                         // to nothing and the comma stays, like gcc.
-                        if varargs_omitted(args, idx) {
+                        if varargs_omitted(&args.args, idx) {
                             out.pop();
                             i += concat_width + 1;
                         } else {
@@ -1806,9 +1852,9 @@ fn substitute_macro(
                         continue;
                     }
                     let blank = if is_va_tail {
-                        args_are_blank(args, idx)
+                        args_are_blank(&args.args, idx)
                     } else {
-                        args.get(idx).is_none_or(|a| arg_is_blank(a))
+                        args.args.get(idx).is_none_or(|a| arg_is_blank(a))
                     };
                     if blank {
                         // C99 placemarker: an empty `##` operand makes the
@@ -1819,6 +1865,31 @@ fn substitute_macro(
                 }
             }
         }
+        if matches!(body[i].kind, TokenKind::Hash) {
+            if let Some(TokenKind::Identifier(name)) = body.get(i + 1).map(|t| &t.kind) {
+                if let Some(idx) = params.iter().position(|p| p == name) {
+                    // C11 6.10.3.2: `#param` becomes a string literal
+                    // spelling the argument as written (not expanded). Like
+                    // every replacement-list token it keeps the definition
+                    // coordinates and attributes to the expansion site via
+                    // `with_macro_hide`.
+                    let text = if is_variadic_tail(params, variadic, idx) {
+                        stringize_spelling(&args.variadic_tokens(idx))
+                    } else {
+                        args.args
+                            .get(idx)
+                            .map(|a| stringize_spelling(a))
+                            .unwrap_or_default()
+                    };
+                    out.push(
+                        Token::new(TokenKind::String(text), body[i].line, body[i].col)
+                            .with_macro_hide(origin, macro_name),
+                    );
+                    i += 2;
+                    continue;
+                }
+            }
+        }
         if let TokenKind::Identifier(name) = &body[i].kind {
             // An anonymous `...` registers `__VA_ARGS__` as the last param
             // (see parse_macro_param_list), and handle_define rewrites a
@@ -1826,16 +1897,8 @@ fn substitute_macro(
             // param, so plain position lookup covers both variadic styles.
             if let Some(idx) = params.iter().position(|p| p == name) {
                 if is_variadic_tail(params, variadic, idx) {
-                    for (ai, arg) in args.iter().enumerate().skip(idx) {
-                        if ai > idx {
-                            out.push(
-                                Token::new(TokenKind::Punct(",".into()), body[i].line, body[i].col)
-                                    .with_macro_hide(origin, macro_name),
-                            );
-                        }
-                        out.extend(arg.iter().cloned());
-                    }
-                } else if let Some(arg) = args.get(idx) {
+                    out.extend(args.variadic_tokens(idx));
+                } else if let Some(arg) = args.args.get(idx) {
                     out.extend(arg.iter().cloned());
                 }
                 i += 1;
@@ -1989,6 +2052,10 @@ fn paste_two_tokens(left: &Token, right: &Token) -> Token {
         line: left.line,
         col: left.col,
         hidden: Token::union_hidden(left, right),
+        origin: left.origin.or(right.origin),
+        // Whatever separated `left` from the token before it still
+        // separates the pasted result from it.
+        spliced_before: left.spliced_before,
     }
 }
 
@@ -2027,6 +2094,64 @@ fn needs_leading_space(output: &str, kind: &TokenKind) -> bool {
     }
 }
 
+/// Body of the string literal `#param` produces for one argument (C11
+/// 6.10.3.2p2): each token's spelling, whitespace between tokens collapsed
+/// to a single space, leading/trailing whitespace dropped, and `"` / `\`
+/// inside string and character literals escaped. Tokens carry no
+/// whitespace, so "was there whitespace" is decided from positions: a token
+/// that does not start exactly where the previous one ended (or that sits
+/// on a later line) was separated by whitespace.
+fn stringize_spelling(arg: &[Token]) -> String {
+    let mut text = String::new();
+    let mut prev_end: Option<(u32, u32)> = None;
+    for tok in arg {
+        let spelling = match &tok.kind {
+            TokenKind::Newline | TokenKind::Eof => continue,
+            TokenKind::Identifier(s) | TokenKind::Number(s) | TokenKind::Punct(s) => s.clone(),
+            TokenKind::Hash => "#".to_string(),
+            TokenKind::String(s) => format!("\\\"{}\\\"", escape_for_stringize(s)),
+            TokenKind::Char(s) => format!("'{}'", escape_for_stringize(s)),
+        };
+        if let Some((line, col)) = prev_end {
+            // A `\`-newline splice is deleted in phase 2, so a token it
+            // alone separates from its predecessor is adjacent in the
+            // spliced source (`a\`+newline+`b` spells "ab") even though the
+            // positions differ; `parse_macro_args` flags exactly that case.
+            if !tok.spliced_before && (tok.line != line || tok.col != col) {
+                text.push(' ');
+            }
+        }
+        text.push_str(&spelling);
+        prev_end = Some(token_end(tok));
+    }
+    text
+}
+
+/// Where the character after `tok` sits in the source: the lexer counts one
+/// column per character, and string/char literals carry their delimiters.
+/// Shared with `parse_macro_args`, which compares this against a `\`-newline's
+/// position to decide whether the splice was tight.
+fn token_end(tok: &Token) -> (u32, u32) {
+    let width = match &tok.kind {
+        TokenKind::Identifier(s) | TokenKind::Number(s) | TokenKind::Punct(s) => s.chars().count(),
+        TokenKind::String(s) | TokenKind::Char(s) => s.chars().count() + 2,
+        TokenKind::Hash => 1,
+        TokenKind::Newline | TokenKind::Eof => 0,
+    };
+    (tok.line, tok.col + width as u32)
+}
+
+fn escape_for_stringize(literal_body: &str) -> String {
+    let mut out = String::with_capacity(literal_body.len());
+    for c in literal_body.chars() {
+        if matches!(c, '\\' | '"') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn token_to_string(kind: &TokenKind) -> String {
     match kind {
         TokenKind::Identifier(s) => s.clone(),
@@ -2044,12 +2169,12 @@ fn token_to_string(kind: &TokenKind) -> String {
 /// tokens. `i` points just past the macro name; returns the argument token
 /// lists and the index after the closing `)`, or `None` when the next token
 /// is not `(` (uninvoked name) or the list is unterminated.
-fn parse_cond_macro_args(toks: &[Token], mut i: usize) -> Option<(Vec<Vec<Token>>, usize)> {
+fn parse_cond_macro_args(toks: &[Token], mut i: usize) -> Option<(MacroArgs, usize)> {
     if !matches!(toks.get(i).map(|t| &t.kind), Some(TokenKind::Punct(p)) if p == "(") {
         return None;
     }
     i += 1;
-    let mut args: Vec<Vec<Token>> = Vec::new();
+    let mut args = MacroArgs::default();
     let mut current: Vec<Token> = Vec::new();
     let mut depth = 0u32;
     while i < toks.len() {
@@ -2059,7 +2184,7 @@ fn parse_cond_macro_args(toks: &[Token], mut i: usize) -> Option<(Vec<Vec<Token>
                 current.push(toks[i].clone());
             }
             TokenKind::Punct(p) if p == ")" && depth == 0 => {
-                args.push(current);
+                args.args.push(current);
                 return Some((args, i + 1));
             }
             TokenKind::Punct(p) if p == ")" => {
@@ -2067,7 +2192,8 @@ fn parse_cond_macro_args(toks: &[Token], mut i: usize) -> Option<(Vec<Vec<Token>
                 current.push(toks[i].clone());
             }
             TokenKind::Punct(p) if p == "," && depth == 0 => {
-                args.push(current);
+                args.args.push(current);
+                args.separators.push(toks[i].clone());
                 current = Vec::new();
             }
             _ => current.push(toks[i].clone()),
@@ -4464,5 +4590,237 @@ int x = A;
             "includer's #endif must still match its own #if: {:?}",
             result.diagnostics
         );
+    }
+
+    /// C11 6.10.3.2: `#param` becomes a string literal spelling the
+    /// argument's tokens, with the original spacing collapsed to single
+    /// spaces (#13). Before this the `#` was dropped together with its
+    /// argument.
+    #[test]
+    fn stringize_quotes_argument_spelling() {
+        let src = "#define STR(x) #x\n\
+                   const char *a = STR(hello);\n\
+                   const char *b = STR(a + b);\n\
+                   const char *c = STR(a+b);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("\"hello\""), "{}", result.output);
+        assert!(result.output.contains("\"a + b\""), "{}", result.output);
+        assert!(result.output.contains("\"a+b\""), "{}", result.output);
+        assert!(!result.output.contains('#'), "{}", result.output);
+    }
+
+    /// The operand of `#` is the argument as written, never expanded.
+    /// (The two-level `XSTR(x) STR(x)` idiom that expands first needs C11
+    /// argument prescan, which docs/PREPROCESSOR.md lists as unsupported.)
+    #[test]
+    fn stringize_uses_unexpanded_argument() {
+        let src = "#define STR(x) #x\n\
+                   #define VALUE 42\n\
+                   const char *d = STR(VALUE);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("\"VALUE\""), "{}", result.output);
+        assert!(!result.output.contains("42"), "{}", result.output);
+    }
+
+    /// `"` and `\` inside string and character literals in the argument are
+    /// escaped so the result is one valid string literal.
+    #[test]
+    fn stringize_escapes_literals_in_argument() {
+        let src = "#define STR(x) #x\n\
+                   const char *c = STR(\"quoted \\\"inner\\\"\");\n\
+                   const char *q = STR('\\'');\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains(r#""\"quoted \\\"inner\\\"\"""#),
+            "{}",
+            result.output
+        );
+        assert!(result.output.contains(r#""'\\''""#), "{}", result.output);
+    }
+
+    /// Newlines inside an argument count as whitespace: one space.
+    #[test]
+    fn stringize_collapses_newlines_to_single_space() {
+        let src = "#define STR(x) #x\nconst char *m = STR(first\n    second);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("\"first second\""),
+            "{}",
+            result.output
+        );
+    }
+
+    /// `#__VA_ARGS__` spells every variadic argument, comma-separated.
+    #[test]
+    fn stringize_variadic_collector_joins_arguments() {
+        let src = "#define ALL(...) #__VA_ARGS__\nconst char *g = ALL(p, q);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("\"p, q\""), "{}", result.output);
+    }
+
+    /// The log/assert shapes that dominate docs/PARSE_FAILURES.md: `#cond`
+    /// inside a larger body, next to `__VA_ARGS__` and `__LINE__`.
+    #[test]
+    fn stringize_fixture_log_and_assert_macros() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/preproc/stringize.c");
+        let result = preprocess_file(&path, &PreprocessOptions::new()).unwrap();
+        // `flat` strips every space, string-literal contents included.
+        let out = flat(&result.output);
+        assert!(
+            out.contains("log_write(\"hello%d\",1)"),
+            "{}",
+            result.output
+        );
+        assert!(
+            out.contains("fail(\"x>0&&ptr!=NULL\","),
+            "{}",
+            result.output
+        );
+        assert!(!result.output.contains('#'), "{}", result.output);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    /// The generated string literal is macro-expanded code, so it must map
+    /// to the expansion site (the invoking macro name), not to the `#` in
+    /// the definition (AGENTS.md LineMap invariant).
+    #[test]
+    fn stringize_maps_to_expansion_site() {
+        let src = "#define STR(x) #x\n\n\nconst char *s = STR(foo);\n";
+        let mut opts = PreprocessOptions::new();
+        opts.track_line_map = true;
+        let result = preprocess_string(src, Path::new("t.c"), &opts);
+        let off = result.output.find("\"foo\"").expect("stringized literal");
+        let entry = result.line_map.lookup(off).expect("line map entry");
+        let invocation_col = src.lines().nth(3).unwrap().find("STR(").unwrap() as u32 + 1;
+        assert_eq!(
+            (entry.line, entry.col),
+            (4, invocation_col),
+            "{:?}",
+            result.line_map
+        );
+    }
+
+    /// `#__VA_ARGS__` spells the variadic arguments with the commas as
+    /// written: no invented space after `,`, and a space before it only
+    /// when the source had one.
+    #[test]
+    fn stringize_variadic_preserves_comma_spacing() {
+        let src = "#define ALL(...) #__VA_ARGS__\n\
+                   const char *a = ALL(p,q);\n\
+                   const char *b = ALL(p, q);\n\
+                   const char *c = ALL(p , q);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("\"p,q\""), "{}", result.output);
+        assert!(result.output.contains("\"p, q\""), "{}", result.output);
+        assert!(result.output.contains("\"p , q\""), "{}", result.output);
+    }
+
+    fn lookup_at<'a>(result: &'a PreprocessResult, needle: &str) -> &'a crate::LineMapEntry {
+        let off = result
+            .output
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} in {}", result.output));
+        result.line_map.lookup(off).expect("line map entry")
+    }
+
+    fn col_of(src: &str, line: usize, needle: &str) -> u32 {
+        src.lines().nth(line - 1).unwrap().find(needle).unwrap() as u32 + 1
+    }
+
+    /// A stringized literal produced through a forwarding macro maps to the
+    /// outermost invocation, not to the `STR` token inside `WRAP`'s body.
+    #[test]
+    fn stringize_maps_to_expansion_site_through_wrapper() {
+        let src = "#define STR(x) #x\n#define WRAP(x) STR(x)\n\nconst char *s = WRAP(foo);\n";
+        let mut opts = PreprocessOptions::new();
+        opts.track_line_map = true;
+        let result = preprocess_string(src, Path::new("t.c"), &opts);
+        let e = lookup_at(&result, "\"foo\"");
+        assert_eq!(
+            (e.line, e.col),
+            (4, col_of(src, 4, "WRAP(")),
+            "{:?}",
+            result.line_map
+        );
+    }
+
+    /// Every replacement-list token maps to the invocation (AGENTS.md
+    /// LineMap invariant); an argument token keeps its own source position.
+    #[test]
+    fn replacement_tokens_map_to_expansion_site() {
+        let src = "#define ADD(x) x + 1\n#define TWICE(x) ADD(x) * 2\n\nint a = TWICE(v);\n";
+        let mut opts = PreprocessOptions::new();
+        opts.track_line_map = true;
+        let result = preprocess_string(src, Path::new("t.c"), &opts);
+        let site = (4, col_of(src, 4, "TWICE("));
+        let plus = lookup_at(&result, "+");
+        assert_eq!((plus.line, plus.col), site, "{:?}", result.line_map);
+        let star = lookup_at(&result, "*");
+        assert_eq!((star.line, star.col), site, "{:?}", result.line_map);
+        let v = lookup_at(&result, "v");
+        assert_eq!(
+            (v.line, v.col),
+            (4, col_of(src, 4, "v)")),
+            "{:?}",
+            result.line_map
+        );
+    }
+
+    /// `__LINE__` in a replacement list is the line of the invocation
+    /// (C11 6.10.8.1), not of the `#define`.
+    #[test]
+    fn line_macro_in_body_expands_to_invocation_line() {
+        let src = "#define HERE __LINE__\n#define VIA HERE\n\n\nint a = HERE;\nint b = VIA;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        let out = flat(&result.output);
+        assert!(out.contains("inta=5;"), "{}", result.output);
+        assert!(out.contains("intb=6;"), "{}", result.output);
+    }
+
+    /// Translation phase 2 (C11 5.1.1.2p1) deletes `\`-newline before
+    /// tokenizing, so a tight splice inside a stringized argument is
+    /// zero-width and the tokens around it are adjacent: gcc and clang both
+    /// spell `STR(a\<newline>b)` as "ab", not "a b".
+    #[test]
+    fn stringize_tight_line_splice_is_zero_width() {
+        let src = "#define STR(x) #x\nconst char *s = STR(a\\\nb);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("\"ab\""),
+            "tight splice must not introduce a space: {}",
+            result.output
+        );
+    }
+
+    /// Only the splice itself is zero-width. Whitespace before the `\` or
+    /// after the newline is real and still separates the tokens.
+    #[test]
+    fn stringize_keeps_whitespace_around_a_splice() {
+        for src in [
+            "#define STR(x) #x\nconst char *s = STR(a \\\nb);\n",
+            "#define STR(x) #x\nconst char *s = STR(a\\\n b);\n",
+        ] {
+            let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+            assert!(
+                result.output.contains("\"a b\""),
+                "whitespace around a splice must survive: {}",
+                result.output
+            );
+        }
+    }
+
+    /// A run of splices is still zero-width as long as every one of them is
+    /// tight, and a splice between two punctuators behaves the same way.
+    #[test]
+    fn stringize_chained_and_punct_splices() {
+        let chained = "#define STR(x) #x\nconst char *s = STR(a\\\n\\\nb);\n";
+        let result = preprocess_string(chained, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("\"ab\""), "{}", result.output);
+
+        let punct = "#define STR(x) #x\nconst char *s = STR(p->\\\nq);\n";
+        let result = preprocess_string(punct, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("\"p->q\""), "{}", result.output);
     }
 }

@@ -21,6 +21,19 @@ pub struct Token {
     pub col: u32,
     /// Macros that must not expand this token again (C11 6.10.3.4 hide set).
     pub(crate) hidden: Option<Arc<HashSet<String>>>,
+    /// Set on a macro-argument token that a `\`-newline splice, and nothing
+    /// else, separates from the token before it. Phase 2 deletes the splice
+    /// before tokenizing (C11 5.1.1.2p1), so the two are adjacent in the
+    /// spliced source even though their `line`/`col` say otherwise; `#`
+    /// stringizing has to spell them with no space between.
+    pub(crate) spliced_before: bool,
+    /// For a token that came out of a macro replacement list: the
+    /// `(line, col)` of the outermost invocation that produced it, in the
+    /// file being processed. `line`/`col` keep the definition-site
+    /// coordinates (they still decide whitespace adjacency); this is what
+    /// the LineMap and `__LINE__` report, so macro-expanded code attributes
+    /// to its expansion site even through forwarding macros.
+    pub(crate) origin: Option<(u32, u32)>,
 }
 
 impl Token {
@@ -30,7 +43,15 @@ impl Token {
             line,
             col,
             hidden: None,
+            origin: None,
+            spliced_before: false,
         }
+    }
+
+    /// Where this token attributes to: its own position for source text,
+    /// the outermost invocation for macro-expanded text.
+    pub(crate) fn expansion_site(&self) -> (u32, u32) {
+        self.origin.unwrap_or((self.line, self.col))
     }
 
     pub(crate) fn is_hidden(&self, name: &str) -> bool {
@@ -38,7 +59,10 @@ impl Token {
     }
 
     /// Paint this replacement-list token with the invoking token's hide set
-    /// plus `name` so the macro is not re-expanded (C11 6.10.3.4).
+    /// plus `name` so the macro is not re-expanded (C11 6.10.3.4), and with
+    /// the invocation's expansion site. `origin` may itself be a painted
+    /// token (a forwarding macro's body), so its own site is inherited
+    /// rather than its definition coordinates.
     pub(crate) fn with_macro_hide(&self, origin: &Token, name: &str) -> Token {
         let mut set = HashSet::new();
         if let Some(h) = &origin.hidden {
@@ -53,6 +77,8 @@ impl Token {
             line: self.line,
             col: self.col,
             hidden: Some(Arc::new(set)),
+            origin: Some(origin.expansion_site()),
+            spliced_before: self.spliced_before,
         }
     }
 
