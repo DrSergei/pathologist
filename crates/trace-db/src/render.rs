@@ -117,7 +117,11 @@ fn edge_annotation(e: &GraphEdge) -> String {
     }
 }
 
-fn render_text(graph: &QueryGraph, meta: &GraphMeta, label: &mut dyn FnMut(i64, &mut String)) -> String {
+fn render_text(
+    graph: &QueryGraph,
+    meta: &GraphMeta,
+    label: &mut dyn FnMut(i64, &mut String),
+) -> String {
     let mut children: FxHashMap<i64, Vec<&GraphEdge>> = FxHashMap::default();
     for e in &graph.edges {
         children.entry(e.from).or_default().push(e);
@@ -167,25 +171,45 @@ fn render_text(graph: &QueryGraph, meta: &GraphMeta, label: &mut dyn FnMut(i64, 
         seen.insert(id);
         if let Some(kids) = children.get(&id) {
             for kid in kids.clone() {
-                walk(kid.to, level + 1, Some(kid), children, seen, label, buf, out);
+                walk(
+                    kid.to,
+                    level + 1,
+                    Some(kid),
+                    children,
+                    seen,
+                    label,
+                    buf,
+                    out,
+                );
             }
         }
     }
 
     for &(root, depth) in &graph.order.clone() {
         if depth == 0 && !seen.contains(&root) {
-            walk(root, 0, None, &children, &mut seen, label, &mut buf, &mut out);
+            walk(
+                root, 0, None, &children, &mut seen, label, &mut buf, &mut out,
+            );
         }
     }
 
     if graph.truncated {
-        writeln!(out, "(truncated at --depth {}; increase to see more)", meta.depth).unwrap();
+        writeln!(
+            out,
+            "(truncated at --depth {}; increase to see more)",
+            meta.depth
+        )
+        .unwrap();
     }
     writeln!(out, "{}", meta.summary).unwrap();
     out
 }
 
-fn render_json(graph: &QueryGraph, meta: &GraphMeta, label: &mut dyn FnMut(i64, &mut String)) -> String {
+fn render_json(
+    graph: &QueryGraph,
+    meta: &GraphMeta,
+    label: &mut dyn FnMut(i64, &mut String),
+) -> String {
     let depths = node_depth(graph);
     let nodes = graph
         .order
@@ -247,7 +271,12 @@ fn render_graphviz(
     label: &mut dyn FnMut(i64, &mut String),
 ) -> String {
     let mut out = String::new();
-    writeln!(out, "digraph {} {{", quote_ident_attr(&dot_escape(meta.title))).unwrap();
+    writeln!(
+        out,
+        "digraph {} {{",
+        quote_ident_attr(&dot_escape(meta.title))
+    )
+    .unwrap();
     writeln!(out, "  rankdir=\"TB\";").unwrap();
     writeln!(out, "  node [shape=box];").unwrap();
     if graph.truncated {
@@ -436,7 +465,10 @@ mod tests {
         let out = render_graph(&graph(), RenderFormat::Mermaid, &meta(), &mut label);
         assert!(out.starts_with("flowchart TD"), "{out}");
         assert!(out.contains("n1[\"fn1\"]"), "{out}");
-        assert!(out.contains("n1 -->|\"indirect (target.c:5)\"| n2"), "{out}");
+        assert!(
+            out.contains("n1 -->|\"indirect (target.c:5)\"| n2"),
+            "{out}"
+        );
     }
 
     #[test]

@@ -94,7 +94,10 @@ fn merge_unit(program: &mut Program, unit: &UnitIndex, mode: MergeMode) {
     for func in &unit.functions {
         let old_id = func.id;
         let span_file = map_file(func.span.file);
-        if let Some(canonical) = program.dedup.existing_fn(span_file, &func.name, func.span.line) {
+        if let Some(canonical) = program
+            .dedup
+            .existing_fn(span_file, &func.name, func.span.line)
+        {
             fn_map.insert(old_id, canonical);
             dropped_fns.insert(old_id);
             continue;

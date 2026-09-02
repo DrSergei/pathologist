@@ -434,21 +434,26 @@ fn run_inspect(db: PathBuf, command: InspectCommands) -> Result<()> {
                 title: &format!("callgraph from {start} ({dir_word}, depth {depth}):"),
                 direction: dir_word,
                 depth,
-                summary: &format!("{} functions, {} edges", graph.nodes.len(), graph.edges.len()),
+                summary: &format!(
+                    "{} functions, {} edges",
+                    graph.nodes.len(),
+                    graph.edges.len()
+                ),
             };
-            let out = trace_db::render_graph(
-                &graph,
-                format.to_render(),
-                &meta,
-                &mut |id, out| match graph.nodes.get(&id) {
-                    Some(n) => out.push_str(&format!(
-                        "{} ({})",
-                        n.label,
-                        if n.detail.is_empty() { "?" } else { &n.detail }
-                    )),
-                    None => out.push_str(&format!("fn{id}")),
-                },
-            );
+            let out =
+                trace_db::render_graph(
+                    &graph,
+                    format.to_render(),
+                    &meta,
+                    &mut |id, out| match graph.nodes.get(&id) {
+                        Some(n) => out.push_str(&format!(
+                            "{} ({})",
+                            n.label,
+                            if n.detail.is_empty() { "?" } else { &n.detail }
+                        )),
+                        None => out.push_str(&format!("fn{id}")),
+                    },
+                );
             print!("{out}");
         }
         InspectCommands::Dataflow {
@@ -502,23 +507,23 @@ fn run_inspect(db: PathBuf, command: InspectCommands) -> Result<()> {
                     graph.edges.len()
                 ),
             };
-            let out = trace_db::render_graph(
-                &graph,
-                format.to_render(),
-                &meta,
-                &mut |id, out| match graph.nodes.get(&id) {
-                    Some(n) => {
-                        out.push_str(&n.label);
-                        if !n.detail.is_empty() {
-                            out.push_str(&format!(" ({})", n.detail));
+            let out =
+                trace_db::render_graph(
+                    &graph,
+                    format.to_render(),
+                    &meta,
+                    &mut |id, out| match graph.nodes.get(&id) {
+                        Some(n) => {
+                            out.push_str(&n.label);
+                            if !n.detail.is_empty() {
+                                out.push_str(&format!(" ({})", n.detail));
+                            }
                         }
-                    }
-                    None => out.push_str(&format!("node{id}")),
-                },
-            );
+                        None => out.push_str(&format!("node{id}")),
+                    },
+                );
             print!("{out}");
         }
     }
     Ok(())
 }
-

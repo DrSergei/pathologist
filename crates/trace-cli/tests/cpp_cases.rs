@@ -750,7 +750,10 @@ fn cpp_same_arity_overloads_stay_distinct_by_scalar_type() {
     let program = build_program(&root, &default_opts(&root)).expect("build");
 
     let candidates = program.symbols.resolve_function_candidates("f", None);
-    let sigs: Vec<Vec<String>> = candidates.iter().map(|&f| fn_param_descs(&program, f)).collect();
+    let sigs: Vec<Vec<String>> = candidates
+        .iter()
+        .map(|&f| fn_param_descs(&program, f))
+        .collect();
     assert!(
         sigs.contains(&vec!["Int".to_string()]),
         "f(int) must survive as its own overload, got {sigs:?}"
@@ -803,18 +806,18 @@ fn cpp_call_sites_prefer_exact_scalar_match() {
 
     // No call site may emit more than one edge: the type-resolved overload is
     // unambiguous rather than the may-tie set.
-    let multi = analysis
-        .call_edges
-        .iter()
-        .any(|e| {
-            analysis
-                .call_edges
-                .iter()
-                .filter(|e2| e2.call_site == e.call_site)
-                .count()
-                > 1
-        });
-    assert!(!multi, "type-resolved overloads must emit one site per call");
+    let multi = analysis.call_edges.iter().any(|e| {
+        analysis
+            .call_edges
+            .iter()
+            .filter(|e2| e2.call_site == e.call_site)
+            .count()
+            > 1
+    });
+    assert!(
+        !multi,
+        "type-resolved overloads must emit one site per call"
+    );
 }
 
 #[test]
@@ -824,7 +827,9 @@ fn cpp_template_member_calls_resolve_to_primary_name() {
     let (_pag, analysis) = analyze(&program);
 
     // Template primary registrations exist.
-    let candidates = program.symbols.resolve_function_candidates("FieldValue::GetNumber", None);
+    let candidates = program
+        .symbols
+        .resolve_function_candidates("FieldValue::GetNumber", None);
     assert_eq!(
         candidates.len(),
         3,
@@ -870,7 +875,11 @@ fn cpp_pointer_casts_rank_against_pointer_overloads() {
     let ptr_ch = vec!["Ptr(Char)".to_string()];
     let ptr_ptr_int = vec!["Ptr(Ptr(Int))".to_string()];
 
-    assert_eq!(sig_count("f", int.clone()), 1, "f(i) must pick exactly f(int)");
+    assert_eq!(
+        sig_count("f", int.clone()),
+        1,
+        "f(i) must pick exactly f(int)"
+    );
     assert_eq!(
         sig_count("f", ptr_int),
         2,
@@ -939,7 +948,8 @@ fn cpp_unresolvable_member_args_keep_full_candidate_set() {
         "g(int) must be present, got {g_targets:?}"
     );
     assert!(
-        seen.iter().any(|s| !s.is_empty() && s[0].starts_with("Struct")),
+        seen.iter()
+            .any(|s| !s.is_empty() && s[0].starts_with("Struct")),
         "g(Holder) must be among the kept candidates (both receiver shapes), got {g_targets:?}"
     );
 }
