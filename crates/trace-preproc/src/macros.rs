@@ -10,6 +10,11 @@ pub enum MacroDef {
     Function {
         params: Vec<String>,
         replacement: Vec<Token>,
+        /// Invariant: when true, the LAST entry of `params` is the variadic
+        /// collector — parse_macro_param_list pushes `"__VA_ARGS__"` for the
+        /// anonymous `...` form. A hand-built variadic def (builtins, tests)
+        /// must uphold this or the last named parameter will swallow every
+        /// argument; substitute_macro debug_asserts it.
         variadic: bool,
     },
 }

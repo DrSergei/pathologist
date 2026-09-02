@@ -93,3 +93,26 @@ fn builtin_macro_fallbacks_fixture() {
         );
     }
 }
+
+#[test]
+fn preproc_variadic_log_fixture() {
+    let path = fixture("preproc/variadic_log.c");
+    let result = trace_preproc::preprocess_file(&path, &PreprocessOptions::new()).unwrap();
+    let flat = result.output.replace(['\n', ' '], "");
+    assert!(
+        !flat.contains(",)"),
+        "empty varargs must elide the comma through the macro chain: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("42") && !result.output.contains("COUNT"),
+        "varargs must stay macro-expandable: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("\"reason\""),
+        "string-literal varargs must survive: {}",
+        result.output
+    );
+    assert!(!result.output.contains("__VA_ARGS__"), "{}", result.output);
+}

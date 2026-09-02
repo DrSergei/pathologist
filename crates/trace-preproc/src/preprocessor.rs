@@ -1194,18 +1194,33 @@ impl PreprocessorState {
             && self.looks_like_function_macro_params(tokens, i + 1)
         {
             i += 1;
-            let (params, variadic) = self.parse_macro_param_list(tokens, &mut i)?;
+            let Some((params, variadic)) = self.parse_macro_param_list(tokens, &mut i) else {
+                skip_directive_line(tokens, &mut i);
+                return Ok(i);
+            };
             let mut replacement = Vec::new();
             while i < tokens.len() && !matches!(tokens[i].kind, TokenKind::Newline) {
-                if matches!(&tokens[i].kind, TokenKind::Punct(s) if s == "\\")
-                    && i + 1 < tokens.len()
-                    && matches!(tokens[i + 1].kind, TokenKind::Newline)
-                {
+                if is_line_continuation(tokens, i) {
                     i += 2;
                     continue;
                 }
                 replacement.push(tokens[i].clone());
                 i += 1;
+            }
+            // Normalize at define time: a named GNU variadic (`args...`)
+            // whose body nevertheless spells `__VA_ARGS__` (gcc rejects the
+            // mix; real corpora contain it) aliases the tail parameter, so
+            // expansion needs only plain parameter lookups.
+            if variadic {
+                if let Some(tail) = params.last() {
+                    if tail != "__VA_ARGS__" {
+                        for tok in &mut replacement {
+                            if matches!(&tok.kind, TokenKind::Identifier(n) if n == "__VA_ARGS__") {
+                                tok.kind = TokenKind::Identifier(tail.clone());
+                            }
+                        }
+                    }
+                }
             }
             self.insert_macro(
                 name,
@@ -1225,10 +1240,7 @@ impl PreprocessorState {
 
         let mut replacement = Vec::new();
         while i < tokens.len() && !matches!(tokens[i].kind, TokenKind::Newline) {
-            if matches!(&tokens[i].kind, TokenKind::Punct(s) if s == "\\")
-                && i + 1 < tokens.len()
-                && matches!(tokens[i + 1].kind, TokenKind::Newline)
-            {
+            if is_line_continuation(tokens, i) {
                 i += 2;
                 continue;
             }
@@ -1253,62 +1265,97 @@ impl PreprocessorState {
         }
     }
 
+    /// Parse the parameter list after `NAME(`. `None` means the list was
+    /// unterminated or malformed: a warning has been emitted and the caller
+    /// drops the definition (gcc reports an error and keeps preprocessing).
     fn parse_macro_param_list(
         &mut self,
         tokens: &[Token],
         i: &mut usize,
-    ) -> Result<(Vec<String>, bool), PreprocessError> {
+    ) -> Option<(Vec<String>, bool)> {
         let mut params = Vec::new();
         let mut variadic = false;
         loop {
-            while *i < tokens.len() && matches!(tokens[*i].kind, TokenKind::Newline) {
-                *i += 1;
+            skip_param_ws(tokens, i);
+            if self.token_is_ellipsis(tokens, *i) {
+                // Anonymous `...`: register the variadic under its standard
+                // name so substitution, `##` comma elision, and the
+                // "last param collects the rest" rule all treat it exactly
+                // like a named `args...` variadic.
+                variadic = true;
+                params.push("__VA_ARGS__".to_string());
+                *i = self.skip_ellipsis(tokens, *i);
+                return self
+                    .finish_param_list_tail(tokens, i)
+                    .then_some((params, variadic));
             }
-            if *i >= tokens.len() {
-                return Err(self.error(1, "unterminated macro parameter list"));
+            match tokens.get(*i).map(|t| &t.kind) {
+                Some(TokenKind::Punct(s)) if s == ")" => {
+                    *i += 1;
+                    break;
+                }
+                Some(TokenKind::Identifier(name)) => {
+                    params.push(name.clone());
+                    *i += 1;
+                }
+                _ => return self.malformed_param_list(tokens, *i),
             }
-            if matches!(&tokens[*i].kind, TokenKind::Punct(s) if s == ")") {
-                *i += 1;
-                break;
-            }
+            // Line splicing makes `args \`-newline-`...` equivalent to
+            // `args...`, so skip continuations before the ellipsis check.
+            skip_param_ws(tokens, i);
             if self.token_is_ellipsis(tokens, *i) {
                 variadic = true;
                 *i = self.skip_ellipsis(tokens, *i);
-                while *i < tokens.len() && matches!(tokens[*i].kind, TokenKind::Newline) {
+                return self
+                    .finish_param_list_tail(tokens, i)
+                    .then_some((params, variadic));
+            }
+            match tokens.get(*i).map(|t| &t.kind) {
+                Some(TokenKind::Punct(s)) if s == ")" => {
+                    *i += 1;
+                    break;
+                }
+                Some(TokenKind::Punct(s)) if s == "," => {
                     *i += 1;
                 }
-                if matches!(&tokens[*i].kind, TokenKind::Punct(s) if s == ")") {
-                    *i += 1;
-                }
-                break;
+                _ => return self.malformed_param_list(tokens, *i),
             }
-            let param = self.read_directive_ident(tokens, i)?;
-            params.push(param);
-            if self.token_is_ellipsis(tokens, *i) {
-                variadic = true;
-                *i = self.skip_ellipsis(tokens, *i);
-                while *i < tokens.len() && matches!(tokens[*i].kind, TokenKind::Newline) {
-                    *i += 1;
-                }
-                if matches!(&tokens[*i].kind, TokenKind::Punct(s) if s == ")") {
-                    *i += 1;
-                }
-                break;
-            }
-            while *i < tokens.len() && matches!(tokens[*i].kind, TokenKind::Newline) {
-                *i += 1;
-            }
-            if matches!(&tokens[*i].kind, TokenKind::Punct(s) if s == ")") {
-                *i += 1;
-                break;
-            }
-            if matches!(&tokens[*i].kind, TokenKind::Punct(s) if s == ",") {
-                *i += 1;
-                continue;
-            }
-            return Err(self.error(tokens[*i].line, "expected , or ) in macro parameters"));
         }
-        Ok((params, variadic))
+        Some((params, variadic))
+    }
+
+    /// Warn about a parameter list that ends at a newline / EOF or contains
+    /// an unexpected token, then yield `None` so the definition is dropped.
+    fn malformed_param_list(&mut self, tokens: &[Token], i: usize) -> Option<(Vec<String>, bool)> {
+        let line = tokens.get(i).map(|t| t.line).unwrap_or(1);
+        let message = match tokens.get(i).map(|t| &t.kind) {
+            None | Some(TokenKind::Eof) | Some(TokenKind::Newline) => {
+                "unterminated macro parameter list; definition ignored"
+            }
+            _ => "expected , or ) in macro parameters; definition ignored",
+        };
+        self.warn(line, message);
+        None
+    }
+
+    /// Consume the closing `)` after `...`. Tokens before it are dropped
+    /// rather than leaked into the replacement list. Returns `false` (after
+    /// warning) when the line ends first — the list must not run on to a
+    /// `)` on a later line, which would swallow following code.
+    fn finish_param_list_tail(&mut self, tokens: &[Token], i: &mut usize) -> bool {
+        loop {
+            skip_param_ws(tokens, i);
+            match tokens.get(*i).map(|t| &t.kind) {
+                Some(TokenKind::Punct(s)) if s == ")" => {
+                    *i += 1;
+                    return true;
+                }
+                None | Some(TokenKind::Eof) | Some(TokenKind::Newline) => {
+                    return self.malformed_param_list(tokens, *i).is_some();
+                }
+                Some(_) => *i += 1,
+            }
+        }
     }
 
     fn token_is_ellipsis(&self, tokens: &[Token], i: usize) -> bool {
@@ -1352,10 +1399,7 @@ impl PreprocessorState {
         let mut current: Vec<Token> = Vec::new();
         let mut depth = 0u32;
         while *i < tokens.len() {
-            if matches!(&tokens[*i].kind, TokenKind::Punct(s) if s == "\\")
-                && *i + 1 < tokens.len()
-                && matches!(tokens[*i + 1].kind, TokenKind::Newline)
-            {
+            if is_line_continuation(tokens, *i) {
                 *i += 2;
                 continue;
             }
@@ -1616,6 +1660,64 @@ fn at_beginning_of_line(tokens: &[Token], i: usize) -> bool {
     matches!(tokens[i - 1].kind, TokenKind::Newline)
 }
 
+/// Skip `\`-newline continuations inside a parameter list. A bare newline is
+/// the end of the directive and is deliberately not skipped.
+fn skip_param_ws(tokens: &[Token], i: &mut usize) {
+    while is_line_continuation(tokens, *i) {
+        *i += 2;
+    }
+}
+
+/// Advance to the end of the current directive line (continuations
+/// included), leaving `i` on the newline / EOF token.
+fn skip_directive_line(tokens: &[Token], i: &mut usize) {
+    while *i < tokens.len() && !matches!(tokens[*i].kind, TokenKind::Newline | TokenKind::Eof) {
+        *i += if is_line_continuation(tokens, *i) {
+            2
+        } else {
+            1
+        };
+    }
+}
+
+/// A `\` token followed by a newline token — a line continuation the lexer
+/// does not splice, so token consumers skip the pair.
+fn is_line_continuation(tokens: &[Token], i: usize) -> bool {
+    matches!(tokens.get(i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if s == "\\")
+        && matches!(tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Newline))
+}
+
+/// Whether `idx` is the variadic collector — by construction always the
+/// last parameter (`parse_macro_param_list` names an anonymous `...`
+/// "__VA_ARGS__"; see the invariant on `MacroDef::Function`).
+fn is_variadic_tail(params: &[String], variadic: bool, idx: usize) -> bool {
+    variadic && idx + 1 == params.len()
+}
+
+fn arg_is_blank(arg: &[Token]) -> bool {
+    arg.iter().all(|t| matches!(t.kind, TokenKind::Newline))
+}
+
+/// Whether the arguments from `idx` on carry no real tokens (absent, or
+/// whitespace/newline only). Allocation-free — this runs on every `##`
+/// parameter operand.
+fn args_are_blank(args: &[Vec<Token>], idx: usize) -> bool {
+    args.iter().skip(idx).all(|a| arg_is_blank(a))
+}
+
+/// GNU `, ## __VA_ARGS__` deletes the comma only when the variable
+/// arguments are OMITTED — an explicitly supplied empty argument keeps it
+/// (`F(1)` -> `g(1)` but `F(1,)` -> `g(1,)`; verified against gcc and
+/// clang, whose behavior is stricter than the manual's "omitted or empty"
+/// wording). A lone blank argument (`G()`, `G( )`) supplies zero
+/// arguments, not one empty one.
+fn varargs_omitted(args: &[Vec<Token>], idx: usize) -> bool {
+    if args.len() <= idx {
+        return true;
+    }
+    idx == 0 && args.len() == 1 && arg_is_blank(&args[0])
+}
+
 fn substitute_macro(
     macro_name: &str,
     origin: &Token,
@@ -1624,6 +1726,11 @@ fn substitute_macro(
     args: &[Vec<Token>],
     variadic: bool,
 ) -> Vec<Token> {
+    debug_assert!(
+        !variadic || !params.is_empty(),
+        "a variadic MacroDef must name its tail parameter \
+         (\"__VA_ARGS__\" for the anonymous form; see parse_macro_param_list)"
+    );
     let mut out: Vec<Token> = Vec::new();
     let mut i = 0;
     while i < body.len() {
@@ -1631,17 +1738,36 @@ fn substitute_macro(
         if concat_width > 0 && i + concat_width < body.len() {
             if let TokenKind::Identifier(name) = &body[i + concat_width].kind {
                 if let Some(idx) = params.iter().position(|p| p == name) {
-                    let arg = if variadic && idx + 1 == params.len() && idx < args.len() {
-                        args[idx..].concat()
-                    } else {
-                        args.get(idx).cloned().unwrap_or_default()
-                    };
-                    if arg.is_empty() {
-                        if let Some(last) = out.last() {
-                            if matches!(&last.kind, TokenKind::Punct(s) if s == ",") {
-                                out.pop();
-                            }
+                    let is_va_tail = is_variadic_tail(params, variadic, idx);
+                    if is_va_tail
+                        && matches!(
+                            out.last().map(|t| &t.kind),
+                            Some(TokenKind::Punct(s)) if s == ","
+                        )
+                    {
+                        // GNU `, ## args`: with the varargs omitted the
+                        // comma is deleted; otherwise the `##` is inert — it
+                        // must NOT reach apply_concatenation, which would
+                        // fuse the comma with the first vararg token
+                        // (destroying string/char literals and breaking
+                        // rescan). An explicitly empty argument substitutes
+                        // to nothing and the comma stays, like gcc.
+                        if varargs_omitted(args, idx) {
+                            out.pop();
+                            i += concat_width + 1;
+                        } else {
+                            i += concat_width;
                         }
+                        continue;
+                    }
+                    let blank = if is_va_tail {
+                        args_are_blank(args, idx)
+                    } else {
+                        args.get(idx).is_none_or(|a| arg_is_blank(a))
+                    };
+                    if blank {
+                        // C99 placemarker: an empty `##` operand makes the
+                        // paste a no-op; the left operand stays as-is.
                         i += concat_width + 1;
                         continue;
                     }
@@ -1649,22 +1775,12 @@ fn substitute_macro(
             }
         }
         if let TokenKind::Identifier(name) = &body[i].kind {
-            if name == "__VA_ARGS__" && variadic {
-                let start = params.len().saturating_sub(1);
-                for (ai, arg) in args.iter().enumerate().skip(start) {
-                    if ai > start {
-                        out.push(
-                            Token::new(TokenKind::Punct(",".into()), body[i].line, body[i].col)
-                                .with_macro_hide(origin, macro_name),
-                        );
-                    }
-                    out.extend(arg.iter().cloned());
-                }
-                i += 1;
-                continue;
-            }
+            // An anonymous `...` registers `__VA_ARGS__` as the last param
+            // (see parse_macro_param_list), and handle_define rewrites a
+            // stray `__VA_ARGS__` in a named-variadic body to the tail
+            // param, so plain position lookup covers both variadic styles.
             if let Some(idx) = params.iter().position(|p| p == name) {
-                if variadic && idx + 1 == params.len() {
+                if is_variadic_tail(params, variadic, idx) {
                     for (ai, arg) in args.iter().enumerate().skip(idx) {
                         if ai > idx {
                             out.push(
@@ -3036,6 +3152,304 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "cache replay must accumulate macros into the shared table"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Spacing-insensitive view of preprocessed output, so assertions
+    /// don't depend on the emitter's whitespace choices.
+    fn flat(output: &str) -> String {
+        output.replace(['\n', ' '], "")
+    }
+
+    #[test]
+    fn unnamed_variadic_empty_args_elide_comma() {
+        let src = "#define LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)\n\
+                   void f(void) { LOG(\"plain\"); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            !flat(&result.output).contains(",)"),
+            "GNU `, ##__VA_ARGS__` with no varargs must elide the comma: {}",
+            result.output
+        );
+        assert!(result.output.contains("printf"), "{}", result.output);
+    }
+
+    #[test]
+    fn unnamed_variadic_forwards_args_once() {
+        let src = "#define LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)\n\
+                   void f(void) { LOG(\"num %d\", 1); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert_eq!(
+            result.output.matches("num %d").count(),
+            1,
+            "__VA_ARGS__ must not re-substitute the named parameters: {}",
+            result.output
+        );
+        assert_eq!(
+            result.output.matches('1').count(),
+            1,
+            "varargs must be substituted exactly once: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn zero_named_param_variadic_expands() {
+        let src = "#define TRACE(...) log_event(__VA_ARGS__)\n\
+                   void f(void) { TRACE(); TRACE(1, 2); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            flat(&result.output).contains("log_event()"),
+            "empty __VA_ARGS__ must expand to nothing: {}",
+            result.output
+        );
+        assert!(
+            flat(&result.output).contains("log_event(1,2)"),
+            "{}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn variadic_string_vararg_survives() {
+        let src = "#define LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)\n\
+                   void f(void) { LOG(\"%s\", \"reason\"); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("\"reason\""),
+            "a string-literal vararg must not be destroyed by comma pasting: {}",
+            result.output
+        );
+        assert!(!flat(&result.output).contains(",)"), "{}", result.output);
+    }
+
+    #[test]
+    fn variadic_comma_stays_punct_for_nested_split() {
+        let src = "#define INNER(a, b) use(a); use(b);\n\
+                   #define WRAP(fmt, ...) INNER(fmt, ##__VA_ARGS__)\n\
+                   void f(void) { WRAP(\"f\", x); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            flat(&result.output).contains("use(x)"),
+            "the separator comma must stay a real token so nested macros split \
+             their arguments: {}",
+            result.output
+        );
+        assert!(!flat(&result.output).contains("use()"), "{}", result.output);
+    }
+
+    #[test]
+    fn variadic_first_vararg_still_macro_expands() {
+        let src = "#define COUNT 42\n\
+                   #define LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)\n\
+                   void f(void) { LOG(\"%d\", COUNT); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("42"),
+            "the first vararg must stay expandable on rescan: {}",
+            result.output
+        );
+        assert!(!result.output.contains("COUNT"), "{}", result.output);
+    }
+
+    #[test]
+    fn named_variadic_va_args_spelling_aliases_to_tail() {
+        let src = "#define LOGE(fmt, args...) HiLogPrint(fmt, ##__VA_ARGS__)\n\
+                   void f(void) { LOGE(\"oom\", n); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            !result.output.contains("__VA_ARGS__"),
+            "__VA_ARGS__ in a named-variadic body must alias the tail param: {}",
+            result.output
+        );
+        assert!(result.output.contains('n'), "{}", result.output);
+    }
+
+    #[test]
+    fn param_list_line_continuation() {
+        let src = "#define LOG(fmt, \\\n    ...) printf(fmt, ##__VA_ARGS__)\n\
+                   void f(void) { LOG(\"x\"); }\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("printf") && result.output.contains("after"),
+            "a continued parameter list must not abort the file: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn named_variadic_continuation_before_ellipsis() {
+        let src = "#define F(x, args \\\n...) g(x, ##args)\n\
+                   void h(void) { F(1); F(2, 3); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            flat(&result.output).contains("g(1)"),
+            "a continuation between a named variadic and `...` must parse: {}",
+            result.output
+        );
+        assert!(flat(&result.output).contains("g(2,3)"), "{}", result.output);
+    }
+
+    #[test]
+    fn continuation_before_close_does_not_leak_paren() {
+        let src = "#define VLOG(fmt, ... \\\n) printf(fmt)\n\
+                   void f(void) { VLOG(\"x\"); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("printf(\"x\")") && !result.output.contains(") printf"),
+            "tokens after `...` must not leak into the replacement list: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn explicitly_empty_vararg_keeps_comma() {
+        // gcc/clang: `, ##__VA_ARGS__` deletes the comma only when the
+        // varargs are OMITTED; an explicitly supplied empty argument keeps
+        // it (F(1) -> g(1) but F(1,) -> g(1,); verified against both).
+        let src = "#define F(x, ...) g(x, ##__VA_ARGS__)\n\
+                   void h(void) { F(1); }\nvoid k(void) { F(2,); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            flat(&result.output).contains("g(1)"),
+            "omitted varargs must elide the comma: {}",
+            result.output
+        );
+        assert!(
+            flat(&result.output).contains("2,)"),
+            "an explicitly empty vararg must keep the comma like gcc: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn whitespace_only_explicit_vararg_keeps_comma() {
+        let src = "#define LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)\n\
+                   void f(void) { LOG(\"x\",\n); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            flat(&result.output).contains(",)"),
+            "a whitespace-only explicit vararg keeps the comma like gcc: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn lone_blank_argument_counts_as_omitted() {
+        let src = "#define G(...) f(0, ##__VA_ARGS__)\n\
+                   void h(void) { G(); G( ); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            !flat(&result.output).contains(",)"),
+            "G() supplies zero arguments, so the comma is elided: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn non_variadic_hash_hash_empty_arg_keeps_comma() {
+        let src = "#define M(a, b) f(a, ## b)\nvoid g(void) { M(x, ); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            flat(&result.output).contains("f(x,)"),
+            "GNU comma deletion applies only to variadic tails; a non-variadic \
+             empty ##-argument keeps the comma like gcc: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn truncated_param_list_in_expansion_does_not_panic() {
+        // The expansion of DECL re-scans a `#define` whose parameter list is
+        // truncated mid-`...`; this must degrade to a diagnostic, not panic.
+        let src = "#define DECL(x) #define x(...\nDECL(FOO)\nint after(void);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            flat(&result.output).contains("intafter(void);"),
+            "{}",
+            result.output
+        );
+    }
+
+    /// An unterminated parameter list ends at the newline like any other
+    /// directive: warn, drop the definition, keep the following code (gcc
+    /// errors and continues; it never lets the list run on to a `)` on a
+    /// later line).
+    #[test]
+    fn unterminated_param_list_keeps_following_code() {
+        let src =
+            "#define PARTIAL(x, ...\nint before(void);\nint f(int a) { return (a); }\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        let out = flat(&result.output);
+        assert!(out.contains("intbefore(void);"), "{}", result.output);
+        assert!(out.contains("intf(inta){return(a);}"), "{}", result.output);
+        assert!(out.contains("intafter;"), "{}", result.output);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("unterminated macro parameter list")),
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(!result.output.contains("PARTIAL"), "{}", result.output);
+    }
+
+    #[test]
+    fn unterminated_param_list_without_ellipsis_keeps_following_code() {
+        let src = "#define PARTIAL(x,\nint f(int a) { return (a); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            flat(&result.output).contains("intf(inta){return(a);}"),
+            "{}",
+            result.output
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("unterminated macro parameter list")),
+            "{:?}",
+            result.diagnostics
+        );
+    }
+
+    /// A malformed (but terminated) list is dropped the same way instead of
+    /// stopping preprocessing of the whole file.
+    #[test]
+    fn malformed_param_list_keeps_following_code() {
+        let src = "#define BAD(x y) x\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(result.output.contains("after"), "{}", result.output);
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("preprocess stopped")),
+            "{:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn variadic_logging_macro_chain_expands_cleanly() {
+        let src = "#define HILOG_DEBUG(label, fmt, args...) printf(fmt, ##args)\n\
+                   #define DECORATOR_HILOG(op, fmt, args...) op(\"L\", fmt, ##args)\n\
+                   #define MEDIA_DEBUG_LOG(fmt, ...) DECORATOR_HILOG(HILOG_DEBUG, fmt, ##__VA_ARGS__)\n\
+                   void f(void)\n{\n\
+                   MEDIA_DEBUG_LOG(\"plain\");\n\
+                   MEDIA_DEBUG_LOG(\"num %d\", 1);\n}\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            !flat(&result.output).contains(",)"),
+            "empty varargs must elide the comma through the nested chain: {}",
+            result.output
+        );
+        assert_eq!(
+            result.output.matches("num %d").count(),
+            1,
+            "arguments must be forwarded exactly once through the chain: {}",
+            result.output
+        );
     }
 
     #[test]
