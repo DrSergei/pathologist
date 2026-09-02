@@ -1426,7 +1426,10 @@ impl PreprocessorState {
                 continue;
             }
             let mut tok = tokens[*i].clone();
-            tok.spliced_before = std::mem::take(&mut spliced_before);
+            // Keep a flag the token already carries: during rescanning the
+            // argument tokens come from an outer substitution, and the
+            // splice they record was consumed by the outer invocation.
+            tok.spliced_before |= std::mem::take(&mut spliced_before);
             match &tok.kind {
                 TokenKind::Punct(s) if s == "(" => {
                     depth += 1;
@@ -4822,5 +4825,21 @@ int x = A;
         let punct = "#define STR(x) #x\nconst char *s = STR(p->\\\nq);\n";
         let result = preprocess_string(punct, Path::new("t.c"), &PreprocessOptions::new());
         assert!(result.output.contains("\"p->q\""), "{}", result.output);
+    }
+
+    /// The splice flag rides on the token through substitution, so an
+    /// argument forwarded to another macro and stringized there still
+    /// spells the tight splice as zero-width.
+    #[test]
+    fn stringize_tight_splice_survives_forwarding() {
+        let src = "#define INNER(x) #x\n\
+                   #define OUTER(x) INNER(x)\n\
+                   const char *s = OUTER(a\\\nb);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("\"ab\""),
+            "splice flag must survive nested argument parsing: {}",
+            result.output
+        );
     }
 }
