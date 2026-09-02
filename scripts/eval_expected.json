@@ -1,28 +1,30 @@
 {
-  "note": "Regression expectations for scripts/eval_check.py. 'exact' must match; 'band' compares abs(actual-expected) <= N; 'min' requires actual >= N. Site checks count distinct callee NAMES at one dispatch call_site (caller name LIKE, line). Values were captured from a fresh 2026-08-28 run (see docs/EVAL_REPORT.md); bulk function/edge totals drift a little run-to-run (parallel index), correctness numbers do not.",
+  "note": "Regression expectations for scripts/eval_check.py. Each corpus pins repo + rev (commit SHA) and its checkout dir under the corpus base (~ by default, or $TRACE_CORPUS_BASE / --corpus-base); scripts/fetch_corpora.py checks the pinned revisions out and eval_check.py refuses a checkout at any other revision. 'exact' must match; 'band' compares abs(actual-expected) <= N; 'min' requires actual >= N. Site checks count distinct callee NAMES at one dispatch call_site (caller name LIKE, line). Values were captured from a fresh 2026-09-02 run of master (c7c6def, after #12) at the pinned revisions (see docs/EVAL_REPORT.md); bulk function/edge totals drift a little run-to-run (parallel index), correctness numbers do not.",
   "budget_pops": 800000,
   "jobs": 8,
   "corpora": {
     "hdf": {
       "name": "drivers_hdf_core",
-      "root": "~/drivers_hdf_core",
+      "repo": "https://github.com/openharmony/drivers_hdf_core.git",
+      "rev": "cdc75a20bb8f1a046cd22e189405a20d602d0521",
+      "dir": "drivers_hdf_core",
       "globals": {
         "files": {"cmp": "exact", "value": 1483},
-        "functions_total": {"cmp": "band", "value": 11721, "tol": 40},
-        "functions_defined": {"cmp": "band", "value": 9382, "tol": 40},
-        "functions_external": {"cmp": "band", "value": 2339, "tol": 40},
-        "edges_total": {"cmp": "band", "value": 40347, "tol": 240},
-        "edges_direct": {"cmp": "band", "value": 20916, "tol": 240},
-        "edges_indirect": {"cmp": "exact", "value": 4472},
-        "edges_external": {"cmp": "band", "value": 14956, "tol": 200},
-        "arg_flow_edges": {"cmp": "band", "value": 32400, "tol": 150},
-        "diagnostics": {"cmp": "exact", "value": 370},
+        "functions_total": {"cmp": "band", "value": 12551, "tol": 40},
+        "functions_defined": {"cmp": "band", "value": 10223, "tol": 40},
+        "functions_external": {"cmp": "band", "value": 2328, "tol": 40},
+        "edges_total": {"cmp": "band", "value": 42443, "tol": 240},
+        "edges_direct": {"cmp": "band", "value": 22609, "tol": 240},
+        "edges_indirect": {"cmp": "exact", "value": 4621},
+        "edges_external": {"cmp": "band", "value": 15213, "tol": 200},
+        "arg_flow_edges": {"cmp": "band", "value": 33996, "tol": 150},
+        "diagnostics": {"cmp": "exact", "value": 191},
         "dlsym_edges": {"cmp": "exact", "value": 4}
       },
       "sites": [
-        {"case": "DeviceNodeExtDispatch", "caller": "%DeviceNodeExtDispatch", "line": 0, "resolution": "indirect", "expected": 73},
-        {"case": "HdfDeviceLaunchNode", "caller": "%HdfDeviceLaunchNode", "line": 0, "resolution": "indirect", "expected": 125},
-        {"case": "HdfDeviceUnlaunchNode", "caller": "%HdfDeviceUnlaunchNode", "line": 0, "resolution": "indirect", "expected": 112},
+        {"case": "DeviceNodeExtDispatch", "caller": "%DeviceNodeExtDispatch", "line": 0, "resolution": "indirect", "expected": 74},
+        {"case": "HdfDeviceLaunchNode", "caller": "%HdfDeviceLaunchNode", "line": 0, "resolution": "indirect", "expected": 126},
+        {"case": "HdfDeviceUnlaunchNode", "caller": "%HdfDeviceUnlaunchNode", "line": 0, "resolution": "indirect", "expected": 113},
         {"case": "HdfSbufReadBuffer", "caller": "%HdfSbufReadBuffer", "line": 0, "resolution": "indirect", "expected": 2},
         {"case": "StreamDispatch", "caller": "%StreamDispatch", "line": 0, "resolution": "indirect", "expected": 24},
         {"case": "HdfCameraDispatch", "caller": "%HdfCameraDispatch", "line": 0, "resolution": "indirect", "expected": 23},
@@ -35,23 +37,25 @@
       ],
       "probes": [
         {"name": "flow_graph_nodes", "sql": "SELECT COUNT(*) FROM flow_nodes", "cmp": "min", "value": 100000},
-        {"name": "arg_flow_rows_per_call_edge", "sql": "SELECT COUNT(*) FROM arg_flow_edges a JOIN call_sites cs ON cs.id=a.call_site_id", "cmp": "band", "value": 32400, "tol": 150}
+        {"name": "arg_flow_rows_per_call_edge", "sql": "SELECT COUNT(*) FROM arg_flow_edges a JOIN call_sites cs ON cs.id=a.call_site_id", "cmp": "band", "value": 33996, "tol": 150}
       ]
     },
     "hiview": {
       "name": "hiviewdfx_hiview",
-      "root": "~/hiviewdfx_hiview",
+      "repo": "https://github.com/openharmony/hiviewdfx_hiview.git",
+      "rev": "92408e2072bd6dc8fb0d980773e80b6ec898710c",
+      "dir": "hiviewdfx_hiview",
       "globals": {
-        "files": {"cmp": "exact", "value": 1424},
-        "functions_total": {"cmp": "band", "value": 10349, "tol": 120},
-        "functions_defined": {"cmp": "band", "value": 6390, "tol": 120},
-        "functions_external": {"cmp": "band", "value": 3959, "tol": 120},
-        "edges_total": {"cmp": "band", "value": 19845, "tol": 160},
-        "edges_direct": {"cmp": "band", "value": 4323, "tol": 160},
-        "edges_indirect": {"cmp": "exact", "value": 10},
-        "edges_external": {"cmp": "band", "value": 15512, "tol": 160},
-        "arg_flow_edges": {"cmp": "band", "value": 4720, "tol": 120},
-        "diagnostics": {"cmp": "exact", "value": 462},
+        "files": {"cmp": "exact", "value": 1428},
+        "functions_total": {"cmp": "band", "value": 11978, "tol": 120},
+        "functions_defined": {"cmp": "band", "value": 7727, "tol": 120},
+        "functions_external": {"cmp": "band", "value": 4251, "tol": 120},
+        "edges_total": {"cmp": "band", "value": 27925, "tol": 160},
+        "edges_direct": {"cmp": "band", "value": 5961, "tol": 160},
+        "edges_indirect": {"cmp": "exact", "value": 18},
+        "edges_external": {"cmp": "band", "value": 21946, "tol": 160},
+        "arg_flow_edges": {"cmp": "band", "value": 7297, "tol": 120},
+        "diagnostics": {"cmp": "exact", "value": 57},
         "dlsym_edges": {"cmp": "exact", "value": 1}
       },
       "sites": [
@@ -70,18 +74,20 @@
     },
     "camera": {
       "name": "multimedia_camera_framework",
-      "root": "~/multimedia_camera_framework",
+      "repo": "https://github.com/openharmony/multimedia_camera_framework.git",
+      "rev": "8ffd69dcd47f533e70b4dba428439da9008b0cae",
+      "dir": "multimedia_camera_framework",
       "globals": {
         "files": {"cmp": "exact", "value": 1593},
-        "functions_total": {"cmp": "band", "value": 22289, "tol": 120},
-        "functions_defined": {"cmp": "band", "value": 15673, "tol": 120},
-        "functions_external": {"cmp": "band", "value": 6616, "tol": 120},
-        "edges_total": {"cmp": "band", "value": 43312, "tol": 420},
-        "edges_direct": {"cmp": "band", "value": 12644, "tol": 420},
-        "edges_indirect": {"cmp": "exact", "value": 105},
-        "edges_external": {"cmp": "band", "value": 30563, "tol": 420},
-        "arg_flow_edges": {"cmp": "band", "value": 10520, "tol": 250},
-        "diagnostics": {"cmp": "exact", "value": 776},
+        "functions_total": {"cmp": "band", "value": 26043, "tol": 120},
+        "functions_defined": {"cmp": "band", "value": 18964, "tol": 120},
+        "functions_external": {"cmp": "band", "value": 7079, "tol": 120},
+        "edges_total": {"cmp": "band", "value": 64224, "tol": 420},
+        "edges_direct": {"cmp": "band", "value": 17584, "tol": 420},
+        "edges_indirect": {"cmp": "exact", "value": 118},
+        "edges_external": {"cmp": "band", "value": 46522, "tol": 420},
+        "arg_flow_edges": {"cmp": "band", "value": 16012, "tol": 250},
+        "diagnostics": {"cmp": "exact", "value": 93},
         "dlsym_edges": {"cmp": "exact", "value": 0}
       },
       "sites": [
@@ -94,7 +100,7 @@
       "probes": [
         {"name": "defined overload groups (C++ overload splitting)", "sql": "SELECT COUNT(*) FROM (SELECT name FROM functions WHERE is_defined=1 GROUP BY name HAVING COUNT(*)>1)", "cmp": "min", "value": 240},
         {"name": "template member call sites carry resolution records (template-<> text, >=0 edges)", "sql": "SELECT COUNT(DISTINCT cs.callee_text) FROM call_sites cs JOIN call_edges e ON e.call_site_id=cs.id WHERE cs.callee_text LIKE '%<%' AND cs.callee_text LIKE '%>%'", "cmp": "min", "value": 15},
-        {"name": "external-class template sites stay unresolved by design (MetaHdr Set<Tag>/Get<Tag>; no regression into garbage edges)", "sql": "SELECT COUNT(*) FROM call_sites WHERE callee_text LIKE '%<%' AND callee_text LIKE '%>%' AND NOT EXISTS (SELECT 1 FROM call_edges e WHERE e.call_site_id=call_sites.id)", "cmp": "band", "value": 1178, "tol": 30}
+        {"name": "external-class template sites stay unresolved by design (MetaHdr Set<Tag>/Get<Tag>; no regression into garbage edges)", "sql": "SELECT COUNT(*) FROM call_sites WHERE callee_text LIKE '%<%' AND callee_text LIKE '%>%' AND NOT EXISTS (SELECT 1 FROM call_edges e WHERE e.call_site_id=call_sites.id)", "cmp": "band", "value": 1243, "tol": 30}
       ]
     }
   }

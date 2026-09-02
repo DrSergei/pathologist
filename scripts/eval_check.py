@@ -2,6 +2,8 @@
 """Regression checker for the trace pipeline on the production eval corpora.
 
 Re-analyzes each corpus (HDF, hiview, camera) fresh with the release binary,
+after verifying the checkout is clean and at the revision pinned in
+eval_expected.json (corpus base: --corpus-base, $TRACE_CORPUS_BASE, or ~),
 then asserts:
 
 1. Global metrics (files, functions, call edges by resolution, arg-flow,
@@ -19,8 +21,10 @@ then asserts:
 Exit 0 when every check passes; non-zero otherwise. Uses only the stdlib.
 
 Usage:
+    python3 scripts/fetch_corpora.py      # once: check the pinned corpus revisions out
     python3 scripts/eval_check.py [--bin target/release/trace] [--jobs 8]
         [--budget 800000] [--outdir /tmp/eval_check] [--expected scripts/eval_expected.json]
+        [--corpus-base DIR] [--skip-rev-check] [--allow-dirty]
 """
 
 import argparse
@@ -49,8 +53,52 @@ def run(cmd, cwd, env):
     return proc
 
 
-def analyze(trace_bin, corpus, expected, outdir, env):
-    root = Path(os.path.expanduser(expected["root"]))
+def corpus_base(explicit=None):
+    return Path(os.path.expanduser(explicit or os.environ.get("TRACE_CORPUS_BASE", "~")))
+
+
+def git_output(args, cwd):
+    proc = subprocess.run(["git", *args], cwd=str(cwd), text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def checkout_matches(root, spec, skip_rev_check=False, allow_dirty=False):
+    """The checkout under `root` must be at the pinned `rev` with a clean
+    worktree (analysis discovers files from the worktree, so edits or
+    untracked sources change the counts as much as a different revision).
+    Returns whether the corpus should be analyzed; a problem counts as a
+    failure unless the matching override downgrades it to a warning."""
+    global FAILS, CHECKS
+    CHECKS += 1
+    if not root.is_dir():
+        log("fail", f"{spec['name']}: {root} is missing (run scripts/fetch_corpora.py)")
+        FAILS += 1
+        return False
+    problems = []
+    head = git_output(["rev-parse", "HEAD"], root)
+    if head != spec["rev"]:
+        problems.append((skip_rev_check,
+                         f"at {head or 'no git HEAD'}, pinned {spec['rev']} "
+                         f"(scripts/fetch_corpora.py --update)"))
+    status = git_output(["status", "--porcelain"], root)
+    if status:
+        problems.append((allow_dirty,
+                         f"worktree has local changes ({len(status.splitlines())} paths "
+                         f"in `git status --porcelain`)"))
+    if not problems:
+        log("ok", f"{spec['name']}: clean checkout at pinned {spec['rev'][:12]}")
+        return True
+    proceed = all(overridden for overridden, _ in problems)
+    if not proceed:
+        FAILS += 1
+    for overridden, text in problems:
+        log("warn" if overridden else "fail", f"{spec['name']}: {root} {text}"
+            + (" — analyzing anyway" if overridden else ""))
+    return proceed
+
+
+def analyze(trace_bin, corpus, expected, root, outdir, env):
     db = Path(outdir) / f"eval_check_{corpus}.db"
     log("info", f"analyzing {expected['name']} -> {db}")
     proc = run(
@@ -167,6 +215,12 @@ def main():
     ap.add_argument("--budget", type=int, default=800000)
     ap.add_argument("--outdir", default="/tmp/eval_check")
     ap.add_argument("--expected", default="scripts/eval_expected.json")
+    ap.add_argument("--corpus-base",
+                    help="directory holding the corpus checkouts (default $TRACE_CORPUS_BASE or ~)")
+    ap.add_argument("--skip-rev-check", action="store_true",
+                    help="warn instead of fail when a checkout is not at the pinned revision")
+    ap.add_argument("--allow-dirty", action="store_true",
+                    help="warn instead of fail when a checkout has local changes or untracked files")
     ap.add_argument("corpora", nargs="*",
                     help="subset of {hdf,hiview,camera}; default all")
     args = ap.parse_args()
@@ -191,7 +245,10 @@ def main():
         if spec is None:
             log("fail", f"unknown corpus {corpus!r} (have {list(expected['corpora'])})")
             sys.exit(2)
-        db = analyze(trace_bin, corpus, spec, outdir, env)
+        root = corpus_base(args.corpus_base) / spec["dir"]
+        if not checkout_matches(root, spec, args.skip_rev_check, args.allow_dirty):
+            continue
+        db = analyze(trace_bin, corpus, spec, root, outdir, env)
         if db is None:
             continue
         log("info", f"== {spec['name']}")

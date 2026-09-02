@@ -14,8 +14,15 @@ REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "docs" / "PARSE_FAILURES.md"
 
 # Directory holding checkouts of the eval corpora (one subdirectory per
-# corpus, named as below — clones of github.com/openharmony/<name>).
-CORPUS_BASE = Path(os.environ.get("PARSE_CORPUS_BASE", "/home/sergei"))
+# corpus, named as below) at the revisions pinned in scripts/eval_expected.json
+# — `python3 scripts/fetch_corpora.py` produces exactly this layout. Same
+# convention as eval_check.py: $TRACE_CORPUS_BASE, default ~
+# (PARSE_CORPUS_BASE is still honoured).
+CORPUS_BASE = Path(
+    os.path.expanduser(
+        os.environ.get("TRACE_CORPUS_BASE") or os.environ.get("PARSE_CORPUS_BASE") or "~"
+    )
+)
 
 CORPORA = [
     {
@@ -222,6 +229,7 @@ def main() -> int:
     )
     out.append("")
     out.append("```bash")
+    out.append("python3 scripts/fetch_corpora.py   # corpora at the revisions pinned in scripts/eval_expected.json")
     out.append("trace analyze <ROOT> -o /tmp/out.db --jobs 8")
     out.append(
         "cargo run -p trace-cli --release --example parse_failures -- "
