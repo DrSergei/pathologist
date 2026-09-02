@@ -19,9 +19,7 @@ fn main() -> Result<(), String> {
     let mut from_db: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         if arg == "--from-db" {
-            from_db = Some(PathBuf::from(
-                args.next().ok_or("--from-db requires PATH")?,
-            ));
+            from_db = Some(PathBuf::from(args.next().ok_or("--from-db requires PATH")?));
         }
     }
 
@@ -43,9 +41,7 @@ fn main() -> Result<(), String> {
     if eff_opts.source_cache.is_none() && !include_graph.source_cache.is_empty() {
         eff_opts.source_cache = Some(std::sync::Arc::new(include_graph.source_cache.clone()));
     }
-    let eff_opts = eff_opts
-        .for_indexing()
-        .with_inline_include_bodies(false);
+    let eff_opts = eff_opts.for_indexing().with_inline_include_bodies(false);
     let cpp_tus: HashSet<PathBuf> = files
         .iter()
         .filter(|p| trace_parse::is_cpp_path(p))
@@ -89,7 +85,7 @@ fn main() -> Result<(), String> {
             continue;
         }
         for (line, col, kind, snippet) in errors {
-            let snippet = snippet.replace('\t', " ").replace('\n', " ");
+            let snippet = snippet.replace(['\t', '\n'], " ");
             println!(
                 "FILE\t{}\tERROR\tline {} col {} ({}) {}",
                 path.display(),

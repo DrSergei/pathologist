@@ -1423,7 +1423,12 @@ fn template_member_decl(node: Node) -> Option<Node> {
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .filter(|c| !matches!(c.kind(), "template_parameter_list" | "template"))
-        .filter(|c| matches!(c.kind(), "function_definition" | "field_declaration" | "declaration"))
+        .filter(|c| {
+            matches!(
+                c.kind(),
+                "function_definition" | "field_declaration" | "declaration"
+            )
+        })
         .last()
 }
 
@@ -2594,7 +2599,12 @@ fn collect_call_args(
 
 /// Best-effort static type of a call argument expression, for overload
 /// ranking. Unknown for anything unresolvable.
-fn arg_expr_type(program: &mut Program, ctx: &mut LowerContext, source: &str, node: Node) -> TypeDesc {
+fn arg_expr_type(
+    program: &mut Program,
+    ctx: &mut LowerContext,
+    source: &str,
+    node: Node,
+) -> TypeDesc {
     match node.kind() {
         "cast_expression" => {
             if let Some(ty) = node.child_by_field_name("type") {
@@ -2637,7 +2647,10 @@ fn arg_expr_type(program: &mut Program, ctx: &mut LowerContext, source: &str, no
                             return (**inner).clone();
                         }
                         TypeDesc::Ptr(inner)
-                            if matches!(**inner, TypeDesc::Struct { .. } | TypeDesc::Union { .. }) =>
+                            if matches!(
+                                **inner,
+                                TypeDesc::Struct { .. } | TypeDesc::Union { .. }
+                            ) =>
                         {
                             // `p->field`: the pointee is the *receiver*, not
                             // the member's value — classifying the arg as the
@@ -2666,8 +2679,7 @@ fn arg_expr_type(program: &mut Program, ctx: &mut LowerContext, source: &str, no
 fn number_literal_desc(text: &str) -> TypeDesc {
     let lower = text.trim().to_ascii_lowercase();
     let is_hex = lower.starts_with("0x") || lower.starts_with("0b");
-    let is_float = lower.contains('.')
-        || ((lower.contains('e') || lower.contains('p')) && !is_hex);
+    let is_float = lower.contains('.') || ((lower.contains('e') || lower.contains('p')) && !is_hex);
     if is_float {
         if lower.ends_with('f') || lower.ends_with("lf") {
             TypeDesc::Float

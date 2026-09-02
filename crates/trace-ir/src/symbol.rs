@@ -239,28 +239,26 @@ impl SymbolTable {
                         // whose type is unresolvable falls back to arity-only,
                         // like the C-vs-C++ path.
                         arity_ok
-                            && (existing.params.is_empty()
-                                || func.params.is_empty()
-                                || {
-                                    let existing_t = |i: usize| {
-                                        existing
-                                            .param_type_ids
-                                            .get(i)
-                                            .copied()
-                                            .or_else(|| self.param_type(existing.params[i]))
-                                    };
-                                    let ok = existing.params.iter().enumerate().all(|(i, _)| {
-                                        let incoming_t = param_types
-                                            .and_then(|ts| ts.get(i))
-                                            .copied()
-                                            .or_else(|| self.param_type(*func.params.get(i).unwrap()));
-                                        match (existing_t(i), incoming_t) {
-                                            (Some(ta), Some(tb)) => ta == tb,
-                                            _ => true,
-                                        }
-                                    });
-                                    ok
-                                })
+                            && (existing.params.is_empty() || func.params.is_empty() || {
+                                let existing_t = |i: usize| {
+                                    existing
+                                        .param_type_ids
+                                        .get(i)
+                                        .copied()
+                                        .or_else(|| self.param_type(existing.params[i]))
+                                };
+                                let ok = existing.params.iter().enumerate().all(|(i, _)| {
+                                    let incoming_t = param_types
+                                        .and_then(|ts| ts.get(i))
+                                        .copied()
+                                        .or_else(|| self.param_type(*func.params.get(i).unwrap()));
+                                    match (existing_t(i), incoming_t) {
+                                        (Some(ta), Some(tb)) => ta == tb,
+                                        _ => true,
+                                    }
+                                });
+                                ok
+                            })
                     })
                     .unwrap_or(false);
                 if mergeable {
@@ -686,7 +684,10 @@ mod tests {
         };
         p.symbols.add_variable(var_double);
         let fdouble_id = p.symbols.add_function(fdouble);
-        assert_ne!(fdouble_id, fint_id, "same-arity distinct overloads keep both");
+        assert_ne!(
+            fdouble_id, fint_id,
+            "same-arity distinct overloads keep both"
+        );
         assert_eq!(p.symbols.externals_by_name["f"].len(), 2);
     }
 }
