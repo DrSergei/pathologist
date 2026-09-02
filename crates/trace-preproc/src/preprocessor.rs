@@ -1194,7 +1194,10 @@ impl PreprocessorState {
             && self.looks_like_function_macro_params(tokens, i + 1)
         {
             i += 1;
-            let (params, variadic) = self.parse_macro_param_list(tokens, &mut i)?;
+            let Some((params, variadic)) = self.parse_macro_param_list(tokens, &mut i) else {
+                skip_directive_line(tokens, &mut i);
+                return Ok(i);
+            };
             let mut replacement = Vec::new();
             while i < tokens.len() && !matches!(tokens[i].kind, TokenKind::Newline) {
                 if is_line_continuation(tokens, i) {
@@ -1262,25 +1265,18 @@ impl PreprocessorState {
         }
     }
 
+    /// Parse the parameter list after `NAME(`. `None` means the list was
+    /// unterminated or malformed: a warning has been emitted and the caller
+    /// drops the definition (gcc reports an error and keeps preprocessing).
     fn parse_macro_param_list(
         &mut self,
         tokens: &[Token],
         i: &mut usize,
-    ) -> Result<(Vec<String>, bool), PreprocessError> {
+    ) -> Option<(Vec<String>, bool)> {
         let mut params = Vec::new();
         let mut variadic = false;
         loop {
-            self.skip_param_ws(tokens, i);
-            match tokens.get(*i).map(|t| &t.kind) {
-                None | Some(TokenKind::Eof) => {
-                    return Err(self.error(1, "unterminated macro parameter list"));
-                }
-                Some(TokenKind::Punct(s)) if s == ")" => {
-                    *i += 1;
-                    break;
-                }
-                _ => {}
-            }
+            skip_param_ws(tokens, i);
             if self.token_is_ellipsis(tokens, *i) {
                 // Anonymous `...`: register the variadic under its standard
                 // name so substitution, `##` comma elision, and the
@@ -1289,19 +1285,30 @@ impl PreprocessorState {
                 variadic = true;
                 params.push("__VA_ARGS__".to_string());
                 *i = self.skip_ellipsis(tokens, *i);
-                self.finish_param_list_tail(tokens, i);
-                break;
+                return self
+                    .finish_param_list_tail(tokens, i)
+                    .then_some((params, variadic));
             }
-            let param = self.read_directive_ident(tokens, i)?;
-            params.push(param);
+            match tokens.get(*i).map(|t| &t.kind) {
+                Some(TokenKind::Punct(s)) if s == ")" => {
+                    *i += 1;
+                    break;
+                }
+                Some(TokenKind::Identifier(name)) => {
+                    params.push(name.clone());
+                    *i += 1;
+                }
+                _ => return self.malformed_param_list(tokens, *i),
+            }
             // Line splicing makes `args \`-newline-`...` equivalent to
             // `args...`, so skip continuations before the ellipsis check.
-            self.skip_param_ws(tokens, i);
+            skip_param_ws(tokens, i);
             if self.token_is_ellipsis(tokens, *i) {
                 variadic = true;
                 *i = self.skip_ellipsis(tokens, *i);
-                self.finish_param_list_tail(tokens, i);
-                break;
+                return self
+                    .finish_param_list_tail(tokens, i)
+                    .then_some((params, variadic));
             }
             match tokens.get(*i).map(|t| &t.kind) {
                 Some(TokenKind::Punct(s)) if s == ")" => {
@@ -1311,43 +1318,41 @@ impl PreprocessorState {
                 Some(TokenKind::Punct(s)) if s == "," => {
                     *i += 1;
                 }
-                None | Some(TokenKind::Eof) => {
-                    return Err(self.error(1, "unterminated macro parameter list"));
-                }
-                Some(_) => {
-                    return Err(self.error(tokens[*i].line, "expected , or ) in macro parameters"));
-                }
+                _ => return self.malformed_param_list(tokens, *i),
             }
         }
-        Ok((params, variadic))
+        Some((params, variadic))
     }
 
-    /// Skip newlines and `\`-newline continuations inside a parameter list.
-    fn skip_param_ws(&self, tokens: &[Token], i: &mut usize) {
-        loop {
-            if is_line_continuation(tokens, *i) {
-                *i += 2;
-            } else if matches!(tokens.get(*i).map(|t| &t.kind), Some(TokenKind::Newline)) {
-                *i += 1;
-            } else {
-                break;
+    /// Warn about a parameter list that ends at a newline / EOF or contains
+    /// an unexpected token, then yield `None` so the definition is dropped.
+    fn malformed_param_list(&mut self, tokens: &[Token], i: usize) -> Option<(Vec<String>, bool)> {
+        let line = tokens.get(i).map(|t| t.line).unwrap_or(1);
+        let message = match tokens.get(i).map(|t| &t.kind) {
+            None | Some(TokenKind::Eof) | Some(TokenKind::Newline) => {
+                "unterminated macro parameter list; definition ignored"
             }
-        }
+            _ => "expected , or ) in macro parameters; definition ignored",
+        };
+        self.warn(line, message);
+        None
     }
 
     /// Consume the closing `)` after `...`. Tokens before it are dropped
-    /// rather than leaked into the replacement list; a truncated list (the
-    /// re-scan of a `#define` produced by an expansion can end mid-list)
-    /// degrades instead of indexing out of bounds.
-    fn finish_param_list_tail(&self, tokens: &[Token], i: &mut usize) {
+    /// rather than leaked into the replacement list. Returns `false` (after
+    /// warning) when the line ends first — the list must not run on to a
+    /// `)` on a later line, which would swallow following code.
+    fn finish_param_list_tail(&mut self, tokens: &[Token], i: &mut usize) -> bool {
         loop {
-            self.skip_param_ws(tokens, i);
+            skip_param_ws(tokens, i);
             match tokens.get(*i).map(|t| &t.kind) {
                 Some(TokenKind::Punct(s)) if s == ")" => {
                     *i += 1;
-                    break;
+                    return true;
                 }
-                None | Some(TokenKind::Eof) => break,
+                None | Some(TokenKind::Eof) | Some(TokenKind::Newline) => {
+                    return self.malformed_param_list(tokens, *i).is_some();
+                }
                 Some(_) => *i += 1,
             }
         }
@@ -1653,6 +1658,26 @@ fn at_beginning_of_line(tokens: &[Token], i: usize) -> bool {
         return true;
     }
     matches!(tokens[i - 1].kind, TokenKind::Newline)
+}
+
+/// Skip `\`-newline continuations inside a parameter list. A bare newline is
+/// the end of the directive and is deliberately not skipped.
+fn skip_param_ws(tokens: &[Token], i: &mut usize) {
+    while is_line_continuation(tokens, *i) {
+        *i += 2;
+    }
+}
+
+/// Advance to the end of the current directive line (continuations
+/// included), leaving `i` on the newline / EOF token.
+fn skip_directive_line(tokens: &[Token], i: &mut usize) {
+    while *i < tokens.len() && !matches!(tokens[*i].kind, TokenKind::Newline | TokenKind::Eof) {
+        *i += if is_line_continuation(tokens, *i) {
+            2
+        } else {
+            1
+        };
+    }
 }
 
 /// A `\` token followed by a newline token — a line continuation the lexer
@@ -3336,9 +3361,73 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
     fn truncated_param_list_in_expansion_does_not_panic() {
         // The expansion of DECL re-scans a `#define` whose parameter list is
         // truncated mid-`...`; this must degrade to a diagnostic, not panic.
-        let src = "#define DECL(x) #define x(...\nDECL(FOO)\nint after;\n";
+        let src = "#define DECL(x) #define x(...\nDECL(FOO)\nint after(void);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            flat(&result.output).contains("intafter(void);"),
+            "{}",
+            result.output
+        );
+    }
+
+    /// An unterminated parameter list ends at the newline like any other
+    /// directive: warn, drop the definition, keep the following code (gcc
+    /// errors and continues; it never lets the list run on to a `)` on a
+    /// later line).
+    #[test]
+    fn unterminated_param_list_keeps_following_code() {
+        let src =
+            "#define PARTIAL(x, ...\nint before(void);\nint f(int a) { return (a); }\nint after;\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        let out = flat(&result.output);
+        assert!(out.contains("intbefore(void);"), "{}", result.output);
+        assert!(out.contains("intf(inta){return(a);}"), "{}", result.output);
+        assert!(out.contains("intafter;"), "{}", result.output);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("unterminated macro parameter list")),
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(!result.output.contains("PARTIAL"), "{}", result.output);
+    }
+
+    #[test]
+    fn unterminated_param_list_without_ellipsis_keeps_following_code() {
+        let src = "#define PARTIAL(x,\nint f(int a) { return (a); }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            flat(&result.output).contains("intf(inta){return(a);}"),
+            "{}",
+            result.output
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("unterminated macro parameter list")),
+            "{:?}",
+            result.diagnostics
+        );
+    }
+
+    /// A malformed (but terminated) list is dropped the same way instead of
+    /// stopping preprocessing of the whole file.
+    #[test]
+    fn malformed_param_list_keeps_following_code() {
+        let src = "#define BAD(x y) x\nint after;\n";
         let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
         assert!(result.output.contains("after"), "{}", result.output);
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("preprocess stopped")),
+            "{:?}",
+            result.diagnostics
+        );
     }
 
     #[test]
