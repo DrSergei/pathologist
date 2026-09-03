@@ -1402,6 +1402,10 @@ impl PreprocessorState {
         // Carries a tight `\`-newline run (see below) onto the token that
         // follows it, which is the only place its zero width is observable.
         let mut spliced_before = false;
+        // End of the last token consumed, whichever argument it went to: a
+        // top-level `,` empties `current`, and a splice right after it must
+        // still be measured against the `,`.
+        let mut last_end: Option<(u32, u32)> = None;
         while *i < tokens.len() {
             if is_line_continuation(tokens, *i) {
                 // Phase 2 deletes `\`-newline before tokenizing (C11
@@ -1413,7 +1417,7 @@ impl PreprocessorState {
                 // next character would occupy, exactly as
                 // `parameter_list_open` does for the `(` that makes a
                 // `#define` function-like.
-                let mut adjacent = current.last().map(token_end);
+                let mut adjacent = last_end;
                 while is_line_continuation(tokens, *i) {
                     if adjacent != Some((tokens[*i].line, tokens[*i].col)) {
                         adjacent = None;
@@ -1430,6 +1434,7 @@ impl PreprocessorState {
             // argument tokens come from an outer substitution, and the
             // splice they record was consumed by the outer invocation.
             tok.spliced_before |= std::mem::take(&mut spliced_before);
+            last_end = Some(token_end(&tok));
             match &tok.kind {
                 TokenKind::Punct(s) if s == "(" => {
                     depth += 1;
@@ -4825,6 +4830,22 @@ int x = A;
         let punct = "#define STR(x) #x\nconst char *s = STR(p->\\\nq);\n";
         let result = preprocess_string(punct, Path::new("t.c"), &PreprocessOptions::new());
         assert!(result.output.contains("\"p->q\""), "{}", result.output);
+    }
+
+    /// A tight splice right after a top-level `,` is still zero-width even
+    /// though the separator starts a fresh argument: adjacency is measured
+    /// from the last token consumed, not the last token of the argument.
+    #[test]
+    fn stringize_tight_splice_after_argument_separator() {
+        let src = "#define ALL(...) #__VA_ARGS__\n\
+                   const char *s = ALL(p,\\\nq);\n\
+                   const char *t = ALL(p\\\n,q);\n\
+                   const char *u = ALL(p, \\\nq);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        let out = &result.output;
+        assert!(out.contains("s= \"p,q\" ;"), "{out}");
+        assert!(out.contains("t= \"p,q\" ;"), "{out}");
+        assert!(out.contains("u= \"p, q\" ;"), "{out}");
     }
 
     /// The splice flag rides on the token through substitution, so an
