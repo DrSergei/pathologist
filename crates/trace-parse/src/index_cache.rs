@@ -2,7 +2,7 @@ use crate::deps::IncludeGraph;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use trace_preproc::{preprocess_file, LineMap, PreprocessOptions};
+use trace_preproc::{preprocess_file, Diagnostic, LineMap, PreprocessOptions};
 
 /// Preprocessed text plus its origin map for one canonical file path.
 #[derive(Debug, Clone)]
@@ -14,6 +14,10 @@ pub struct PreprocessedSource {
     pub line_map: Arc<LineMap>,
     /// Canonical `#include` closure from this preprocess run.
     pub included_headers: Arc<Vec<PathBuf>>,
+    /// Everything the preprocessor reported while producing `text`, in
+    /// emission order, attributed to the file it happened in (nested
+    /// includes included). Empty for raw sources.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// Preprocessed source text for indexing (one entry per canonical file path).
@@ -42,30 +46,28 @@ impl IndexSourceCache {
             }
         }
 
-        let (text, line_map, included) = read_index_source(path, graph, eff_opts)?;
-        let src = Arc::new(PreprocessedSource {
-            text,
-            line_map: Arc::new(line_map),
-            included_headers: Arc::new(included),
-        });
+        let src = Arc::new(read_index_source(path, graph, eff_opts)?);
         if let Ok(mut guard) = self.inner.write() {
             guard.entry(canonical).or_insert_with(|| Arc::clone(&src));
         }
         Ok(src)
     }
 
-    /// Preprocess `path` for its side effects only — the include-expansion
-    /// cache and shared macro table carried by `eff_opts` — without storing
-    /// the result here. The warm pass uses it for the second language of a
-    /// header reached from both C and C++ units: this cache keeps the text
-    /// in the language the header is parsed as.
+    /// Preprocess `path` without storing the result here, for the side
+    /// effects carried by `eff_opts` (include-expansion cache, shared macro
+    /// table) and for what the run reported. The warm pass uses it for the
+    /// second language of a header reached from both C and C++ units: this
+    /// cache keeps the text in the language the header is parsed as, but
+    /// that language's lexer may not see what this one reports (a `#` line
+    /// inside a C++ raw string is a directive in C), so the caller forwards
+    /// the returned `diagnostics`.
     pub fn preprocess_uncached(
         &self,
         path: &Path,
         graph: &IncludeGraph,
         eff_opts: &PreprocessOptions,
-    ) -> Result<(), String> {
-        read_index_source(path, graph, eff_opts).map(|_| ())
+    ) -> Result<PreprocessedSource, String> {
+        read_index_source(path, graph, eff_opts)
     }
 
     /// Drop `path` so the next `get_or_preprocess` runs the preprocessor
@@ -91,18 +93,31 @@ impl IndexSourceCache {
     }
 }
 
+impl PreprocessedSource {
+    /// A source indexed as-is: tree-sitter positions already refer to
+    /// original locations, and nothing was preprocessed that could report.
+    fn raw(text: Arc<str>) -> Self {
+        Self {
+            text,
+            line_map: Arc::new(LineMap::new()),
+            included_headers: Arc::new(Vec::new()),
+            diagnostics: Vec::new(),
+        }
+    }
+}
+
 fn read_index_source(
     path: &Path,
     graph: &IncludeGraph,
     eff_opts: &PreprocessOptions,
-) -> Result<(Arc<str>, LineMap, Vec<PathBuf>), String> {
+) -> Result<PreprocessedSource, String> {
     let canonical = graph.intern_path(path);
     if !should_preprocess(path, eff_opts, graph) {
         if let Some(s) = graph.source_cache.get(&canonical) {
-            return Ok((Arc::clone(s), LineMap::new(), Vec::new()));
+            return Ok(PreprocessedSource::raw(Arc::clone(s)));
         }
         return std::fs::read_to_string(path)
-            .map(|s| (Arc::<str>::from(s), LineMap::new(), Vec::new()))
+            .map(|s| PreprocessedSource::raw(Arc::from(s)))
             .map_err(|e| e.to_string());
     }
     let preproc_result = preprocess_file(&canonical, eff_opts).map_err(|e| e.to_string())?;
@@ -112,11 +127,12 @@ fn read_index_source(
     // from the unit (328/440 TUs on a real HDF tree) and feeds the parser
     // unexpanded function-like macros, which is strictly less sound than a
     // truncated-but-consistent prefix (spans stay LineMap-mappable).
-    Ok((
-        Arc::from(preproc_result.output),
-        preproc_result.line_map,
-        preproc_result.included_headers,
-    ))
+    Ok(PreprocessedSource {
+        text: Arc::from(preproc_result.output),
+        line_map: Arc::new(preproc_result.line_map),
+        included_headers: Arc::new(preproc_result.included_headers),
+        diagnostics: preproc_result.diagnostics,
+    })
 }
 
 fn should_preprocess(path: &Path, opts: &PreprocessOptions, graph: &IncludeGraph) -> bool {

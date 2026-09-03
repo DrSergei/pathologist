@@ -55,6 +55,10 @@ struct PreprocessorState {
     output: String,
     line_map: LineMap,
     diagnostics: Vec<Diagnostic>,
+    /// Diagnostic identities already emitted in this preprocessing run.
+    /// Cached parent expansions can carry the same nested-header report;
+    /// retain its first occurrence rather than multiplying it by cache path.
+    diagnostic_keys: HashSet<(Option<PathBuf>, u32, String)>,
     current_file: PathBuf,
     current_line: u32,
     /// Bytes each processed file contributed to `output`. Files whose
@@ -105,6 +109,12 @@ struct CondFrame {
 struct CacheFrame {
     /// Guard-skipped includes at the live-output offset of the `#include`.
     skips: Vec<(usize, PathBuf)>,
+    /// Diagnostics in this header's transitive include closure. This must be
+    /// independent from `PreprocessorState::diagnostics`: a report can have
+    /// been emitted earlier in this run and still be required by a cache
+    /// consumer that only includes this header later.
+    diagnostics: Vec<Diagnostic>,
+    diagnostic_keys: HashSet<(Option<PathBuf>, u32, String)>,
 }
 
 impl PreprocessorState {
@@ -122,6 +132,7 @@ impl PreprocessorState {
             output: String::new(),
             line_map: LineMap::new(),
             diagnostics: Vec::new(),
+            diagnostic_keys: HashSet::new(),
             current_file: file,
             current_line: 1,
             emitted_bytes: HashMap::new(),
@@ -359,12 +370,40 @@ impl PreprocessorState {
     }
 
     fn report(&mut self, severity: DiagnosticSeverity, line: u32, message: String) {
-        self.diagnostics.push(Diagnostic {
+        self.push_diagnostic(Diagnostic {
             severity,
             file: Some(self.current_file.clone()),
             line,
             message,
         });
+    }
+
+    fn push_diagnostic(&mut self, diagnostic: Diagnostic) {
+        self.record_cache_diagnostic(&diagnostic);
+        let key = (
+            diagnostic.file.clone(),
+            diagnostic.line,
+            diagnostic.message.clone(),
+        );
+        if self.diagnostic_keys.insert(key) {
+            self.diagnostics.push(diagnostic);
+        }
+    }
+
+    /// Include a diagnostic in every open cache frame. A nested header's
+    /// report is part of each enclosing header's cached expansion, even when
+    /// result-level deduplication suppresses it for this particular run.
+    fn record_cache_diagnostic(&mut self, diagnostic: &Diagnostic) {
+        for frame in &mut self.cache_frames {
+            let key = (
+                diagnostic.file.clone(),
+                diagnostic.line,
+                diagnostic.message.clone(),
+            );
+            if frame.diagnostic_keys.insert(key) {
+                frame.diagnostics.push(diagnostic.clone());
+            }
+        }
     }
 
     fn warn(&mut self, line: u32, message: impl Into<String>) {
@@ -412,6 +451,9 @@ impl PreprocessorState {
         let Some(entry) = cache.read().ok().and_then(|guard| guard.get(&key).cloned()) else {
             return false;
         };
+        for diagnostic in entry.diagnostics.iter().cloned() {
+            self.push_diagnostic(diagnostic);
+        }
         if !self.opts.inline_include_bodies {
             self.replay_macro_delta(&entry);
             self.included_guard.insert(canonical.to_path_buf());
@@ -588,6 +630,11 @@ impl PreprocessorState {
                 if let Some(frame) = self.cache_frames.last_mut() {
                     frame.skips.push((self.output.len(), canonical.clone()));
                 }
+                if let Some(entry) = self.cached_expansion(&canonical) {
+                    for diagnostic in entry.diagnostics.iter() {
+                        self.record_cache_diagnostic(diagnostic);
+                    }
+                }
             }
             return Ok(());
         }
@@ -637,7 +684,11 @@ impl PreprocessorState {
         let output_start = self.output.len();
         let pushing_frame = cache_header && !self.opts.frozen_expansion_cache;
         if pushing_frame {
-            self.cache_frames.push(CacheFrame { skips: Vec::new() });
+            self.cache_frames.push(CacheFrame {
+                skips: Vec::new(),
+                diagnostics: Vec::new(),
+                diagnostic_keys: HashSet::new(),
+            });
         }
 
         let content: Arc<str> = if let Some(cache) = &self.opts.source_cache {
@@ -693,7 +744,7 @@ impl PreprocessorState {
             // environment. Content silently missing from a cached expansion
             // is the failure mode that starves translation units later, so
             // make it visible during the (sequential) warm/index phases.
-            self.diagnostics.push(Diagnostic {
+            self.push_diagnostic(Diagnostic {
                 severity: DiagnosticSeverity::Warning,
                 file: Some(path.to_path_buf()),
                 line: 1,
@@ -702,12 +753,14 @@ impl PreprocessorState {
         }
 
         if cache_header && !self.opts.frozen_expansion_cache {
-            let frame = self.cache_frames.pop();
+            let frame = self
+                .cache_frames
+                .pop()
+                .expect("cacheable header has an active cache frame");
             if let Some(cache) = &self.opts.include_expansion_cache {
-                let skips = frame.map(|f| f.skips).unwrap_or_default();
                 let output_end = self.output.len();
                 let (composed, composed_map, extra_files) = if self.opts.inline_include_bodies {
-                    self.compose_cache_text(output_start, output_end, &skips)
+                    self.compose_cache_text(output_start, output_end, &frame.skips)
                 } else {
                     (
                         self.output[output_start..output_end].to_string(),
@@ -726,12 +779,18 @@ impl PreprocessorState {
                     Some(start) => Arc::new(self.macro_ops[start..].to_vec()),
                     None => Arc::default(),
                 };
-                if !composed.is_empty() || !ops.is_empty() || !new_files.is_empty() {
+                let diagnostics: Arc<Vec<Diagnostic>> = Arc::new(frame.diagnostics);
+                if !composed.is_empty()
+                    || !ops.is_empty()
+                    || !new_files.is_empty()
+                    || !diagnostics.is_empty()
+                {
                     if let Ok(mut guard) = cache.write() {
                         guard.entry((canonical, self.language)).or_insert(
                             crate::IncludeExpansion {
                                 text: composed.into(),
                                 files: Arc::new(new_files),
+                                diagnostics,
                                 line_map: Arc::new(composed_map),
                                 ops,
                             },
@@ -3344,7 +3403,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             fs::write(&path, "#include \"shared.h\"\nint n = VAL;\n").unwrap();
             let opts = PreprocessOptions::new()
                 .with_include_expansion_cache(Arc::clone(&cache))
-                .with_include(dir.clone());
+                .with_include(dir.to_path_buf());
             preprocess_file(&path, &opts).unwrap().output
         };
         let cpp = run("t.cpp");
@@ -3503,7 +3562,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
-            .with_include(dir.clone())
+            .with_include(dir.to_path_buf())
             .with_include_expansion_cache(cache);
         let src = "#include \"c.h\"\nint a = container_of(x, struct D, f);\n";
         let r1 = preprocess_string(src, &dir.join("a.c"), &opts);
@@ -3520,7 +3579,6 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "cache replay must carry the header's redefinition over the fallback: {}",
             r2.output
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3549,7 +3607,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
-            .with_include(dir.clone())
+            .with_include(dir.to_path_buf())
             .with_include_expansion_cache(cache);
         let src = "#include \"u.h\"\nint __init marker;\n";
         let r1 = preprocess_string(src, &dir.join("a.c"), &opts);
@@ -3565,7 +3623,6 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "cache replay must apply the header's #undef of the fallback: {}",
             r2.output
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3578,7 +3635,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
-            .with_include(dir.clone())
+            .with_include(dir.to_path_buf())
             .with_include_expansion_cache(cache);
         let warm = preprocess_string("#include \"u.h\"\n", &dir.join("a.c"), &opts);
         assert!(warm.output.contains("u_decl"), "{}", warm.output);
@@ -3590,7 +3647,6 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
              absent when the entry was created: {}",
             hit.output
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3601,7 +3657,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
-            .with_include(dir.clone())
+            .with_include(dir.to_path_buf())
             .with_include_expansion_cache(cache);
         let src = "#define X 1\n#include \"r.h\"\nint a = X;\n";
         let miss = preprocess_string(src, &dir.join("a.c"), &opts);
@@ -3619,7 +3675,6 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
              existed when the entry was created: {}",
             hit.output
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3630,7 +3685,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
-            .with_include(dir.clone())
+            .with_include(dir.to_path_buf())
             .with_include_expansion_cache(cache);
         let src = "#define X 1\n#include \"r.h\"\nint a = X;\n";
         let miss = preprocess_string(src, &dir.join("a.c"), &opts);
@@ -3645,7 +3700,6 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "a replayed #define must overwrite like live execution: {}",
             hit.output
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3658,7 +3712,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         let src = "#include \"m.h\"\n";
         let shared1 = Arc::new(RwLock::new(MacroTable::new()));
         let opts1 = PreprocessOptions::new()
-            .with_include(dir.clone())
+            .with_include(dir.to_path_buf())
             .with_include_expansion_cache(Arc::clone(&cache))
             .with_shared_macros(shared1)
             .with_accumulate_macros(true);
@@ -3667,7 +3721,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         // shared table exactly as a live #define would.
         let shared2 = Arc::new(RwLock::new(MacroTable::new()));
         let opts2 = PreprocessOptions::new()
-            .with_include(dir.clone())
+            .with_include(dir.to_path_buf())
             .with_include_expansion_cache(cache)
             .with_shared_macros(Arc::clone(&shared2))
             .with_accumulate_macros(true);
@@ -3676,7 +3730,6 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             shared2.read().unwrap().contains_key("FROM_HDR"),
             "cache replay must accumulate macros into the shared table"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Spacing-insensitive view of preprocessed output, so assertions
@@ -4113,14 +4166,41 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             .any(|d| { d.message.contains("expected identifier in directive") }));
     }
 
-    fn unique_tmp_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("trace_preproc_{}_{}", tag, std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        // Canonicalize so fixture paths match cache keys, which are stored
-        // canonicalized; on macOS temp_dir() is behind the /var symlink.
-        dir.canonicalize().unwrap()
+    /// A temporary source tree, removed when dropped (assertion failures
+    /// included). Derefs to its canonical path so fixture paths match cache
+    /// keys, which are stored canonicalized; on macOS the temp root is
+    /// behind the /var symlink.
+    struct TmpTree {
+        _dir: tempfile::TempDir,
+        path: PathBuf,
+    }
+
+    impl TmpTree {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl std::ops::Deref for TmpTree {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            self.path()
+        }
+    }
+
+    impl AsRef<Path> for TmpTree {
+        fn as_ref(&self) -> &Path {
+            self.path()
+        }
+    }
+
+    fn unique_tmp_dir(tag: &str) -> TmpTree {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("trace_preproc_{tag}_"))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        TmpTree { _dir: dir, path }
     }
 
     /// Regression: a nested include whose expansion is fully skipped by an
@@ -4196,8 +4276,6 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "claimed starved file: {:?}",
             outer_entry.map(|e| e.files.clone())
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Frozen (TU-phase) preprocessing must stay silent about guard-skipped
@@ -4231,7 +4309,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             .with_shared_macros(Arc::clone(&shared))
             .with_include_expansion_cache(cache)
             .with_frozen_expansion_cache(true)
-            .with_include(dir.clone());
+            .with_include(dir.to_path_buf());
         let src = "#include \"g.h\"\nint main(void){return 0;}\n";
         let r = preprocess_string(src, &dir.join("m.c"), &opts);
         assert!(
@@ -4241,7 +4319,153 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "{:?}",
             r.diagnostics
         );
-        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A cache hit must reproduce the diagnostics emitted while creating
+    /// the cached expansion, just as it reproduces text and macro effects.
+    #[test]
+    fn cached_include_replays_diagnostics() {
+        let dir = unique_tmp_dir("cached_diagnostics");
+        fs::write(
+            dir.path().join("nested.h"),
+            "#frobnicate\nint from_nested_header;\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("reported.h"),
+            "#include \"nested.h\"\nint from_reported_header;\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("first.c"),
+            "#include \"reported.h\"\nint first;\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("second.c"),
+            "#include \"reported.h\"\nint second;\n",
+        )
+        .unwrap();
+
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = PreprocessOptions::new()
+            .with_include_expansion_cache(Arc::clone(&cache))
+            .with_include(dir.path().to_path_buf());
+
+        let first = preprocess_file(&dir.path().join("first.c"), &opts).unwrap();
+        assert_eq!(
+            first
+                .diagnostics
+                .iter()
+                .filter(|d| d.message.contains("unknown directive #frobnicate"))
+                .count(),
+            1,
+            "{:?}",
+            first.diagnostics
+        );
+        assert!(
+            cache
+                .read()
+                .unwrap()
+                .contains_key(&(dir.path().join("reported.h"), Language::C)),
+            "first run did not populate the include cache"
+        );
+
+        let second = preprocess_file(&dir.path().join("second.c"), &opts).unwrap();
+        let replayed: Vec<_> = second
+            .diagnostics
+            .iter()
+            .filter(|d| d.message.contains("unknown directive #frobnicate"))
+            .collect();
+        assert_eq!(replayed.len(), 1, "{:?}", second.diagnostics);
+        assert_eq!(
+            replayed[0].file.as_deref(),
+            Some(dir.path().join("nested.h").as_path())
+        );
+        assert_eq!(replayed[0].line, 1);
+    }
+
+    /// Two cached parents can both carry a diagnostic from the same nested
+    /// header. Replaying both in one run must report the source condition
+    /// once, rather than once per cache path through the include graph.
+    #[test]
+    fn cached_parents_do_not_duplicate_nested_diagnostics() {
+        let dir = unique_tmp_dir("cached_parent_diagnostics");
+        fs::write(dir.join("reported.h"), "#frobnicate\nint reported;\n").unwrap();
+        fs::write(dir.join("left.h"), "#include \"reported.h\"\nint left;\n").unwrap();
+        fs::write(dir.join("right.h"), "#include \"reported.h\"\nint right;\n").unwrap();
+        fs::write(
+            dir.join("main.c"),
+            "#include \"left.h\"\n#include \"right.h\"\nint main(void) { return 0; }\n",
+        )
+        .unwrap();
+
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = PreprocessOptions::new()
+            .with_include_expansion_cache(cache)
+            .with_include(dir.to_path_buf());
+
+        preprocess_file(&dir.join("left.h"), &opts).unwrap();
+        preprocess_file(&dir.join("right.h"), &opts).unwrap();
+        let result = preprocess_file(&dir.join("main.c"), &opts).unwrap();
+        let reported: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.message.contains("unknown directive #frobnicate"))
+            .collect();
+
+        assert_eq!(reported.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(
+            reported[0].file.as_deref(),
+            Some(dir.join("reported.h").as_path())
+        );
+        assert_eq!(reported[0].line, 1);
+    }
+
+    /// A parent cache entry must retain a nested report even if the nested
+    /// header was already included earlier in the run that created it.
+    #[test]
+    fn cached_parent_replays_diagnostic_from_guard_skipped_child() {
+        let dir = unique_tmp_dir("cached_parent_guard_skipped_diagnostic");
+        fs::write(dir.join("reported.h"), "#frobnicate\nint reported;\n").unwrap();
+        fs::write(
+            dir.join("wrapper.h"),
+            "#include \"reported.h\"\nint wrapped;\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("first.c"),
+            "#include \"reported.h\"\n#include \"wrapper.h\"\nint first;\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("second.c"),
+            "#include \"wrapper.h\"\nint second;\n",
+        )
+        .unwrap();
+
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = PreprocessOptions::new()
+            .with_include_expansion_cache(cache)
+            .with_include(dir.to_path_buf());
+
+        preprocess_file(&dir.join("first.c"), &opts).unwrap();
+        let second = preprocess_file(&dir.join("second.c"), &opts).unwrap();
+        let reported: Vec<_> = second
+            .diagnostics
+            .iter()
+            .filter(|d| d.message.contains("unknown directive #frobnicate"))
+            .collect();
+
+        assert_eq!(reported.len(), 1, "{:?}", second.diagnostics);
+        assert_eq!(
+            reported[0].file.as_deref(),
+            Some(dir.join("reported.h").as_path())
+        );
+        assert_eq!(reported[0].line, 1);
     }
 
     /// Diamond includes must not copy a header's cached body into live
@@ -4278,7 +4502,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             Arc::new(RwLock::new(HashMap::new()));
         let warm = PreprocessOptions::new()
             .with_include_expansion_cache(Arc::clone(&cache))
-            .with_include(dir.clone());
+            .with_include(dir.to_path_buf());
         let top = preprocess_file(&dir.join("top.h"), &warm).unwrap();
         let need_count = top.output.matches("NeedThis").count();
         assert!(
@@ -4308,14 +4532,13 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         let frozen = PreprocessOptions::new()
             .with_include_expansion_cache(Arc::clone(&cache))
             .with_frozen_expansion_cache(true)
-            .with_include(dir.clone());
+            .with_include(dir.to_path_buf());
         let c = preprocess_file(&dir.join("right.h"), &frozen).unwrap();
         assert!(
             c.output.contains("NeedThis"),
             "frozen replay of right.h lost nested common.h: {}",
             c.output
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// n headers each including all previous ones: live output is O(n), not 2^n.
@@ -4336,7 +4559,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
             .with_include_expansion_cache(Arc::clone(&cache))
-            .with_include(dir.clone());
+            .with_include(dir.to_path_buf());
         let r = preprocess_file(&dir.join(format!("h{}.h", N - 1)), &opts).unwrap();
         for i in 0..N {
             assert!(
@@ -4350,7 +4573,6 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "chained-include live output exploded: {}",
             r.output.len()
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4367,7 +4589,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             fs::write(dir.join(format!("n{i}.h")), src).unwrap();
         }
         let opts = PreprocessOptions::new()
-            .with_include(dir.clone())
+            .with_include(dir.to_path_buf())
             .with_max_include_depth(6);
         let r = preprocess_file(&dir.join("n0.h"), &opts).unwrap();
         assert!(
@@ -4383,7 +4605,6 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "depth cap should not expand the whole chain: {}",
             r.output
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4426,7 +4647,7 @@ int x = A;
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
             .with_include_expansion_cache(Arc::clone(&cache))
-            .with_include(dir.clone())
+            .with_include(dir.to_path_buf())
             .with_inline_include_bodies(false);
         let top = preprocess_file(&dir.join("top.h"), &opts).unwrap();
         assert!(
@@ -4450,7 +4671,6 @@ int x = A;
             "child cache still holds its own text: {}",
             common.text
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4485,7 +4705,7 @@ int from_late;
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
             .with_include_expansion_cache(Arc::clone(&cache))
-            .with_include(dir.clone())
+            .with_include(dir.to_path_buf())
             .with_inline_include_bodies(false);
         let via = preprocess_file(&dir.join("via.h"), &opts).unwrap();
         assert!(
@@ -4506,7 +4726,6 @@ int from_late;
             "a run rooted at late.h must emit its text: {:?}",
             late.output
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

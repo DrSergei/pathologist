@@ -3,7 +3,7 @@ use crate::symbol::SymbolTable;
 use crate::types::TypeTable;
 use crate::{CallSiteId, FileId, FnId};
 use indexmap::IndexMap;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +58,10 @@ pub struct MergeDedup {
     /// `(file, line) → name → FnId` so a hit does not clone the function name.
     pub fn_keys: FxHashMap<(FileId, u32), FxHashMap<String, FnId>>,
     pub site_keys: FxHashMap<(FileId, u32, u32, String), CallSiteId>,
+    /// Preprocessor reports already merged into the whole program. Unit-local
+    /// copies use different `FileId` spaces, so keys are inserted only after
+    /// their file ids have been remapped.
+    preprocess_diagnostic_keys: FxHashSet<(Option<FileId>, u32, String)>,
 }
 
 impl MergeDedup {
@@ -73,6 +77,16 @@ impl MergeDedup {
             .entry((file, line))
             .or_default()
             .insert(name, id);
+    }
+
+    pub fn insert_preprocess_diagnostic(
+        &mut self,
+        file: Option<FileId>,
+        line: u32,
+        message: &str,
+    ) -> bool {
+        self.preprocess_diagnostic_keys
+            .insert((file, line, message.to_owned()))
     }
 }
 

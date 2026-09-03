@@ -44,6 +44,10 @@ pub type ExpansionKey = (PathBuf, Language);
 pub struct IncludeExpansion {
     pub text: Arc<str>,
     pub files: Arc<HashSet<PathBuf>>,
+    /// Diagnostics emitted while producing this expansion, including
+    /// diagnostics replayed from nested cached headers. Cache hits append
+    /// these to the current preprocessing result in their original order.
+    pub diagnostics: Arc<Vec<crate::Diagnostic>>,
     /// Origin map for `text`: offsets are relative to the start of the
     /// expansion. Empty when line-map tracking is disabled.
     pub line_map: Arc<crate::LineMap>,

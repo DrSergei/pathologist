@@ -24,3 +24,6 @@ tree-sitter.workspace = true
 [[example]]
 name = "parse_failures"
 path = "examples/parse_failures.rs"
+
+[dev-dependencies]
+tempfile.workspace = true

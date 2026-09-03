@@ -438,9 +438,8 @@ mod tests {
     #[allow(clippy::cloned_ref_to_slice_refs)]
     #[test]
     fn include_graph_resolves_local_and_orders() {
-        let tmp = std::env::temp_dir().join(format!("trace_deps_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(&tmp).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path();
         fs::write(tmp.join("api.h"), "struct S { int x; };\n").unwrap();
         fs::write(
             tmp.join("main.c"),
@@ -450,7 +449,7 @@ mod tests {
 
         let c = vec![tmp.join("main.c")];
         let h = vec![tmp.join("api.h")];
-        let mut g = IncludeGraph::build(&tmp, &c, &h);
+        let mut g = IncludeGraph::build(tmp, &c, &h);
         assert_eq!(g.edges.len(), 1);
         let deps = g.edges.get(&canonicalize(&tmp.join("main.c"))).unwrap();
         assert_eq!(deps.len(), 1);
@@ -498,19 +497,16 @@ mod tests {
                     .unwrap(),
             "preprocess edge must put late.h before main.c"
         );
-
-        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn index_waves_keeps_include_cycles_sequential() {
-        let tmp = std::env::temp_dir().join(format!("trace_deps_cycle_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(&tmp).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path();
         fs::write(tmp.join("a.h"), "#include \"b.h\"\nstruct A { int x; };\n").unwrap();
         fs::write(tmp.join("b.h"), "#include \"a.h\"\nstruct B { int y; };\n").unwrap();
         let h = vec![tmp.join("a.h"), tmp.join("b.h")];
-        let g = IncludeGraph::build(&tmp, &[], &h);
+        let g = IncludeGraph::build(tmp, &[], &h);
         let all = [
             canonicalize(&tmp.join("a.h")),
             canonicalize(&tmp.join("b.h")),
@@ -527,6 +523,5 @@ mod tests {
                 .all(|w| w.iter().all(|f| !leftover.contains(f))),
             "leftover files must not also appear in a parallel wave"
         );
-        let _ = fs::remove_dir_all(&tmp);
     }
 }

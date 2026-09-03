@@ -86,7 +86,7 @@ After merge, `Program` contains:
 | `types` | Struct/union layouts, pointer types |
 | `flow` | Lowered assignment facts (`Copy`, `Store`, `GepField`, …) |
 | `fn_returns` | Per-function return-value summaries (`ReturnFlow`) |
-| `diagnostics` | Parse/preprocess warnings |
+| `diagnostics` | Preprocess and parse diagnostics (stage, severity, file, line) |
 | `include_deps` | `#include` edges for debugging |
 
 Lowering (`trace-parse/src/lower.rs`) walks tree-sitter ASTs and emits **flow constraints** — not a full statement-level CFG.
@@ -129,7 +129,7 @@ Spans are resolved through the preprocessor `LineMap`: **all** entities use orig
 
 - Diagnostics collected per stage → `diagnostics` SQLite table.
 - A failed TU is recorded; the run continues if other TUs succeed.
-- Preprocessor errors on a TU may fall back to raw source read when expansion fails catastrophically.
+- A preprocessor stop inside a file keeps the output produced so far (no raw-source fallback); every preprocessor diagnostic is forwarded to the export as a `stage = 'preprocess'` row, attributed to the file it occurred in and deduplicated across translation units.
 
 ## Extension points
 

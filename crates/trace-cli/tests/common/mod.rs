@@ -63,11 +63,43 @@ pub fn callees_of(
         .collect()
 }
 
+/// A SQLite export in a temporary directory of its own; both go away when
+/// the value is dropped, including on a failed assertion.
+pub struct TempDb {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl TempDb {
+    pub fn new(file_name: &str) -> Self {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(file_name);
+        Self { _dir: dir, path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for TempDb {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        self.path()
+    }
+}
+
+impl AsRef<Path> for TempDb {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
 pub fn export_program(
     program: &Program,
     pag: &trace_analysis::Pag,
     analysis: &AnalysisResult,
-) -> PathBuf {
+) -> TempDb {
     export_program_with_options(program, pag, analysis, false)
 }
 
@@ -75,7 +107,7 @@ pub fn export_program_full(
     program: &Program,
     pag: &trace_analysis::Pag,
     analysis: &AnalysisResult,
-) -> PathBuf {
+) -> TempDb {
     export_program_with_options(program, pag, analysis, true)
 }
 
@@ -84,15 +116,14 @@ fn export_program_with_options(
     pag: &trace_analysis::Pag,
     analysis: &AnalysisResult,
     full_detail: bool,
-) -> PathBuf {
-    let out = std::env::temp_dir().join(format!("trace_export_{}.db", uuid_simple()));
-    let _ = std::fs::remove_file(&out);
+) -> TempDb {
+    let out = TempDb::new("trace_export.db");
     trace_db::export_to_sqlite(
         program,
         pag,
         analysis,
         &trace_db::ExportOptions {
-            output: out.clone(),
+            output: out.path().to_path_buf(),
             include_points_to: false,
             full_detail,
             model_files: Vec::new(),
@@ -100,18 +131,6 @@ fn export_program_with_options(
     )
     .expect("export");
     out
-}
-
-fn uuid_simple() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    format!(
-        "{}_{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    )
 }
 
 pub fn arg_flow_count(analysis: &AnalysisResult) -> usize {

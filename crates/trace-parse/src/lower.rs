@@ -5,7 +5,7 @@ use crate::merge::{merge_unit_index, merge_unit_symbols, merge_unit_types, UnitI
 use crate::parse::node_text;
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,6 +21,7 @@ use tree_sitter::Node;
 /// chains of thousands of terms) would otherwise overflow the thread stack.
 const MAX_AST_WALK_DEPTH: u32 = 512;
 const INDEX_PROGRESS_EVERY: usize = 50;
+const PREPROCESS_STAGE: &str = "preprocess";
 
 fn index_progress(msg: impl std::fmt::Display) {
     let _ = writeln!(std::io::stderr(), "{msg}");
@@ -302,6 +303,13 @@ pub fn build_program_with_jobs(
     // headers, and the graph only grows, so this terminates.
     let source_cache = IndexSourceCache::new();
     let mut warmed_as: HashMap<PathBuf, Vec<Language>> = HashMap::new();
+    // What a header's second-language warm run reported. The cached
+    // (first-language) run reaches the export through the header's own
+    // unit; this run's text is discarded, so its diagnostics would go with
+    // it. Keyed by header so an evicted, re-warmed header replaces (or
+    // drops) its entry; ordered so the rows come out in a fixed order.
+    let mut second_language_diagnostics: BTreeMap<PathBuf, Vec<trace_preproc::Diagnostic>> =
+        BTreeMap::new();
     let mut round = 0usize;
     loop {
         for (from, headers) in source_cache.included_by_file() {
@@ -358,6 +366,7 @@ pub fn build_program_with_jobs(
             );
             if warmed_as.insert(path.clone(), languages.clone()).is_some() {
                 source_cache.evict(path, &include_graph);
+                second_language_diagnostics.remove(path);
             }
             let mut failed = false;
             let mut warmed: Vec<(Language, Arc<std::sync::RwLock<MacroTable>>)> = Vec::new();
@@ -375,7 +384,11 @@ pub fn build_program_with_jobs(
                         .get_or_preprocess(path, &include_graph, &header_prep_opts)
                         .map(|_| ())
                 } else {
-                    source_cache.preprocess_uncached(path, &include_graph, &header_prep_opts)
+                    source_cache
+                        .preprocess_uncached(path, &include_graph, &header_prep_opts)
+                        .map(|src| {
+                            second_language_diagnostics.insert(path.clone(), src.diagnostics);
+                        })
                 };
                 if let Err(e) = result {
                     program.add_diagnostic(Diagnostic {
@@ -386,7 +399,7 @@ pub fn build_program_with_jobs(
                             "macro warm preprocess failed for {}: {e}",
                             path.display()
                         ),
-                        stage: "preprocess".into(),
+                        stage: PREPROCESS_STAGE.into(),
                     });
                     failed = true;
                     break;
@@ -689,6 +702,14 @@ pub fn build_program_with_jobs(
     });
 
     program.types.complete_nested_tags();
+    // After the merges, so the headers involved already hold their ids
+    // and forwarding does not reorder the file table.
+    for (path, diagnostics) in second_language_diagnostics {
+        let unit_file = program
+            .symbols
+            .add_file_interned(include_graph.intern_path(&path));
+        add_preprocess_diagnostics(&mut program, &include_graph, unit_file, &diagnostics);
+    }
     program.include_deps = include_graph.edge_list();
     for dir in &include_graph.include_dirs {
         if !program.include_paths.iter().any(|p| p == dir) {
@@ -1042,6 +1063,7 @@ fn process_indexed_file(
     let pre = source_cache.get_or_preprocess(path, graph, index_opts)?;
     let self_canon = graph.intern_path(path);
     let file_id = program.symbols.add_file_interned(&self_canon);
+    add_preprocess_diagnostics(program, graph, file_id, &pre.diagnostics);
     if let Some(ir) = header_ir {
         // Nested PCH copies types/typedefs only so ancestor units stay small.
         // TUs merge prototypes from every reachable header (the defining
@@ -1125,6 +1147,43 @@ fn process_indexed_file(
     resolve_pending_fn_refs(program, &ctx);
     program.types.complete_nested_tags();
     Ok(())
+}
+
+/// Forward what the preprocessor reported for this unit (missing includes,
+/// unknown directives, unterminated `#if`, mid-file stops, …) so the rows
+/// reach the `diagnostics` export with `stage = 'preprocess'`. Each one is
+/// attributed to the file it happened in; a diagnostic without an origin
+/// file lands on the unit itself.
+fn add_preprocess_diagnostics(
+    program: &mut Program,
+    graph: &IncludeGraph,
+    unit_file: trace_ir::FileId,
+    diagnostics: &[trace_preproc::Diagnostic],
+) {
+    for d in diagnostics {
+        let file = match &d.file {
+            Some(p) => program.symbols.add_file_interned(graph.intern_path(p)),
+            None => unit_file,
+        };
+        let severity = match d.severity {
+            trace_preproc::DiagnosticSeverity::Error => DiagnosticSeverity::Error,
+            trace_preproc::DiagnosticSeverity::Warning => DiagnosticSeverity::Warning,
+        };
+        let diagnostic = Diagnostic {
+            severity,
+            file: Some(file),
+            line: d.line,
+            message: d.message.clone(),
+            stage: PREPROCESS_STAGE.into(),
+        };
+        if program.dedup.insert_preprocess_diagnostic(
+            diagnostic.file,
+            diagnostic.line,
+            &diagnostic.message,
+        ) {
+            program.add_diagnostic(diagnostic);
+        }
+    }
 }
 
 /// Second-chance resolution for references recorded while lowering: the

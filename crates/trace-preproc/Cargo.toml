@@ -9,3 +9,6 @@ anyhow.workspace = true
 indexmap.workspace = true
 regex.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

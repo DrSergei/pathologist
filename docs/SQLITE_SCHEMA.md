@@ -235,6 +235,12 @@ PK: `(var_node_id, loc_id)`
 | `message` | TEXT | Text |
 | `stage` | TEXT | `preprocess`, `parse`, `analysis` |
 
+`preprocess` rows are the preprocessor's own diagnostics (missing includes, unknown directives,
+unterminated `#if`, mid-file stops), attributed to the file and line where the condition
+occurred — a nested header, not the including translation unit — and deduplicated on
+`(file_id, line, message)` across translation units. `parse` rows are per unit (`parse errors
+in <path>`, `file_id` NULL). See `docs/PREPROCESSOR.md`, "Error recovery".
+
 ## Example queries
 
 ### Callees of a function

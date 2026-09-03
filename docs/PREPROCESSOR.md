@@ -32,7 +32,7 @@ flowchart LR
 
 - **`IncludeGraph`** (`trace-parse/src/deps.rs`) scans project files for `#include` directives, builds dependency edges, discovers include directories, and marks which files need preprocessing.
 - Preprocessed output is **cached** per file (parallel cache fill when `--jobs > 1`).
-- If preprocessing fails hard, parse may fall back to reading raw source (diagnostic recorded).
+- If preprocessing fails hard (the unit's own file cannot be read), the unit is dropped and an error diagnostic is recorded; a stop *inside* a file keeps the output produced so far (see Error recovery).
 
 ## Phases
 
@@ -121,7 +121,7 @@ For `#include "header.h"` / `#include <header.h>`:
 
 1. Directory of the including file
 2. Paths from `IncludeGraph.include_dirs` (discovered + `--include`)
-3. Error diagnostic if not found
+3. Warning diagnostic `include file not found, skipping: <path>` if not found; the directive is skipped
 
 Only **project-local** files under the analysis root are linked; system headers outside the tree are not resolved unless present in the project.
 
@@ -188,13 +188,35 @@ Manual `-I` remains appropriate only for things the tool cannot discover:
 
 ## Error recovery
 
-| Condition | Behavior |
-|-----------|----------|
-| Unknown `#directive` | Warning, skip line |
-| Missing include | Error on TU |
-| Unterminated `#if` | Error diagnostic at the opening `#if`/`#ifdef`/`#ifndef` (one per open group, in the file that opened it); the open groups are closed at that file's end and preprocessing continues. Output already produced is kept |
-| Macro-argument parse failure | Warning `preprocess stopped in <file>`; output produced so far is kept |
-| Preprocess failure (hard error) | Diagnostic; unit falls back to raw read |
+| Condition | Behavior | In the `diagnostics` table |
+|-----------|----------|----------------------------|
+| Unknown `#directive` | Warning `unknown directive #name`, skip line | `preprocess` / `warning`, file and line of the directive |
+| Missing include | Warning `include file not found, skipping: <path>`; the directive is skipped and preprocessing continues | `preprocess` / `warning`, file and line of the `#include` |
+| Unterminated `#if` | Error diagnostic at the opening `#if`/`#ifdef`/`#ifndef` (one per open group, in the file that opened it); the open groups are closed at that file's end and preprocessing continues. Output already produced is kept | `preprocess` / `error`, the file that opened the group |
+| Stray `#elif` / `#else` / `#endif` in a header | Error `… without #if`; the header stops there (its `preprocess stopped in <file>` warning follows) and the includer resumes | `preprocess` / `error` plus the `warning`, both on the header |
+| Macro-argument parse failure, malformed directive, budget exceeded | Error at the offending line, then warning `preprocess stopped in <file>: …`; the file stops, output produced so far is kept | `preprocess` / `error` at that line, plus the `warning` on line 1 of the file that stopped |
+| Resolved include expands to nothing | Warning `resolved include expanded to nothing (guard already defined?)` on the header, warm/index phases only | `preprocess` / `warning` |
+| Preprocess failure (hard error) | The unit's own file cannot be read: no output, the unit is dropped with an error diagnostic carrying the I/O message. For a header in the warm pass the same failure is the warning `macro warm preprocess failed for <header>` | `parse` / `error` (no file) for a unit; `preprocess` / `warning` for the warm pass |
+
+### Diagnostics in the export
+
+Every entry of `PreprocessResult::diagnostics` reaches the SQLite `diagnostics` table as a
+`stage = 'preprocess'` row (#20): `severity` is the preprocessor's own (`error` / `warning`),
+`file_id` is the file the condition occurred in — a nested header, not the translation unit that
+included it — and `line` is its line in that file. A header is preprocessed once as its own unit
+and again inline by every translation unit whose expansion-cache lookup misses, so the same
+header condition would otherwise be reported once per consumer. Duplicate cached paths are
+suppressed within each preprocess run, then cross-unit duplicates are discarded as units merge
+on `(file, line, message)`, keeping the first copy in index order so the row set does not depend
+on `--jobs` scheduling and duplicate strings do not accumulate until the end. A header reached
+from both C and C++ units is warmed
+under both lexers but cached in one; what the other run reports (a `#` line inside a C++ raw
+string literal is an unknown directive in C) is forwarded from the warm pass so it is not lost
+with the discarded text. Include-expansion cache entries carry their diagnostics together with
+their text, line map, and macro effects, so a cache hit preserves the same reports as a live
+expansion. Nothing is filtered: on a checkout analyzed without a
+sysroot, `include file not found` for every system and toolchain header is the bulk of the table
+(see `docs/EVAL_REPORT.md`).
 
 A mid-run stop inside ONE nested header must not invalidate the whole TU: indexing keeps the truncated-but-LineMap-consistent prefix rather than falling back to raw source, because raw text drops every `#include`d declaration and feeds the parser unexpanded function-like macros. The stop message names the file where processing stopped so downstream tools can report the truncation point.
 

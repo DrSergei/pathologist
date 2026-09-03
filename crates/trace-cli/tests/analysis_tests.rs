@@ -215,12 +215,11 @@ fn multi_tu_unique_ids_and_export() {
     );
     let (pag, analysis) = analyze(&program);
     let db = export_program(&program, &pag, &analysis);
-    let conn = open_db(&db).unwrap();
+    let conn = open_db(db.path()).unwrap();
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM functions", [], |r| r.get(0))
         .unwrap();
     assert!(count >= 4, "expected functions from both TUs");
-    let _ = std::fs::remove_file(db);
 }
 
 #[test]
@@ -302,7 +301,6 @@ fn export_sqlite_has_call_and_arg_tables() {
         .query_row("SELECT COUNT(*) FROM call_edges", [], |r| r.get(0))
         .unwrap();
     assert!(calls >= 1);
-    let _ = std::fs::remove_file(db);
 }
 
 #[test]
@@ -350,7 +348,6 @@ fn fn_arg_flow_exported() {
         fn_flow >= 1,
         "expected function-pointer arg flow in SQLite export"
     );
-    let _ = std::fs::remove_file(db);
 }
 
 #[test]
@@ -409,7 +406,6 @@ fn fn_static_local_variable() {
         )
         .expect("handler exported in full export");
     assert_eq!(kind, "fn_static");
-    let _ = std::fs::remove_file(db);
 }
 
 #[test]
@@ -491,9 +487,8 @@ fn header_chain_reachable_from_c_attributed_to_headers() {
 #[cfg(unix)]
 fn macro_warm_preprocess_failure_is_nonfatal() {
     use std::os::unix::fs::PermissionsExt;
-    let root = std::env::temp_dir().join(format!("trace_warm_test_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
     std::fs::write(
         root.join("main.c"),
         "#include \"good.h\"\nvoid main_fn(void) {}\n",
@@ -511,9 +506,8 @@ fn macro_warm_preprocess_failure_is_nonfatal() {
     perms.set_mode(0o000);
     std::fs::set_permissions(&bad, perms).unwrap();
 
-    let program = build_program(&root, &PreprocessOptions::new()).expect("build continues");
+    let program = build_program(root, &PreprocessOptions::new()).expect("build continues");
     let _ = std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o644));
-    let _ = std::fs::remove_dir_all(&root);
     assert!(
         program.diagnostics.iter().any(|d| {
             d.stage == "preprocess" && d.message.contains("macro warm preprocess failed")
@@ -612,4 +606,184 @@ fn array_table_designated_init_resolves_targets() {
         ),
         "local designated-init array targets missing"
     );
+}
+
+/// One `(stage, severity, file path, line, message)` row per program diagnostic.
+fn diagnostic_rows(program: &trace_ir::Program) -> Vec<(String, String, String, u32, String)> {
+    program
+        .diagnostics
+        .iter()
+        .map(|d| {
+            let path = d
+                .file
+                .and_then(|f| program.symbols.files.get(f.0 as usize))
+                .map(|f| f.path.display().to_string())
+                .unwrap_or_default();
+            (
+                d.stage.clone(),
+                format!("{:?}", d.severity),
+                path,
+                d.line,
+                d.message.clone(),
+            )
+        })
+        .collect()
+}
+
+fn temp_root(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("trace_{tag}_"))
+        .tempdir()
+        .unwrap()
+}
+
+#[test]
+fn preprocess_diagnostics_reach_program_and_export() {
+    let dir = temp_root("preproc_diag");
+    let root = dir.path();
+    std::fs::write(
+        root.join("main.c"),
+        "int before;\n#include \"does_not_exist.h\"\n#frobnicate\nint main(void) { return 0; }\n",
+    )
+    .unwrap();
+
+    let program = build_program(root, &PreprocessOptions::new()).expect("build");
+    let rows = diagnostic_rows(&program);
+    let preproc: Vec<_> = rows.iter().filter(|r| r.0 == "preprocess").collect();
+    assert_eq!(preproc.len(), 2, "{rows:?}");
+    assert!(
+        preproc.iter().any(|r| r.1 == "Warning"
+            && r.2.ends_with("main.c")
+            && r.3 == 2
+            && r.4.contains("include file not found")
+            && r.4.contains("does_not_exist.h")),
+        "{rows:?}"
+    );
+    assert!(
+        preproc.iter().any(|r| r.1 == "Warning"
+            && r.2.ends_with("main.c")
+            && r.3 == 3
+            && r.4.contains("unknown directive #frobnicate")),
+        "{rows:?}"
+    );
+
+    let (pag, analysis) = analyze(&program);
+    let db = export_program(&program, &pag, &analysis);
+    let conn = open_db(db.path()).unwrap();
+    let exported: Vec<(String, String, i64, String)> = conn
+        .prepare(
+            "SELECT d.severity, f.path, d.line, d.message FROM diagnostics d \
+             JOIN files f ON f.id = d.file_id WHERE d.stage = 'preprocess' ORDER BY d.line",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(exported.len(), 2, "{exported:?}");
+    assert_eq!(exported[0].0, "warning");
+    assert!(exported[0].1.ends_with("main.c"), "{exported:?}");
+    assert_eq!(exported[0].2, 2);
+    assert!(exported[0].3.contains("does_not_exist.h"), "{exported:?}");
+    assert_eq!(exported[1].2, 3);
+    assert!(exported[1].3.contains("#frobnicate"), "{exported:?}");
+}
+
+#[test]
+fn preprocess_diagnostics_are_deduplicated_and_deterministic_across_jobs() {
+    let dir = temp_root("preproc_diag_dedup");
+    let root = dir.path();
+    std::fs::write(
+        root.join("common.h"),
+        "#include \"missing_in_header.h\"\n#common_directive\nvoid helper(void);\n",
+    )
+    .unwrap();
+    for tu in ["a.c", "b.c", "c.c"] {
+        std::fs::write(
+            root.join(tu),
+            format!(
+                "#include \"common.h\"\n#{}_directive\nvoid {}_fn(void) {{ helper(); }}\n",
+                &tu[..1],
+                &tu[..1],
+            ),
+        )
+        .unwrap();
+    }
+
+    let mut baseline = None;
+    for jobs in [1, 4] {
+        let program = trace_parse::build_program_with_jobs(root, &PreprocessOptions::new(), jobs)
+            .expect("build");
+        let mut rows = diagnostic_rows(&program);
+        rows.sort();
+        let hits: Vec<_> = rows
+            .iter()
+            .filter(|r| r.0 == "preprocess" && r.4.contains("missing_in_header.h"))
+            .collect();
+        assert_eq!(hits.len(), 1, "jobs={jobs}: {rows:?}");
+        assert!(hits[0].2.ends_with("common.h"), "jobs={jobs}: {rows:?}");
+        assert_eq!(hits[0].3, 1, "jobs={jobs}: {rows:?}");
+        assert_eq!(hits[0].1, "Warning", "jobs={jobs}: {rows:?}");
+        assert_eq!(rows.len(), 5, "jobs={jobs}: {rows:?}");
+        assert!(
+            rows.iter().all(|r| r.0 == "preprocess"),
+            "jobs={jobs}: {rows:?}"
+        );
+
+        if let Some(expected) = &baseline {
+            assert_eq!(&rows, expected, "diagnostics changed with jobs={jobs}");
+        } else {
+            baseline = Some(rows);
+        }
+    }
+}
+
+#[test]
+fn unterminated_if_fixture_exports_preprocess_error() {
+    let root = fixture("preproc");
+    let program = build_program(&root, &PreprocessOptions::new()).expect("build");
+    let rows = diagnostic_rows(&program);
+    let hits: Vec<_> = rows
+        .iter()
+        .filter(|r| r.0 == "preprocess" && r.4.contains("unterminated #if"))
+        .collect();
+    assert_eq!(hits.len(), 1, "{rows:?}");
+    assert_eq!(hits[0].1, "Error", "{rows:?}");
+    assert!(hits[0].2.ends_with("unterminated_if_header.h"), "{rows:?}");
+    assert_eq!(hits[0].3, 1, "{rows:?}");
+}
+
+#[test]
+fn preprocess_diagnostics_survive_second_language_warm() {
+    // `shared.h` is reached from a C and a C++ unit, so the warm pass runs
+    // it under both languages but caches only one. In C++ the `#frobnicate`
+    // line is inside a raw string literal; in C it is an unknown directive.
+    // That C-only diagnostic must still reach the program.
+    let dir = temp_root("preproc_diag_two_langs");
+    let root = dir.path();
+    std::fs::write(
+        root.join("shared.h"),
+        "const char *s = R\"(\n#frobnicate\n)\";\nvoid helper(void);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("a.c"),
+        "#include \"shared.h\"\nvoid a_fn(void) {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("b.cpp"),
+        "#include \"shared.h\"\nvoid b_fn() {}\n",
+    )
+    .unwrap();
+
+    let program = build_program(root, &PreprocessOptions::new()).expect("build");
+    let rows = diagnostic_rows(&program);
+    let hits: Vec<_> = rows
+        .iter()
+        .filter(|r| r.0 == "preprocess" && r.4.contains("frobnicate"))
+        .collect();
+    assert_eq!(hits.len(), 1, "{rows:?}");
+    assert!(hits[0].2.ends_with("shared.h"), "{rows:?}");
+    assert_eq!(hits[0].3, 2, "{rows:?}");
 }

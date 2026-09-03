@@ -51,9 +51,6 @@ pub fn merge_unit_symbols(program: &mut Program, unit: &UnitIndex) {
 }
 
 fn merge_unit(program: &mut Program, unit: &UnitIndex, mode: MergeMode) {
-    if matches!(mode, MergeMode::Full) {
-        program.diagnostics.extend(unit.diagnostics.iter().cloned());
-    }
     program.anon_type_counter = program.anon_type_counter.max(unit.anon_type_counter);
     for (derived, base) in &unit.inheritance {
         program.add_inheritance(derived, base);
@@ -82,6 +79,24 @@ fn merge_unit(program: &mut Program, unit: &UnitIndex, mode: MergeMode) {
             .copied()
             .unwrap_or(primary_file_id)
     };
+
+    if matches!(mode, MergeMode::Full) {
+        for diagnostic in &unit.diagnostics {
+            let diagnostic = trace_ir::Diagnostic {
+                file: diagnostic.file.map(map_file),
+                ..diagnostic.clone()
+            };
+            if diagnostic.stage != "preprocess"
+                || program.dedup.insert_preprocess_diagnostic(
+                    diagnostic.file,
+                    diagnostic.line,
+                    &diagnostic.message,
+                )
+            {
+                program.diagnostics.push(diagnostic);
+            }
+        }
+    }
 
     if matches!(mode, MergeMode::TypesOnly) {
         return;

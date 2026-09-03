@@ -508,7 +508,9 @@ Primary key: `(var_node_id, loc_id)`.
 
 ### `diagnostics`
 
-Preprocessor, parse, and analysis messages.
+Preprocessor, parse, and analysis messages. `preprocess` rows carry the preprocessor's own
+severity and point at the file and line where the condition occurred (a nested header, not the
+including translation unit); one row per distinct `(file, line, message)`.
 
 | Column | Type | Description |
 |--------|------|-------------|

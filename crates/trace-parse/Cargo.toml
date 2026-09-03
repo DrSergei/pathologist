@@ -15,3 +15,6 @@ walkdir.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
 tree-sitter-cpp = "0.23"
+
+[dev-dependencies]
+tempfile.workspace = true

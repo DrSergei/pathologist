@@ -2,6 +2,9 @@
 //! from an exported database, plus end-to-end binary runs.
 
 use std::path::PathBuf;
+mod common;
+
+use common::TempDb;
 use std::process::Command;
 use trace_analysis::analyze;
 use trace_db::{
@@ -17,21 +20,7 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn unique_db(name: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!(
-        "trace_inspect_{name}_{}_{n}_{nanos}.db",
-        std::process::id()
-    ))
-}
-
-fn build_and_export(name: &str) -> PathBuf {
+fn build_and_export(name: &str) -> TempDb {
     let root = fixture(name);
     let opts = PreprocessOptions::new()
         .with_include(root.clone())
@@ -40,14 +29,13 @@ fn build_and_export(name: &str) -> PathBuf {
         );
     let program = build_program(&root, &opts).expect("build program");
     let (pag, analysis) = analyze(&program);
-    let out = unique_db(name);
-    let _ = std::fs::remove_file(&out);
+    let out = TempDb::new(&format!("{name}.db"));
     export_to_sqlite(
         &program,
         &pag,
         &analysis,
         &ExportOptions {
-            output: out.clone(),
+            output: out.to_path_buf(),
             include_points_to: false,
             full_detail: false,
             model_files: Vec::new(),
@@ -97,7 +85,6 @@ fn function_line_ranges_exported() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(rows, vec![("helper".into(), 1, 3), ("caller".into(), 5, 7)]);
-    let _ = std::fs::remove_file(db);
 }
 
 #[test]
@@ -128,7 +115,6 @@ fn callgraph_down_from_containing_line() {
     let up = call_graph(&conn, helper_id, Direction::Up, 3).unwrap();
     assert_eq!(up.order.len(), 2);
     assert!(up.order.iter().any(|&(id, _)| id == start.id));
-    let _ = std::fs::remove_file(db);
 }
 
 #[test]
@@ -159,7 +145,6 @@ fn indirect_call_up_edges_are_labeled_indirect() {
     let up = call_graph(&conn, target_id, Direction::Up, 5).unwrap();
     assert_eq!(fn_names(&up), vec!["target", "run"]);
     assert!(up.edges.iter().any(|e| e.label == "indirect"));
-    let _ = std::fs::remove_file(db);
 }
 
 #[test]
@@ -198,7 +183,6 @@ fn dataflow_param_flows_to_callee_formal() {
         reached_up.contains(&"v".to_string()),
         "actual v must be reachable backwards from p; got {reached_up:?}"
     );
-    let _ = std::fs::remove_file(db);
 }
 
 #[test]
@@ -243,14 +227,12 @@ fn dataflow_indirect_call_param_and_fn_value() {
         "function value target must flow into fp; got {:?}",
         visited_names(&conn, &up)
     );
-    let _ = std::fs::remove_file(db);
 }
 
 #[test]
 fn end_to_end_binary_inspect_commands() {
     let bin = env!("CARGO_BIN_EXE_trace");
-    let tmp = std::env::temp_dir().join(format!("trace_e2e_{}.db", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
+    let tmp = TempDb::new("trace_e2e.db");
 
     // Analyze the fixture with the real binary.
     let out = Command::new(bin)
@@ -363,8 +345,6 @@ fn end_to_end_binary_inspect_commands() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no function contains"), "{stderr}");
-
-    let _ = std::fs::remove_file(tmp);
 }
 
 #[test]
@@ -376,14 +356,12 @@ fn direct_fixture_still_resolves() {
     assert_eq!(hits[0].name, "main");
     let g = call_graph(&conn, hits[0].id, Direction::Down, 3).unwrap();
     assert_eq!(g.order.len(), 2, "main -> helper");
-    let _ = std::fs::remove_file(db);
 }
 
 #[test]
 fn inspect_calls_matches_cpp_qualified_suffix() {
     let bin = env!("CARGO_BIN_EXE_trace");
-    let tmp = std::env::temp_dir().join(format!("trace_inspect_suffix_{}.db", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
+    let tmp = TempDb::new("trace_inspect_suffix.db");
     let out = Command::new(bin)
         .args([
             "analyze",
@@ -440,14 +418,12 @@ fn inspect_calls_matches_cpp_qualified_suffix() {
         stdout.contains("Plugin::OnEventProxy") && stdout.contains("Plugin::OnEvent"),
         "--from OnEventProxy should list implicit this->OnEvent, got:\n{stdout}"
     );
-    let _ = std::fs::remove_file(tmp);
 }
 
 #[test]
 fn inspect_calls_like_wildcards_are_literal() {
     let bin = env!("CARGO_BIN_EXE_trace");
-    let tmp = std::env::temp_dir().join(format!("trace_inspect_like_{}.db", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
+    let tmp = TempDb::new("trace_inspect_like.db");
     let out = Command::new(bin)
         .args([
             "analyze",
@@ -498,5 +474,4 @@ fn inspect_calls_like_wildcards_are_literal() {
         stdout.contains("ns::foo_bar") && stdout.contains("-> ns::foo ["),
         "--from foo_bar should match ns::foo_bar -> ns::foo, got:\n{stdout}"
     );
-    let _ = std::fs::remove_file(tmp);
 }

@@ -41,8 +41,8 @@ fn export_sqlite_roundtrip() {
     let program = build_program(&root, &opts).unwrap();
     let (pag, analysis) = analyze(&program);
 
-    let out = std::env::temp_dir().join(format!("trace_test_{}.db", std::process::id()));
-    let _ = std::fs::remove_file(&out);
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("trace_test.db");
     export_to_sqlite(
         &program,
         &pag,
@@ -61,7 +61,6 @@ fn export_sqlite_roundtrip() {
         .query_row("SELECT COUNT(*) FROM call_edges", [], |r| r.get(0))
         .unwrap();
     assert!(count >= 1);
-    let _ = std::fs::remove_file(out);
 }
 
 #[test]

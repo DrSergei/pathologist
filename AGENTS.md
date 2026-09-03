@@ -72,6 +72,7 @@ Register external function summaries in `trace-analysis/src/summaries.rs`. Docum
 - Integration fixtures in `tests/fixtures/<name>/`
 - Each fixture: `*.c` sources + optional `expected.json` metadata
 - Run: `cargo test --workspace`
+- Tests that need a scratch tree or a scratch SQLite file use `tempfile` (`tempfile::tempdir()`, or `common::TempDb` in `trace-cli` integration tests): the directory is removed when the value drops, on a failed assertion too, so no PID-suffixed paths and no manual `remove_dir_all`
 - Eval corpora (OpenHarmony trees pinned by revision in `scripts/eval_expected.json`): `python3 scripts/fetch_corpora.py` once, then `python3 scripts/eval_check.py`; re-capture the expectations when a change legitimately moves the counts
 
 ## Do not

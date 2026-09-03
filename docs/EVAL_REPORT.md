@@ -42,7 +42,8 @@ at the pinned checkouts with the master (`24e093f`) and post-fix binaries. The t
 **metric-identical** — every global, every hub target set, every diagnostic count — so
 `scripts/eval_expected.json` and the tables below are untouched by this change and
 `scripts/eval_check.py` still passes **67/67**. That is the expected result rather than a weak
-one: `trace analyze` does not export preprocessor diagnostics, so the absence of a new
+one: `trace analyze` did not export preprocessor diagnostics at the time (fixed by #20, see the
+2026-09-03 block below), so the absence of a new
 `unterminated #if` error was checked directly against the sources instead. Every C/C++ file in
 the three checkouts was scanned (comments and string/char literals stripped, line continuations
 joined) for a mismatch between its `#if`/`#ifdef`/`#ifndef` count and its `#endif` count:
@@ -146,6 +147,45 @@ suffix inside its literal token (`R"(json)"_json` used to come out as `R"(json)"
 no longer a user-defined literal): 67/67 and metric-identical, since none of the three corpora
 uses a user-defined literal.
 
+**Re-verified 2026-09-03 (preprocessor diagnostics exported, #20):** all three corpora were
+re-analyzed at the pinned checkouts with the master (`9d15520`, i.e. with #14 merged) and post-fix
+binaries. Master scores **67/67** against its own `eval_expected.json` on this machine. The
+post-fix binary moves exactly one metric per corpus, `diagnostics`, and nothing else — every
+global, every hub target set, the `parse`-stage rows (182 / 37 / 91) and the parse-failure file
+sets are unchanged, so `docs/PARSE_FAILURES.md` is untouched. `trace analyze` used to drop
+`PreprocessResult::diagnostics` on the floor (the index cache kept only the text, the LineMap and
+the included headers); it now forwards each one as a `stage = 'preprocess'` row with the
+preprocessor's severity, the originating file and line, deduplicated on `(file, line, message)`
+because a header's condition is reproduced by every translation unit that expands it inline. A
+header reached from both C and C++ units is warmed under both lexers but cached in one (#14);
+review found the other run's diagnostics were discarded with its text, so they are now forwarded
+from the warm pass too — none of the three corpora has a shared header whose report differs by
+lexer, so that part moves no number here and is carried by the
+`preprocess_diagnostics_survive_second_language_warm` regression test. The new rows:
+
+| Corpus | `diagnostics` | `preprocess` rows | Of which |
+|--------|--------------:|------------------:|----------|
+| hdf    | 182 → 1,777 | 1,595 in 622 files | 1,592 `include file not found` (233× `securec.h`, 66× `<string>`, 63× `gtest/gtest.h`, 60× `unistd.h`, …), 3 `unknown directive` |
+| hiview | 37 → 2,964 | 2,927 in 1,010 files | 2,925 `include file not found` (429× `<string>`, 189× `<memory>`, 174× `<vector>`, 143× `gtest/gtest.h`, …), 2 `unknown directive` |
+| camera | 91 → 4,794 | 4,703 in 1,166 files | all `include file not found` (243× `<cstdint>`, 202× `<memory>`, 172× `gtest/gtest.h`, 141× `<mutex>`, 136× `ipc_skeleton.h`, …) |
+
+All of it is warnings, and nearly all of it is the expected no-sysroot signal: system, libstdc++,
+`securec` and gtest headers are not in the checkouts, so each `#include` of one is reported once
+per including file and line. Every row has a `file_id` inside its corpus; no row is a duplicate.
+Measured on the pre-#14 tree, hiview additionally showed three `error` rows
+(`expected directive name after #`, each followed by a `preprocess stopped in …` warning) in
+`utility_common_utils_test.cpp:232`, `cpp_crash_unittest.cpp:55` and `syswarning_unittest.cpp:57`:
+a multi-line raw-string literal whose next line starts with `#04 pc …`, which the old lexer handed
+to the preprocessor as a directive. With #14 merged those six rows are gone, which is the first
+time that fix is visible in the `diagnostics` table rather than only in the parse counts. The
+counts reproduced exactly across repeated runs of the post-fix binary, as the design intends (the
+row set is fixed by the sequential warm pass plus the dedup, not by scheduling), so
+`scripts/eval_expected.json` `diagnostics` values are re-captured to 1,777 / 2,964 / 4,794 and
+`eval_check.py` is back to **67/67 PASS**. Every fixture directory under `tests/fixtures/` was
+also analyzed with both binaries: 62 of 72 exports are identical (the `analysis_run` timestamp
+excluded) and the other 10 differ only by the new `diagnostics` rows, see
+`docs/INSPECT_REPORT.md`.
+
 Performance was re-measured with the current binary (fresh runs, `--jobs 8`; stage timers
 are stable, wall-clock varies with cache so values are rounded).
 
@@ -177,6 +217,7 @@ C++ fixture coverage (`cpp_basic`, `cpp_dispatch`, `cpp_callable`, `cpp_flow`, �
 | Direct / indirect / external | 37,427 / **4,643** / 30,100 |
 | Arg-flow edges | 63,471 |
 | Parse warnings | 182 |
+| Preprocess diagnostics | 1,595 |
 | `dlsym` PAG edges | 4 |
 
 Sequential warm, then **wave-parallel PCH** (626 headers). Nested merge is **types/typedefs** from **direct** includes plus this header's preprocess `included_headers` (child units already nested-merged grandchild types). Each TU merges **symbols** from every include-graph-reachable header plus preprocess `included_headers`. After warm, preprocess `included_headers` are added as include-graph edges so a header is never PCH'd in the same wave as a nested type the raw `#include` scanner missed; headers that become reachable only then move from the orphan path into PCH. Include-graph **cycles** are indexed in order, not as a parallel leftover wave. That was the `DeviceNodeExtDispatch` 73→72 drop (`DispatchToMessage`): `hdf_wifi_core.c` designated `.object.objectId = 1, .Dispatch = DispatchToMessage` needs a complete `struct HdfObject` prefix inside `IDeviceIoService`. Parallel leaves used to intern that nested tag empty; sequential path-sort happened to PCH `hdf_object.h` first. With preprocess edges, waves keep all 73 names (including `DispatchToMessage`). `pch-done` 0.2s vs 1.0s sequential. Index also keeps a named-tag → richest-`TypeId` map (no scan of `types[]` on every intern), shares file/preprocessed text as `Arc<str>`, caches `canonicalize`, and builds each TU's header preamble from one PCH topo order (no per-TU Kahn sort or recanonicalize of graph keys).
@@ -1656,6 +1697,7 @@ Same 13 drivers as case 48, `Set*Disable` stores. Complete vs source.
 | Direct / indirect / external | 7,791 / **24** / 20,472 |
 | Arg-flow edges | 9,243 |
 | Parse warnings | 37 |
+| Preprocess diagnostics | 2,927 |
 | `dlsym` PAG edges | 1 |
 
 The tree previously aborted with a preprocessor stack overflow on `PRIVATE_MESSAGE_TYPE`. Hide-set painting is what makes it finish. The **24** indirect edges include `$lambda` / JSON accessors and C++ overload record splits; production dispatch is recovered as **direct** CHA edges. On this corpus the phantom-bare-stub count fell ~500 records (~3,959 → ~3,740 external), **direct** free-function edges rose ~1,900, arg-flow edges rose with them, and garbage `externalLogJson` indirect sites disappeared — dispatch-site correctness invariants are unchanged. The edge totals above also carry the expansion-site attribution fix shipped with #13 (+147 call edges, +70 arg-flow): macro-generated call sites are keyed by their invocation, so sites that used to collide on shared `#define` coordinates now survive merge dedup. Function counts, the **24** indirect edges and the diagnostics are unaffected by it. The raw-string lexer fix (#14) then moved the parse warnings **57 → 37** and, through the 20 files that now parse, +212 call edges, +136 arg-flow edges and +45 defined functions (see the `#14` block at the top).
@@ -2067,6 +2109,7 @@ Hang / stack-overflow checks, not dispatch-hub evals. PCH-style header IR is wha
 | Direct / indirect / external | 19,513 / **109** / 53,307 |
 | Arg-flow edges | 17,334 |
 | Parse warnings | 91 |
+| Preprocess diagnostics | 4,703 |
 
 Completes. The **109** indirect edges are almost all fuzzer `FuzzedDataProvider` calls; production dispatch is recovered as **direct** CHA. The rise in direct / arg-flow edges vs the previous snapshot is the same C++ name-lookup improvement — namespace-qualified header prototypes; ADL / `using` resolution for unqualified calls — not a resolution loss — every case target above is unchanged. The **external** total additionally reflects the expansion-site attribution fix shipped with #13 (+8,416 external edges): macro-generated call sites are keyed by their invocation instead of their `#define`, so sites that previously collided are no longer merged away. Function counts, the **109** indirect edges and the diagnostics are unaffected by it; the raw-string lexer fix (#14) later took the parse warnings **93 → 91** without moving anything else here.
 
