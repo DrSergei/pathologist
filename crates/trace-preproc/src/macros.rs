@@ -17,6 +17,15 @@ pub enum MacroDef {
         /// argument; substitute_macro debug_asserts it.
         variadic: bool,
     },
+    /// Last-resort parser recovery for a gMock declaration macro
+    /// (`MOCK_METHOD`, `MOCK_METHODn`, `MOCK_CONST_METHODn`, `…_T`): the
+    /// invocation becomes the member prototype it declares. A replacement
+    /// list cannot express this — the legacy forms carry the whole
+    /// signature in one argument and the modern form parenthesizes
+    /// comma-containing return types — so the preprocessor expands it in
+    /// code (`expand_gmock_method`). Only the builtin fallback table
+    /// creates one.
+    GmockMethod,
 }
 
 impl MacroDef {
@@ -45,6 +54,7 @@ impl MacroDef {
                 replacement: relex(replacement),
                 variadic: *variadic,
             },
+            MacroDef::GmockMethod => MacroDef::GmockMethod,
         }
     }
 }
@@ -103,6 +113,7 @@ mod tests {
             MacroDef::Object { replacement } | MacroDef::Function { replacement, .. } => {
                 replacement.iter().map(|t| t.kind.clone()).collect()
             }
+            MacroDef::GmockMethod => Vec::new(),
         }
     }
 

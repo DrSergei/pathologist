@@ -43,6 +43,7 @@ tests/fixtures/
   hpp_designated_dispatch/     C++ fn-ptr indirect dispatch
   arg_flow/                    Argument flow from actuals to formals
   preproc/                     Preprocessor directive fixtures
+  builtin_macros/              Builtin fallback macros (HWTEST, gMock, kernel)
   ...
 ```
 
@@ -86,7 +87,8 @@ Then follow the steps in `AGENTS.md` ("Adding analysis constraints" section).
   and `docs/SQLITE_SCHEMA.md`. Document the schema version bump in `README.md`.
 - **Preprocessor** — document the new directive or feature in
   `docs/PREPROCESSOR.md`, add lexer tests, and add a fixture under
-  `tests/fixtures/preproc/`.
+  `tests/fixtures/preproc/` — or under `tests/fixtures/builtin_macros/` when
+  the feature is a builtin fallback macro, whose fixtures are grouped there.
 - **Flow constraints** — document the new kind in `docs/ANALYSIS.md` and
   update the phase table if applicable.
 

@@ -1,5 +1,5 @@
 {
-  "note": "Regression expectations for scripts/eval_check.py. Each corpus pins repo + rev (commit SHA) and its checkout dir under the corpus base (~ by default, or $TRACE_CORPUS_BASE / --corpus-base); scripts/fetch_corpora.py checks the pinned revisions out and eval_check.py refuses a checkout at any other revision. 'exact' must match; 'band' compares abs(actual-expected) <= N; 'min' requires actual >= N. Site checks count distinct callee NAMES at one dispatch call_site (caller name LIKE, line). Values were re-captured 2026-09-03 on top of 9d15520 ('Lex C++11 raw string literals and prefixed/user-defined literals as one token', #14/#24) after the file-scoped conditional fence, `#` stringize, and preprocessor-diagnostics export fixes (#8, #13, #20) at the pinned revisions (see docs/EVAL_REPORT.md); bulk function/edge totals drift a little run-to-run (parallel index), correctness numbers do not. The large hdf/camera edge growth is the expansion-site LineMap attribution fix shipped with #13: call sites are deduped on (file, line, col, callee), so macro-expanded sites that used to collide on their #define coordinates are now distinct.",
+  "note": "Regression expectations for scripts/eval_check.py. Each corpus pins repo + rev (commit SHA) and its checkout dir under the corpus base (~ by default, or $TRACE_CORPUS_BASE / --corpus-base); scripts/fetch_corpora.py checks the pinned revisions out and eval_check.py refuses a checkout at any other revision. 'exact' must match; 'band' compares abs(actual-expected) <= N; 'min' requires actual >= N. Site checks count distinct callee NAMES at one dispatch call_site (caller name LIKE, line). Values were re-captured 2026-09-04 on top of 168e643 ('Export preprocessor diagnostics', #20) for the gMock declaration fallbacks (#15), which move the camera corpus only; the hdf and hiview values still stand from the 2026-09-03 capture on 9d15520 ('Lex C++11 raw string literals and prefixed/user-defined literals as one token', #14/#24), after the file-scoped conditional fence, `#` stringize, and preprocessor-diagnostics export fixes (#8, #13, #20) at the pinned revisions (see docs/EVAL_REPORT.md); bulk function/edge totals drift a little run-to-run (parallel index), correctness numbers do not. The large hdf/camera edge growth is the expansion-site LineMap attribution fix shipped with #13: call sites are deduped on (file, line, col, callee), so macro-expanded sites that used to collide on their #define coordinates are now distinct.",
   "budget_pops": 800000,
   "jobs": 8,
   "corpora": {
@@ -79,22 +79,22 @@
       "dir": "multimedia_camera_framework",
       "globals": {
         "files": {"cmp": "exact", "value": 1593},
-        "functions_total": {"cmp": "band", "value": 25771, "tol": 120},
+        "functions_total": {"cmp": "band", "value": 25885, "tol": 120},
         "functions_defined": {"cmp": "band", "value": 18964, "tol": 120},
-        "functions_external": {"cmp": "band", "value": 6807, "tol": 120},
-        "edges_total": {"cmp": "band", "value": 72929, "tol": 420},
-        "edges_direct": {"cmp": "band", "value": 19513, "tol": 420},
+        "functions_external": {"cmp": "band", "value": 6921, "tol": 120},
+        "edges_total": {"cmp": "band", "value": 73053, "tol": 420},
+        "edges_direct": {"cmp": "band", "value": 19503, "tol": 420},
         "edges_indirect": {"cmp": "exact", "value": 109},
-        "edges_external": {"cmp": "band", "value": 53307, "tol": 420},
+        "edges_external": {"cmp": "band", "value": 53441, "tol": 420},
         "arg_flow_edges": {"cmp": "band", "value": 17334, "tol": 250},
-        "diagnostics": {"cmp": "exact", "value": 4794},
+        "diagnostics": {"cmp": "exact", "value": 4776},
         "dlsym_edges": {"cmp": "exact", "value": 0}
       },
       "sites": [
         {"case": "Command::Do GetCommandName", "caller": "%DeferredProcessing::Command::Do", "line": 35, "resolution": "all", "expected": 31},
         {"case": "Command::Do Executing", "caller": "%DeferredProcessing::Command::Do", "line": 37, "resolution": "all", "expected": 30},
         {"case": "CFilter::PrepareDone DoPrepare", "caller": "%CFilter::PrepareDone", "line": 101, "resolution": "all", "expected": 18},
-        {"case": "Pipeline::LinkFilters LinkNext", "caller": "%Pipeline::LinkFilters", "line": 243, "resolution": "all", "expected": 18},
+        {"case": "Pipeline::LinkFilters LinkNext", "caller": "%Pipeline::LinkFilters", "line": 243, "resolution": "all", "expected": 23},
         {"case": "CaptureSession::AddOutput CanAddOutput", "caller": "%CaptureSession::AddOutput", "line": 1272, "resolution": "all", "expected": 19}
       ],
       "probes": [

@@ -863,11 +863,7 @@ impl PreprocessorState {
                     if !tok.is_hidden(name) {
                         if let Some(macro_def) = self.macros.get(name).cloned() {
                             match macro_def {
-                                MacroDef::Function {
-                                    params,
-                                    replacement,
-                                    variadic,
-                                } => {
+                                MacroDef::Function { .. } | MacroDef::GmockMethod => {
                                     if self.next_non_newline_is(tokens, i + 1, "(") {
                                         if !self.push_expansion(tok.line) {
                                             self.emit_token(tok);
@@ -882,15 +878,9 @@ impl PreprocessorState {
                                                 return Err(e);
                                             }
                                         };
-                                        let expanded = apply_concatenation(substitute_macro(
-                                            name,
-                                            tok,
-                                            &replacement,
-                                            &params,
-                                            &args,
-                                            variadic,
-                                        ));
-                                        let r = self.process_tokens(&expanded);
+                                        let r = self
+                                            .expand_invocation(name, tok, &macro_def, &args)
+                                            .and_then(|expanded| self.process_tokens(&expanded));
                                         self.pop_expansion();
                                         r?;
                                         continue;
@@ -969,11 +959,9 @@ impl PreprocessorState {
                             // nested definitions like
                             // `#define A SHARED_OBJ(T)` leak `SHARED_OBJ(T)`
                             // verbatim into the output.
-                            Some(MacroDef::Function {
-                                params,
-                                replacement,
-                                variadic,
-                            }) if self.next_non_newline_is(tokens, i + 1, "(") => {
+                            Some(
+                                macro_def @ (MacroDef::Function { .. } | MacroDef::GmockMethod),
+                            ) if self.next_non_newline_is(tokens, i + 1, "(") => {
                                 if !self.push_expansion(tok.line) {
                                     self.emit_token(tok);
                                     i += 1;
@@ -987,21 +975,17 @@ impl PreprocessorState {
                                         return Err(e);
                                     }
                                 };
-                                let expanded = apply_concatenation(substitute_macro(
-                                    name,
-                                    tok,
-                                    &replacement,
-                                    &params,
-                                    &args,
-                                    variadic,
-                                ));
-                                let r = self.expand_tokens_no_directives(&expanded);
+                                let r = self
+                                    .expand_invocation(name, tok, &macro_def, &args)
+                                    .and_then(|expanded| {
+                                        self.expand_tokens_no_directives(&expanded)
+                                    });
                                 self.pop_expansion();
                                 r?;
                                 i = j;
                                 continue;
                             }
-                            Some(MacroDef::Function { .. }) | None => {}
+                            Some(MacroDef::Function { .. } | MacroDef::GmockMethod) | None => {}
                         }
                     }
                 }
@@ -1146,7 +1130,7 @@ impl PreprocessorState {
             {
                 end += 1;
             }
-            let expanded = self.expand_include_operand(&tokens[i..end])?;
+            let expanded = self.expand_operand_tokens(&tokens[i..end])?;
             match parse_include_header(&expanded) {
                 Some(p) => p,
                 None => {
@@ -1188,11 +1172,23 @@ impl PreprocessorState {
         Ok(i)
     }
 
-    /// Macro-expand tokens on a `#include` line until they form a header-name.
-    fn expand_include_operand(&mut self, tokens: &[Token]) -> Result<Vec<Token>, PreprocessError> {
+    /// Macro-expand a token run into a new vector, rather than into the
+    /// output. Used where the result is read structurally instead of being
+    /// rescanned in place: a `#include` operand assembled into a header-name,
+    /// and a gMock invocation's arguments (`expand_gmock_args`).
+    fn expand_operand_tokens(&mut self, tokens: &[Token]) -> Result<Vec<Token>, PreprocessError> {
         let mut out = Vec::new();
         let mut i = 0;
         while i < tokens.len() {
+            // The expansion budget the emitting path charges per token, on
+            // the same counter: this one builds a vector instead of writing
+            // to the output, so nothing else would bound its width. Every
+            // token an expansion produces is walked by an iteration here
+            // (recursion included), so charging the iteration bounds the
+            // whole prescan. Unbudgeted, an expansion bomb reached through a
+            // gMock argument allocated gigabytes before the emitting path
+            // ever saw its first token.
+            self.check_resource_limits(tokens[i].line)?;
             if matches!(tokens[i].kind, TokenKind::Newline | TokenKind::Eof) {
                 i += 1;
                 continue;
@@ -1220,16 +1216,18 @@ impl PreprocessorState {
                         continue;
                     }
                     let painted = Self::paint_replacement(&replacement, &tokens[i], name);
-                    let nested = self.expand_include_operand(&painted)?;
+                    // Every exit from an expansion pops it: an operand that
+                    // stops mid-expansion is warned about and the enclosing
+                    // file continues, so a leaked level would shrink the
+                    // depth budget for the rest of the unit.
+                    let nested = self.expand_operand_tokens(&painted);
                     self.pop_expansion();
-                    out.extend(nested);
+                    out.extend(nested?);
                     i += 1;
                 }
-                MacroDef::Function {
-                    params,
-                    replacement,
-                    variadic,
-                } if self.next_non_newline_is(tokens, i + 1, "(") => {
+                MacroDef::Function { .. } | MacroDef::GmockMethod
+                    if self.next_non_newline_is(tokens, i + 1, "(") =>
+                {
                     if !self.push_expansion(tokens[i].line) {
                         out.push(tokens[i].clone());
                         i += 1;
@@ -1237,26 +1235,14 @@ impl PreprocessorState {
                     }
                     let origin = tokens[i].clone();
                     i += 1;
-                    let args = match self.parse_macro_args(tokens, &mut i) {
-                        Ok(a) => a,
-                        Err(e) => {
-                            self.pop_expansion();
-                            return Err(e);
-                        }
-                    };
-                    let expanded = apply_concatenation(substitute_macro(
-                        name,
-                        &origin,
-                        &replacement,
-                        &params,
-                        &args,
-                        variadic,
-                    ));
-                    let nested = self.expand_include_operand(&expanded)?;
+                    let nested = self.parse_macro_args(tokens, &mut i).and_then(|args| {
+                        let expanded = self.expand_invocation(name, &origin, &def, &args)?;
+                        self.expand_operand_tokens(&expanded)
+                    });
                     self.pop_expansion();
-                    out.extend(nested);
+                    out.extend(nested?);
                 }
-                MacroDef::Function { .. } => {
+                MacroDef::Function { .. } | MacroDef::GmockMethod => {
                     out.push(tokens[i].clone());
                     i += 1;
                 }
@@ -1676,7 +1662,7 @@ impl PreprocessorState {
                                 continue; // rescan at i
                             }
                         }
-                        None => {}
+                        Some(MacroDef::GmockMethod) | None => {}
                     }
                 }
             }
@@ -1885,6 +1871,524 @@ impl MacroArgs {
             out.extend(arg.iter().cloned());
         }
         out
+    }
+}
+
+impl PreprocessorState {
+    /// One function-like invocation's replacement tokens, before rescanning.
+    fn expand_invocation(
+        &mut self,
+        macro_name: &str,
+        origin: &Token,
+        def: &MacroDef,
+        args: &MacroArgs,
+    ) -> Result<Vec<Token>, PreprocessError> {
+        Ok(match def {
+            MacroDef::Function {
+                params,
+                replacement,
+                variadic,
+            } => apply_concatenation(substitute_macro(
+                macro_name,
+                origin,
+                replacement,
+                params,
+                args,
+                *variadic,
+            )),
+            MacroDef::GmockMethod => {
+                let args = self.expand_gmock_args(args)?;
+                let expanded = expand_gmock_method(macro_name, origin, &args);
+                // The expansion promotes argument tokens into the declaration
+                // itself, so a member named after any macro in the family —
+                // not only the one being expanded — would be rescanned as a
+                // fresh invocation and eaten. `expand_gmock_method` hides the
+                // macro it expands; the rest of the family is hidden here,
+                // where the table is in reach.
+                expanded
+                    .into_iter()
+                    .map(|t| {
+                        let gmock_name = match &t.kind {
+                            TokenKind::Identifier(n) => {
+                                matches!(self.macros.get(n.as_str()), Some(MacroDef::GmockMethod))
+                                    .then(|| n.clone())
+                            }
+                            _ => None,
+                        };
+                        match gmock_name {
+                            Some(n) => t.with_macro_hide(origin, &n),
+                            None => t,
+                        }
+                    })
+                    .collect()
+            }
+            // Callers dispatch object-like macros before parsing arguments;
+            // the preprocessor never panics on input, so expand it as one
+            // anyway.
+            MacroDef::Object { replacement } => {
+                Self::paint_replacement(replacement, origin, macro_name)
+            }
+        })
+    }
+
+    /// A gMock invocation's arguments, macro-expanded before they are read.
+    ///
+    /// Every other macro substitutes its arguments and leaves them to the
+    /// rescan, but a gMock invocation is read *structurally* — split at a
+    /// parameter list, unwrapped of gMock's protecting parentheses — and an
+    /// alias hides that structure from every one of those tests. `#define RET
+    /// (std::pair<int, int>)` is one identifier until it is expanded, so its
+    /// protecting parentheses would otherwise survive into the declaration;
+    /// `#define PARAMS (int, int)` would look like no parameter list at all.
+    fn expand_gmock_args(&mut self, args: &MacroArgs) -> Result<MacroArgs, PreprocessError> {
+        let mut expanded = Vec::with_capacity(args.args.len());
+        for arg in &args.args {
+            expanded.push(self.expand_operand_tokens(arg)?);
+        }
+        Ok(MacroArgs {
+            args: expanded,
+            separators: args.separators.clone(),
+        })
+    }
+}
+
+/// Recover a gMock declaration macro as the member prototype it stands for.
+///
+/// Modern `MOCK_METHOD(ret, name, params[, specs])` carries the pieces
+/// separately. gMock requires one extra pair of parentheses around any
+/// comma-containing return or parameter type; C++ accepts neither, so both
+/// are unwrapped. Of the spec list only what C++ accepts on a declaration
+/// survives, spelled in C++'s order — `const`, the `ref(&)` / `ref(&&)`
+/// ref-qualifier, `noexcept` with its expression, then `override` / `final`;
+/// `Calltype(...)`, which has no declaration spelling, is dropped.
+///
+/// The arguments arrive already macro-expanded (`expand_gmock_args`): they
+/// are read structurally, and an alias would hide that structure.
+///
+/// The legacy families — `MOCK_METHODn`, `MOCK_CONST_METHODn` and their
+/// `_T` / `_WITH_CALLTYPE` spellings — carry one function-type argument,
+/// split at its parameter list; the leading call-type argument is dropped.
+///
+/// A return type that is itself a parenthesized declarator (`void (*)(int)`,
+/// `int (&)[4]`, `void (C::*)(int)`) cannot be re-spelled around a member
+/// name without full declarator surgery, so it degrades to `void`, keeping
+/// the member and its class; parentheses that open no declarator —
+/// `decltype(...)`, or a macro spelling a comma-containing type — keep their
+/// spelling and are expanded by the rescan. A malformed invocation expands to
+/// nothing rather than to a broken declaration.
+fn expand_gmock_method(macro_name: &str, origin: &Token, args: &MacroArgs) -> Vec<Token> {
+    let synth = |text: &str| {
+        let kind = if text.chars().all(char::is_alphabetic) {
+            TokenKind::Identifier(text.into())
+        } else {
+            TokenKind::Punct(text.into())
+        };
+        Token::new(kind, origin.line, origin.col).with_macro_hide(origin, macro_name)
+    };
+    let empty_params = || vec![synth("("), synth(")")];
+    let (ret, name, params, quals): (Vec<Token>, &[Token], Vec<Token>, Vec<Token>) =
+        if macro_name == "MOCK_METHOD" {
+            let (Some(ret), Some(name), Some(params)) = (
+                args.args.first().map(|a| trim_newlines(a)),
+                args.args.get(1).map(|a| trim_newlines(a)),
+                args.args.get(2).map(|a| trim_newlines(a)),
+            ) else {
+                return Vec::new();
+            };
+            // gMock spells the parameters as one parenthesized group. If they
+            // are not, the invocation is malformed (most likely an
+            // unparenthesized comma-containing type, which gMock rejects too)
+            // and any expansion of it would be a broken declaration.
+            if trailing_paren_group(params) != Some(0) {
+                return Vec::new();
+            }
+            // gMock spells the spec list as one parenthesized group, and
+            // only its top-level items are specifiers: an identifier nested
+            // in one of their argument lists belongs to an expression, not to
+            // the declaration — the `const` of
+            // `noexcept(is_nothrow<const T&>::value)` is part of the type it
+            // asks about, and `Calltype(final)` names a calling convention.
+            let spec = strip_outer_parens(trim_newlines(
+                args.args.get(3).map(Vec::as_slice).unwrap_or_default(),
+            ));
+            // Of the spec list only what C++ accepts on a declaration
+            // survives, spelled in the order C++ wants it: cv-qualifier,
+            // ref-qualifier, exception specification, virt-specifiers.
+            // `Calltype(...)` has no declaration spelling and is dropped.
+            let has = |q: &str| top_level_ident(spec, q).is_some();
+            let mut quals: Vec<Token> = Vec::new();
+            if has("const") {
+                quals.push(synth("const"));
+            }
+            // `ref(&)` / `ref(&&)` carry the ref-qualifier the mocked method
+            // is declared with; overload and override matching need it.
+            if let Some(inner) = spec_group(spec, "ref") {
+                quals.extend(inner.iter().cloned());
+            }
+            if has("noexcept") {
+                quals.push(synth("noexcept"));
+                // `noexcept(expr)` is not the same declaration as `noexcept`.
+                if let Some(inner) = spec_group(spec, "noexcept") {
+                    quals.push(synth("("));
+                    quals.extend(inner.iter().cloned());
+                    quals.push(synth(")"));
+                }
+            }
+            for q in ["override", "final"] {
+                if has(q) {
+                    quals.push(synth(q));
+                }
+            }
+            let ret = trim_newlines(strip_outer_parens(ret));
+            // One pair of parentheses is gMock's comma protection; a comma
+            // still left outside every `<…>` means the argument never was a
+            // single type, which gMock rejects too.
+            if has_top_level_comma(ret) {
+                return Vec::new();
+            }
+            let ret = if is_parenthesized_declarator(ret) {
+                vec![synth("void")]
+            } else {
+                ret.to_vec()
+            };
+            (ret, name, strip_param_parens(params), quals)
+        } else {
+            // `MOCK_METHODn_WITH_CALLTYPE(calltype, name, signature)` puts the
+            // calling convention first; it has no bearing on the declaration.
+            let name_idx = usize::from(macro_name.ends_with("_WITH_CALLTYPE"));
+            let Some(name) = args.args.get(name_idx).map(|a| trim_newlines(a)) else {
+                return Vec::new();
+            };
+            if args.args.len() <= name_idx + 1 {
+                return Vec::new();
+            }
+            // Rejoin any argument the macro call split: a signature naming a
+            // comma-containing type is one argument to gMock's variadic
+            // machinery but several to a fixed parameter list.
+            let signature = args.variadic_tokens(name_idx + 1);
+            let signature = trim_newlines(&signature).to_vec();
+            let (ret, params) = match trailing_paren_group(&signature) {
+                // The trailing group of `void (*())(int)` is the returned
+                // pointer's parameter list, not the method's; neither the
+                // type nor the arity survives, so keep just the member.
+                Some(open) if is_parenthesized_declarator(&signature[..open]) => {
+                    (vec![synth("void")], empty_params())
+                }
+                Some(open) => (
+                    trim_newlines(&signature[..open]).to_vec(),
+                    signature[open..].to_vec(),
+                ),
+                // No parameter list to split at: a bare return type keeps
+                // the member, but one that is a parenthesized declarator
+                // (`int (&())[4]`) cannot wrap the name any more than in the
+                // modern form.
+                None if is_parenthesized_declarator(&signature) => {
+                    (vec![synth("void")], empty_params())
+                }
+                // A group that is not the trailing one is not a parameter
+                // list. `int(int) const`, which gMock rejects too, would
+                // otherwise be spelled whole in front of the member name.
+                None if has_top_level_paren(&signature) => return Vec::new(),
+                None => (signature.clone(), empty_params()),
+            };
+            let quals = if macro_name.starts_with("MOCK_CONST_") {
+                vec![synth("const")]
+            } else {
+                Vec::new()
+            };
+            (ret, name, params, quals)
+        };
+    // A declaration needs both halves; `MOCK_METHOD0(Foo, )` and
+    // `MOCK_METHOD(int, , ())` would otherwise emit `Foo();` and `int ();`.
+    if ret.is_empty() || name.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(ret.len() + name.len() + params.len() + quals.len() + 1);
+    out.extend(ret);
+    out.extend(name.iter().cloned());
+    out.extend(params);
+    out.extend(quals);
+    out.push(synth(";"));
+    // Unlike a replacement list, this expansion promotes argument tokens into
+    // the declaration itself — the member name is one — so every token takes
+    // the macro's hide set, or `MOCK_METHOD(int, MOCK_METHOD, ())` would
+    // rescan its own member name as a fresh invocation and eat it.
+    out.iter()
+        .map(|t| t.with_macro_hide(origin, macro_name))
+        .collect()
+}
+
+/// The tokens inside `name(...)` in a gMock spec list, if it holds one:
+/// `ref(&)` gives `&`, `noexcept(false)` gives `false`.
+fn spec_group<'a>(spec: &'a [Token], name: &str) -> Option<&'a [Token]> {
+    let at = top_level_ident(spec, name)?;
+    let rest = &spec[at + 1..];
+    if !rest.first().is_some_and(|t| is_punct(t, "(")) {
+        return None;
+    }
+    let mut depth = 0_u32;
+    for (idx, token) in rest.iter().enumerate() {
+        if is_punct(token, "(") {
+            depth += 1;
+        } else if is_punct(token, ")") {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&rest[1..idx]);
+            }
+        }
+    }
+    None
+}
+
+/// Index of the identifier `name` at the top level of a gMock spec list —
+/// outside every nested argument list, so the `const` of
+/// `noexcept(is_nothrow<const T&>::value)` is not read as a cv-qualifier.
+fn top_level_ident(spec: &[Token], name: &str) -> Option<usize> {
+    let mut depth = 0_u32;
+    for (idx, token) in spec.iter().enumerate() {
+        match &token.kind {
+            TokenKind::Punct(s) if s == "(" => depth += 1,
+            TokenKind::Punct(s) if s == ")" => depth = depth.saturating_sub(1),
+            TokenKind::Identifier(s) if depth == 0 && s == name => return Some(idx),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_punct(token: &Token, punct: &str) -> bool {
+    matches!(&token.kind, TokenKind::Punct(s) if s == punct)
+}
+
+fn is_ident(token: &Token, name: &str) -> bool {
+    matches!(&token.kind, TokenKind::Identifier(s) if s == name)
+}
+
+/// A macro argument without the newlines a multi-line invocation leaves
+/// around it. They are whitespace to every structural test here — a
+/// `MOCK_METHOD` whose specifier list sits on the next line still starts its
+/// parameter group at the first real token.
+fn trim_newlines(tokens: &[Token]) -> &[Token] {
+    let is_newline = |t: &Token| matches!(t.kind, TokenKind::Newline);
+    let start = tokens.iter().position(|t| !is_newline(t)).unwrap_or(0);
+    let end = tokens
+        .iter()
+        .rposition(|t| !is_newline(t))
+        .map_or(start, |i| i + 1);
+    &tokens[start..end.max(start)]
+}
+
+/// True when these tokens spell a type whose own declarator is parenthesized
+/// — a function pointer, a reference to an array, a pointer to member.
+/// Parentheses nested in template arguments (`std::function<void(int)>`) are
+/// not declarators, so only a group opened outside every `<…>` counts, and
+/// only when that group holds a declarator rather than an argument list: a
+/// group of plain tokens is `decltype(x)`, or a macro spelling a
+/// comma-containing type, both of which keep their spelling and re-expand.
+fn is_parenthesized_declarator(tokens: &[Token]) -> bool {
+    let mut angle = 0_i32;
+    let mut paren = 0_u32;
+    for (idx, token) in tokens.iter().enumerate() {
+        match &token.kind {
+            TokenKind::Punct(s) if s == "(" => {
+                // A later group can still be the declarator: the first one in
+                // `decltype(x) (*)(int)` is not. What `decltype` encloses is
+                // an operand and never a declarator, however that expression
+                // starts — `decltype(*p)` and `decltype(*(p))` alike.
+                let operand_of_decltype = idx > 0 && is_ident(&tokens[idx - 1], "decltype");
+                if paren == 0
+                    && angle <= 0
+                    && !operand_of_decltype
+                    && opens_declarator(&tokens[idx + 1..])
+                {
+                    return true;
+                }
+                paren += 1;
+            }
+            TokenKind::Punct(s) if s == ")" => paren = paren.saturating_sub(1),
+            TokenKind::Punct(s) if s == "<" && paren == 0 => angle += 1,
+            TokenKind::Punct(s) if s == ">" && paren == 0 => angle -= 1,
+            TokenKind::Punct(s) if s == ">>" && paren == 0 => angle -= 2,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// True when a parenthesized group, given from just after its `(`, is a
+/// declarator rather than an argument list or an expression.
+///
+/// A declarator group is a ptr-operator sequence and nothing else: `(*)`,
+/// `(&)`, `(&&)`, `(*const)`, or a nested declarator behind one — `(&())` of
+/// `int (&())[4]`. Only a nested-name-specifier may precede it, naming the
+/// class a pointer to member points into: `(C::*)`, `(::C::*)`, `(C<T>::*)`.
+/// It must end in `::` (the lexer spells that as two `:` tokens), or the
+/// group is an argument list — `(int *, char)`.
+///
+/// What follows the ptr-operators tells a declarator from an expression that
+/// merely starts with one: a declarator continues into the group's `)`, a
+/// nested declarator or an array bound, never into a name, so `decltype(*p)`
+/// is read as the expression it is and keeps its spelling.
+fn opens_declarator(body: &[Token]) -> bool {
+    let mut i = 0;
+    while let Some(token) = body.get(i) {
+        match &token.kind {
+            TokenKind::Identifier(_) => i += 1,
+            TokenKind::Punct(s) if s == ":" => i += 1,
+            TokenKind::Punct(s) if s == "<" => match skip_angle_group(body, i) {
+                Some(next) => i = next,
+                None => return false,
+            },
+            _ => break,
+        }
+    }
+    // A nested-name-specifier, if there is one at all, has to end in `::`.
+    if i > 0 && !(i >= 2 && is_punct(&body[i - 1], ":") && is_punct(&body[i - 2], ":")) {
+        return false;
+    }
+    let ptr_start = i;
+    while body
+        .get(i)
+        .is_some_and(|t| is_punct(t, "*") || is_punct(t, "&") || is_punct(t, "&&"))
+    {
+        i += 1;
+    }
+    if i == ptr_start {
+        return false;
+    }
+    while body
+        .get(i)
+        .is_some_and(|t| is_ident(t, "const") || is_ident(t, "volatile"))
+    {
+        i += 1;
+    }
+    body.get(i)
+        .is_some_and(|t| is_punct(t, ")") || is_punct(t, "(") || is_punct(t, "["))
+}
+
+/// Index just past the `>` closing the `<…>` group that opens at `at`.
+fn skip_angle_group(tokens: &[Token], at: usize) -> Option<usize> {
+    let mut depth = 0_i32;
+    for (idx, token) in tokens.iter().enumerate().skip(at) {
+        match &token.kind {
+            TokenKind::Punct(s) if s == "<" => depth += 1,
+            TokenKind::Punct(s) if s == ">" => depth -= 1,
+            TokenKind::Punct(s) if s == ">>" => depth -= 2,
+            _ => continue,
+        }
+        if depth <= 0 {
+            return Some(idx + 1);
+        }
+    }
+    None
+}
+
+/// True when a comma sits outside every parenthesis and every `<…>` template
+/// argument list — the same structural reading as
+/// `is_parenthesized_declarator`, used to tell a type that merely contains
+/// commas (`std::pair<int, int>`) from a list of several (`int, char`).
+fn has_top_level_comma(tokens: &[Token]) -> bool {
+    let mut angle = 0_i32;
+    let mut paren = 0_u32;
+    for token in tokens {
+        match &token.kind {
+            TokenKind::Punct(s) if s == "(" => paren += 1,
+            TokenKind::Punct(s) if s == ")" => paren = paren.saturating_sub(1),
+            TokenKind::Punct(s) if s == "<" => angle += 1,
+            TokenKind::Punct(s) if s == ">" => angle -= 1,
+            TokenKind::Punct(s) if s == ">>" => angle -= 2,
+            TokenKind::Punct(s) if s == "," && paren == 0 && angle <= 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// True when a parenthesis opens outside every `<…>` template argument list:
+/// these tokens hold a group of their own rather than spelling a plain type
+/// name.
+fn has_top_level_paren(tokens: &[Token]) -> bool {
+    let mut angle = 0_i32;
+    let mut paren = 0_u32;
+    for token in tokens {
+        match &token.kind {
+            TokenKind::Punct(s) if s == "(" => {
+                if paren == 0 && angle <= 0 {
+                    return true;
+                }
+                paren += 1;
+            }
+            TokenKind::Punct(s) if s == ")" => paren = paren.saturating_sub(1),
+            TokenKind::Punct(s) if s == "<" && paren == 0 => angle += 1,
+            TokenKind::Punct(s) if s == ">" && paren == 0 => angle -= 1,
+            TokenKind::Punct(s) if s == ">>" && paren == 0 => angle -= 2,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// A parameter group with gMock's comma-protecting parentheses removed from
+/// each parameter: `((std::map<int, double>), bool)` becomes
+/// `(std::map<int, double>, bool)`, which is what C++ accepts.
+fn strip_param_parens(params: &[Token]) -> Vec<Token> {
+    if trailing_paren_group(params) != Some(0) {
+        return params.to_vec();
+    }
+    let inner = &params[1..params.len() - 1];
+    let mut parts: Vec<&[Token]> = Vec::new();
+    let mut separators: Vec<&Token> = Vec::new();
+    let mut depth = 0_u32;
+    let mut start = 0;
+    for (idx, token) in inner.iter().enumerate() {
+        if is_punct(token, "(") {
+            depth += 1;
+        } else if is_punct(token, ")") {
+            depth = depth.saturating_sub(1);
+        } else if depth == 0 && is_punct(token, ",") {
+            parts.push(&inner[start..idx]);
+            separators.push(token);
+            start = idx + 1;
+        }
+    }
+    parts.push(&inner[start..]);
+    let mut out = vec![params[0].clone()];
+    for (idx, part) in parts.iter().enumerate() {
+        if idx > 0 {
+            out.push(separators[idx - 1].clone());
+        }
+        out.extend(strip_outer_parens(trim_newlines(part)).iter().cloned());
+    }
+    out.push(params[params.len() - 1].clone());
+    out
+}
+
+/// Index of the `(` opening the balanced group that ends `tokens`, if the
+/// last token closes one.
+fn trailing_paren_group(tokens: &[Token]) -> Option<usize> {
+    if !tokens.last().is_some_and(|t| is_punct(t, ")")) {
+        return None;
+    }
+    let mut depth = 0_u32;
+    for (idx, token) in tokens.iter().enumerate().rev() {
+        if is_punct(token, ")") {
+            depth += 1;
+        } else if is_punct(token, "(") {
+            depth -= 1;
+            if depth == 0 {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+/// `tokens` without one enclosing pair of parentheses, or unchanged when the
+/// first `(` does not pair with the last `)`.
+fn strip_outer_parens(tokens: &[Token]) -> &[Token] {
+    match trailing_paren_group(tokens) {
+        Some(0) => &tokens[1..tokens.len() - 1],
+        _ => tokens,
     }
 }
 
@@ -2121,6 +2625,20 @@ static BUILTIN_FALLBACK_MACROS: LazyLock<Vec<(String, MacroDef)>> = LazyLock::ne
             &["a", "b", "level"],
             "static void a ## _ ## b ()",
         ));
+    }
+    // gMock declarations are often the only content of a test double: left
+    // unexpanded they break the enclosing mock class and its overrides
+    // vanish from virtual dispatch. Recover each as the member prototype it
+    // declares (see expand_gmock_method); a replacement list cannot do this
+    // because the legacy forms carry the whole signature in one argument
+    // and the modern form parenthesizes comma-containing return types.
+    table.push(("MOCK_METHOD".to_string(), MacroDef::GmockMethod));
+    for arity in 0..=10 {
+        for prefix in ["MOCK_METHOD", "MOCK_CONST_METHOD"] {
+            for suffix in ["", "_T", "_WITH_CALLTYPE", "_T_WITH_CALLTYPE"] {
+                table.push((format!("{prefix}{arity}{suffix}"), MacroDef::GmockMethod));
+            }
+        }
     }
     table
 });
@@ -3506,6 +4024,279 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "the level argument must be dropped: {}",
             result.output
         );
+    }
+
+    #[test]
+    fn gmock_method_fallbacks_produce_declarations() {
+        let src = concat!(
+            "#define MAP_T(a, b) std::map<a, b>\n",
+            // Aliases hide gMock's structure until they are expanded.
+            "#define RET_ALIAS (std::pair<int, int>)\n",
+            "#define PARAMS_ALIAS (int, int)\n",
+            "#define SPEC_ALIAS (const, override)\n",
+            "#define SIG_ALIAS int(int)\n",
+            "class Mock {\npublic:\n",
+            "    MOCK_METHOD(int, LinkNext, (int value), (override));\n",
+            "    MOCK_METHOD(int, Ready, ());\n",
+            "    MOCK_METHOD((std::pair<int, int>), Pair, (), ());\n",
+            "    MOCK_METHOD(void, Peek, (), (const, noexcept, override));\n",
+            "    MOCK_METHOD(void, Call, (), (Calltype(STDMETHODCALLTYPE)));\n",
+            "    MOCK_METHOD(bool, CheckMap, ((std::map<int, double>), bool), (override));\n",
+            "    MOCK_METHOD((void (*)(int)), GetHandler, (), (override));\n",
+            "    MOCK_METHOD((void (C::*)(int)), GetMemberPtr, (), (override));\n",
+            "    MOCK_METHOD(decltype(handle_), GetHandle, (), (const));\n",
+            "    MOCK_METHOD((MAP_T(int, double)), GetMapped, (), (override));\n",
+            "    MOCK_METHOD((MAP_T(int *, char)), GetPtrMapped, (), (override));\n",
+            "    MOCK_METHOD((std::function<void(int)>), GetFn, (), (override));\n",
+            "    MOCK_METHOD0(Start, int());\n",
+            "    MOCK_METHOD1(Attach, int(int value));\n",
+            "    MOCK_CONST_METHOD2(Inspect, int(int left, int right));\n",
+            "    MOCK_METHOD1_T(Push, void(const std::pair<int, int>& item));\n",
+            "    MOCK_METHOD0(GetMap, std::map<int, double>());\n",
+            "    MOCK_METHOD0(GetCallback, void (*())(int));\n",
+            "    MOCK_METHOD0(GetArrayRef, int (&())[4]);\n",
+            "    MOCK_METHOD1_WITH_CALLTYPE(STDMETHODCALLTYPE, Send, int(int value));\n",
+            "    MOCK_CONST_METHOD0_WITH_CALLTYPE(STDMETHODCALLTYPE, Poll, int());\n",
+            // Real mock headers wrap; the newlines a wrapped invocation
+            // leaves around its arguments are whitespace, not structure.
+            "    MOCK_METHOD(RET_ALIAS, GetAliased, (), (override));\n",
+            "    MOCK_METHOD(void, TakeAliased, PARAMS_ALIAS, (override));\n",
+            "    MOCK_METHOD(int, SpecAliased, (), SPEC_ALIAS);\n",
+            "    MOCK_METHOD1(SigAliased, SIG_ALIAS);\n",
+            "    MOCK_METHOD(int, RefQualified, (),\n",
+            "        (const, ref(&&), noexcept(false), override));\n",
+            "    MOCK_METHOD(void, OnLinked,\n",
+            "        (const std::shared_ptr<Filter>& filter, StreamType out),\n",
+            "        (override));\n",
+            "    MOCK_METHOD3(RequestBuffer,\n",
+            "        Status(std::shared_ptr<Buffer>& out, int32_t n, bool sync));\n",
+            // A pointer to member is a parenthesized declarator however its
+            // class is spelled, template arguments included.
+            "    MOCK_METHOD((void (C<T>::*)(int)), GetTemplateMemberPtr, (), (override));\n",
+            "    MOCK_METHOD((void (C<A<B>>::*)(int)), GetNestedMemberPtr, (), (override));\n",
+            "    MOCK_METHOD((void (::C::*)(int)), GetRootedMemberPtr, (), (override));\n",
+            // An expression that merely starts with a ptr-operator is not
+            // one, so `decltype` keeps its spelling here too.
+            "    MOCK_METHOD(decltype(*handle_), GetDeref, (), (const));\n",
+            "    MOCK_METHOD(decltype(*(handle_)), GetParenDeref, (), (const));\n",
+            // Only the top level of the spec list holds specifiers.
+            "    MOCK_METHOD(int, NoexceptExpr, (),\n",
+            "        (noexcept(is_nothrow<const T&>::value)));\n",
+            "    MOCK_METHOD(int, CalltypeOnly, (), (Calltype(final)));\n",
+            // A legacy signature naming no parameter list still recovers.
+            "    MOCK_METHOD0(NoSignature, Bar);\n",
+            "};\n",
+        );
+        let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
+        let flat = result.output.replace([' ', '\n'], "");
+        assert!(
+            !flat.contains("MOCK_"),
+            "gMock fallback macros must expand away: {}",
+            result.output
+        );
+        for expected in [
+            "intLinkNext(intvalue)override;",
+            "intReady();",
+            "std::pair<int,int>Pair();",
+            "voidPeek()constnoexceptoverride;",
+            "voidCall();",
+            // gMock's comma-protecting parentheses are the macro's own, not
+            // C++ syntax: they must not reach the declaration.
+            "boolCheckMap(std::map<int,double>,bool)override;",
+            // A return type that is itself a parenthesized declarator cannot
+            // wrap the member name, so it degrades to `void` ...
+            "voidGetHandler()override;",
+            // ... a pointer to member is one too, however it is qualified.
+            "voidGetMemberPtr()override;",
+            // ... but parentheses inside template arguments are not one, and
+            // neither is a group of plain tokens: `decltype(...)`, or a macro
+            // spelling a comma-containing type, keeps its spelling and is
+            // expanded by the rescan like any other type.
+            "std::function<void(int)>GetFn()override;",
+            "decltype(handle_)GetHandle()const;",
+            "std::map<int,double>GetMapped()override;",
+            // A `*` inside that macro's arguments is a parameter's, not a
+            // declarator's: only a leading ptr-operator (or one behind the
+            // `::` of a pointer to member) opens a declarator group.
+            "std::map<int*,char>GetPtrMapped()override;",
+            "intStart();",
+            "intAttach(intvalue);",
+            "intInspect(intleft,intright)const;",
+            "voidPush(conststd::pair<int,int>&item);",
+            // A signature the fixed-arity macro split at a template comma is
+            // rejoined before it is parsed.
+            "std::map<int,double>GetMap();",
+            // The trailing group of `void (*())(int)` belongs to the returned
+            // pointer, so neither type nor arity survives - the member does.
+            "voidGetCallback();",
+            // A signature that is nothing but a parenthesized declarator has
+            // no parameter list to split at, and degrades the same way.
+            "voidGetArrayRef();",
+            // The `_WITH_CALLTYPE` families put the calling convention first.
+            "intSend(intvalue);",
+            "intPoll()const;",
+            // An argument is read structurally, so it is macro-expanded
+            // first: an alias for a protected type, a parameter list, a spec
+            // list or a whole legacy signature is invisible until then.
+            "std::pair<int,int>GetAliased()override;",
+            "voidTakeAliased(int,int)override;",
+            "intSpecAliased()constoverride;",
+            "intSigAliased(int);",
+            // The spec list keeps every qualifier C++ accepts, in C++'s
+            // order, and `noexcept(expr)` is not plain `noexcept`.
+            "intRefQualified()const&&noexcept(false)override;",
+            "voidOnLinked(conststd::shared_ptr<Filter>&filter,StreamTypeout)override;",
+            "StatusRequestBuffer(std::shared_ptr<Buffer>&out,int32_tn,boolsync);",
+            // A pointer to member degrades however its class is spelled: the
+            // nested-name-specifier may carry template arguments, and only
+            // its closing `::` decides that the group is a declarator.
+            "voidGetTemplateMemberPtr()override;",
+            "voidGetNestedMemberPtr()override;",
+            "voidGetRootedMemberPtr()override;",
+            // `decltype(*x)` starts with a ptr-operator but continues into a
+            // name, so it is the expression it looks like, not a declarator.
+            "decltype(*handle_)GetDeref()const;",
+            "decltype(*(handle_))GetParenDeref()const;",
+            // A qualifier is one only at the top level of the spec list: the
+            // `const` below belongs to the type `noexcept` asks about, and
+            // `final` names a calling convention.
+            "intNoexceptExpr()noexcept(is_nothrow<constT&>::value);",
+            "intCalltypeOnly();",
+            "BarNoSignature();",
+        ] {
+            assert!(
+                flat.contains(expected),
+                "expected `{expected}` in the gMock fallback expansion: {}",
+                result.output
+            );
+        }
+
+        let overridden = preprocess_string(
+            "#define MOCK_METHOD(ret, name, args, spec) source_override(name)\nMOCK_METHOD(int, Kept, (), ())\n",
+            Path::new("override.cpp"),
+            &PreprocessOptions::new(),
+        );
+        assert!(
+            overridden.output.contains("source_override(Kept)"),
+            "a source gMock definition must override the fallback: {}",
+            overridden.output
+        );
+
+        // The expansion promotes argument tokens into the declaration, so
+        // they carry the macro's hide set: a member named after the macro is
+        // declared, not consumed by the rescan as a fresh invocation. (Kept
+        // out of the class above, whose assertion is that no `MOCK_` name
+        // survives at all.)
+        let self_named = preprocess_string(
+            "class M { MOCK_METHOD(int, MOCK_METHOD, ()); };\n",
+            Path::new("self_named.cpp"),
+            &PreprocessOptions::new(),
+        );
+        assert_eq!(
+            self_named.output.replace([' ', '\n'], ""),
+            "classM{intMOCK_METHOD();;};",
+            "a member named after the macro must survive: {}",
+            self_named.output
+        );
+
+        // The whole family is hidden, not just the macro being expanded: a
+        // member named after any of the others would otherwise be rescanned
+        // as a fresh invocation and eaten the same way.
+        let cross_named = preprocess_string(
+            "class M { MOCK_METHOD(int, MOCK_METHOD0, ()); };\n",
+            Path::new("cross_named.cpp"),
+            &PreprocessOptions::new(),
+        );
+        assert_eq!(
+            cross_named.output.replace([' ', '\n'], ""),
+            "classM{intMOCK_METHOD0();;};",
+            "a member named after another macro in the family must survive: {}",
+            cross_named.output
+        );
+
+        // An invocation gMock itself rejects expands to nothing: it is still
+        // consumed, but leaves no half-written declaration behind.
+        for body in [
+            // An unparenthesized comma-containing type, split into several
+            // arguments by the macro call.
+            "MOCK_METHOD(std::map<int, double>, Get, ());",
+            // A comma still outside every `<...>` once gMock's protecting
+            // parentheses are off: an argument list, not a type.
+            "MOCK_METHOD((int, char), Get, ());",
+            // Half a declaration is not one.
+            "MOCK_METHOD0(Get, );",
+            "MOCK_METHOD(int, , ());",
+            // A legacy signature whose parameter list is not the last thing
+            // in it: the group cannot be split off, and spelling the whole
+            // signature in front of the member name is not a declaration.
+            "MOCK_METHOD1(Get, int(int) const);",
+            "MOCK_METHOD0(Get, int() noexcept);",
+        ] {
+            let malformed = preprocess_string(
+                &format!("class M {{ {body} }};\n"),
+                Path::new("malformed.cpp"),
+                &PreprocessOptions::new(),
+            );
+            assert_eq!(
+                malformed.output.replace([' ', '\n'], ""),
+                "classM{;};",
+                "`{body}` must expand to nothing: {}",
+                malformed.output
+            );
+        }
+    }
+
+    #[test]
+    fn gmock_argument_prescan_charges_the_token_budget() {
+        // A gMock argument is expanded into a vector rather than into the
+        // output, so only the prescan's own budget check bounds its width;
+        // unbudgeted, a bomb reached through one allocated gigabytes and ran
+        // for seconds before the emitting path saw a token. Both macro kinds
+        // are covered, and each against the emitting path: a function-like
+        // chain reaches `substitute_macro`, which materializes one whole
+        // replacement per invocation, so the prescan has to charge an
+        // invocation exactly as `process_tokens` does.
+        let object_bomb = {
+            // 4^11 tokens if fully expanded.
+            let mut s = String::from("#define L0 1 1 1 1\n");
+            for i in 1..=10 {
+                s.push_str(&format!("#define L{i} L{p} L{p} L{p} L{p}\n", p = i - 1));
+            }
+            s
+        };
+        let function_bomb = {
+            // 2^20 tokens if fully expanded, from a chain that names the
+            // level below it twice and substitutes an argument each time.
+            let mut s = String::from("#define F0(x) x x\n");
+            for i in 1..=20 {
+                s.push_str(&format!("#define F{i}(x) F{p}(x) F{p}(x)\n", p = i - 1));
+            }
+            s
+        };
+        for (kind, defs, call) in [
+            ("object", object_bomb, "L10"),
+            ("function-like", function_bomb, "F20(1)"),
+        ] {
+            for (path, body) in [
+                ("emitting", format!("int x[] = {{ {call} }};\n")),
+                (
+                    "gMock argument",
+                    format!("class M {{ MOCK_METHOD(int, F, (int y = {call})); }};\n"),
+                ),
+            ] {
+                let opts = PreprocessOptions::new().with_max_expanded_tokens(2_000);
+                let result =
+                    preprocess_string(&format!("{defs}{body}"), Path::new("bomb.cpp"), &opts);
+                assert!(
+                    result
+                        .diagnostics
+                        .iter()
+                        .any(|d| d.message.contains("token budget exceeded")),
+                    "{kind} bomb on the {path} path must hit the budget: {:?}",
+                    result.diagnostics
+                );
+            }
+        }
     }
 
     #[test]

@@ -15,15 +15,15 @@ python3 scripts/gen_parse_failures_report.py
 |--------|------|--------------:|--------------|
 | `drivers_hdf_core` | `/private/tmp/corpora/drivers_hdf_core` | 176 | generic ERROR nodes (mixed C++ constructs) |
 | `hiviewdfx_hiview` | `/private/tmp/corpora/hiviewdfx_hiview` | 37 | generic ERROR nodes (mixed C++ constructs) |
-| `multimedia_camera_framework` | `/private/tmp/corpora/multimedia_camera_framework` | 91 | generic ERROR nodes (mixed C++ constructs) |
+| `multimedia_camera_framework` | `/private/tmp/corpora/multimedia_camera_framework` | 73 | generic ERROR nodes (mixed C++ constructs) |
 
 ## Cross-corpus category totals
 
 | Category | HDF | Hiview | Camera | Total |
 |----------|----:|-------:|-------:|------:|
 | generic ERROR nodes (mixed C++ constructs) | 173 | 24 | 51 | 248 |
-| missing type identifiers (often macro-expanded types) | 1 | 7 | 22 | 30 |
-| gtest/HWTEST macros (`missing ;`) | 2 | 1 | 16 | 19 |
+| gtest/HWTEST macros (`missing ;`) | 2 | 1 | 18 | 21 |
+| missing type identifiers (often macro-expanded types) | 1 | 7 | 2 | 10 |
 | other / mixed | 0 | 3 | 2 | 5 |
 | extern template instantiations | 0 | 2 | 0 | 2 |
 
@@ -2018,7 +2018,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 41 | 32 | `ERROR` | `"HDI.IServiceStatusListener.V1_0"` |
+| 41 | 31 | `ERROR` | `"HDI.IServiceStatusListener.V1_0"` |
 
 #### `interfaces/inner_api/utils/hdf_trace.h`
 
@@ -2108,7 +2108,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 15 | 32 | `ERROR` | `"ohos.hiviewdfx.IQuerySysEventCallback"` |
+| 15 | 31 | `ERROR` | `"ohos.hiviewdfx.IQuerySysEventCallback"` |
 
 #### `adapter/plugins/eventservice/service/idl/include/parcelable_vector_rw.h`
 
@@ -2379,7 +2379,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 14 | 32 | `ERROR` | `"ohos.hiviewdfx.IFaultLogQueryResult"` |
+| 14 | 31 | `ERROR` | `"ohos.hiviewdfx.IFaultLogQueryResult"` |
 
 #### `plugins/faultlogger/service/idl/include/ifaultlogger_service.h`
 
@@ -2387,7 +2387,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 20 | 32 | `ERROR` | `"ohos.hiviewdfx.IFaultLoggerService"` |
+| 20 | 31 | `ERROR` | `"ohos.hiviewdfx.IFaultLoggerService"` |
 
 #### `plugins/performance/perfmonitor/common/event_builder/xperf_event_builder.cpp`
 
@@ -2421,9 +2421,9 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 244 | 32 | `ERROR` | `"OHOS.HiviewDFX.IFrameCallback"` |
-| 253 | 32 | `ERROR` | `"OHOS.HiviewDFX.IAnimatorCallback"` |
-| 262 | 32 | `ERROR` | `"OHOS.HiviewDFX.ISceneCallback"` |
+| 244 | 31 | `ERROR` | `"OHOS.HiviewDFX.IFrameCallback"` |
+| 253 | 31 | `ERROR` | `"OHOS.HiviewDFX.IAnimatorCallback"` |
+| 262 | 31 | `ERROR` | `"OHOS.HiviewDFX.ISceneCallback"` |
 
 #### `plugins/performance/xperf_service/common/src/perf_trace.cpp`
 
@@ -2458,19 +2458,19 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 ## multimedia_camera_framework
 
-Generated from `trace analyze /private/tmp/corpora/multimedia_camera_framework` (91 files with parse warnings).
+Generated from `trace analyze /private/tmp/corpora/multimedia_camera_framework` (73 files with parse warnings).
 Each entry is a translation unit or header indexed as its own file; reasons come from tree-sitter ERROR sites in preprocessed source.
 
-**Total failing files:** 91
+**Total failing files:** 73
 
 ### Failure categories
 
 | Category | Files |
 |----------|------:|
 | generic ERROR nodes (mixed C++ constructs) | 51 |
-| missing type identifiers (often macro-expanded types) | 22 |
-| gtest/HWTEST macros (`missing ;`) | 16 |
+| gtest/HWTEST macros (`missing ;`) | 18 |
 | other / mixed | 2 |
+| missing type identifiers (often macro-expanded types) | 2 |
 
 ### File list
 
@@ -2494,79 +2494,61 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 16 | `frameworks/cj/camera_picker/include/camera_picker_ffi.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
 | 17 | `frameworks/native/camera/base/src/ability/camera_ability_builder.cpp` | tree-sitter-cpp node `missing field_identifier` at 1 site(s) | 1 |
 | 18 | `frameworks/native/camera/test/ndktest/camera_ndk_demo/entry/src/main/cpp/main.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 19 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_post_processor_test/src/camera_deferred_post_processor_unittest.cpp` | tree-sitter-cpp node `missing type_identifier` at 34 site(s) | 34 |
-| 20 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_schedule_test/include/camera_deferred_video_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 17 |
-| 21 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_schedule_test/src/deferred_photo_processor_unittest.cpp` | tree-sitter-cpp node `missing type_identifier` at 26 site(s) | 26 |
-| 22 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_schedule_test/src/deferred_video_controller_unittest.cpp` | tree-sitter-cpp node `missing type_identifier` at 7 site(s) | 7 |
-| 23 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_schedule_test/src/deferred_video_processor_unittest.cpp` | tree-sitter-cpp node `missing type_identifier` at 7 site(s) | 7 |
-| 24 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_session_test/src/deferred_photo_session_unittest.cpp` | tree-sitter-cpp node `missing type_identifier` at 13 site(s) | 13 |
-| 25 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_session_test/src/deferred_video_session_unittest.cpp` | tree-sitter-cpp node `missing type_identifier` at 15 site(s) | 15 |
-| 26 | `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/include/hcamera_device_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 27 | `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/include/hcamera_service_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 11 |
-| 28 | `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/src/hcamera_device_manager_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 29 | `frameworks/native/camera/test/unittest/camera_service/hdi_stream_test/include/hstream_operator_unittest.h` | tree-sitter-cpp node `missing type_identifier` at 1 site(s) | 1 |
-| 30 | `frameworks/native/camera/test/unittest/camera_service/hdi_stream_test/src/hstream_capture_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 31 | `frameworks/native/camera/test/unittest/camera_service/pipeline/src/camera_common_pipeline_unittest.cpp` | tree-sitter-cpp node `missing type_identifier` at 2 site(s) | 2 |
-| 32 | `frameworks/native/camera/test/unittest/framework_native/output/src/photo_output_unittest.cpp` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 33 | `frameworks/native/camera/test/unittest/framework_native/session/include/composition_feature_unittest.h` | tree-sitter-cpp node `missing type_identifier` at 2 site(s) | 2 |
-| 34 | `frameworks/native/camera/test/unittest/framework_native/session/src/capture_session_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 35 | `frameworks/native/camera/test/unittest/movie_file/src/hcamera_movie_file_output_unittest.cpp` | tree-sitter-cpp node `missing type_identifier` at 30 site(s) | 30 |
-| 36 | `frameworks/native/ndk/impl/camera_manager_impl.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 8 |
-| 37 | `frameworks/native/ndk/impl/metadata_output_impl.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 38 | `frameworks/taihe/include/camera_event_emitter_taihe.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
-| 39 | `frameworks/taihe/include/listener_base_taihe.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 10 |
-| 40 | `frameworks/taihe/src/camera_constructor_taihe.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 41 | `frameworks/taihe/src/camera_picker_constructor_taihe.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 42 | `interfaces/inner_api/native/camera/include/ability/camera_ability_builder.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 43 | `interfaces/inner_api/native/camera/include/input/camera_manager.h` | tree-sitter-cpp node `missing type_identifier` at 1 site(s) | 1 |
-| 44 | `interfaces/inner_api/native/camera/include/input/i_standard_camera_listener.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 45 | `interfaces/inner_api/native/camera/include/output/photo_output.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 46 | `interfaces/kits/js/camera_napi/include/camera_napi_event_emitter.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
-| 47 | `interfaces/kits/js/camera_napi/include/camera_napi_object_types.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 48 | `interfaces/kits/js/camera_napi/include/camera_napi_param_parser.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 30 |
-| 49 | `interfaces/kits/js/camera_napi/include/session/camera_napi_adaptor.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 5 |
-| 50 | `mediastream/test/unittest/filter/include/audio_capture_filter_unit_test.h` | tree-sitter-cpp node `missing type_identifier` at 8 site(s) | 8 |
-| 51 | `mediastream/test/unittest/filter/include/audio_encoder_filter_unit_test.h` | tree-sitter-cpp node `missing type_identifier` at 24 site(s) | 24 |
-| 52 | `mediastream/test/unittest/filter/include/audio_fork_filter_unit_test.h` | tree-sitter-cpp node `missing type_identifier` at 18 site(s) | 18 |
-| 53 | `mediastream/test/unittest/filter/include/audio_process_filter_unit_test.h` | tree-sitter-cpp node `missing type_identifier` at 18 site(s) | 18 |
-| 54 | `mediastream/test/unittest/filter/include/cfilter_unit_test.h` | tree-sitter-cpp node `missing type_identifier` at 4 site(s) | 4 |
-| 55 | `mediastream/test/unittest/filter/include/cinematic_video_cache_filter_unit_test.h` | tree-sitter-cpp node `missing type_identifier` at 14 site(s) | 14 |
-| 56 | `mediastream/test/unittest/filter/include/metadata_filter_unit_test.h` | tree-sitter-cpp node `missing type_identifier` at 14 site(s) | 14 |
-| 57 | `mediastream/test/unittest/filter/include/muxer_filter_unit_test.h` | tree-sitter-cpp node `missing type_identifier` at 22 site(s) | 22 |
-| 58 | `mediastream/test/unittest/filter/include/video_encoder_filter_unit_test.h` | tree-sitter-cpp node `missing type_identifier` at 4 site(s) | 4 |
-| 59 | `mediastream/test/unittest/filter/src/audio_encoder_filter_unit_test.cpp` | tree-sitter-cpp node `missing type_identifier` at 4 site(s) | 4 |
-| 60 | `mediastream/test/unittest/pipeline/pipeline_unit_test.h` | tree-sitter-cpp node `missing type_identifier` at 4 site(s) | 4 |
-| 61 | `moviefile/include/movie_file/plugin/movie_file_video_filter_plugin.h` | tree-sitter-cpp node `missing field_identifier` at 1 site(s) | 1 |
-| 62 | `moviefile/include/pipeline/thread/unified_pipeline_threadpool.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 8 |
-| 63 | `services/camera_service/binder/base/include/icamera_broker.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 64 | `services/camera_service/binder/base/include/icamera_multi_stream_output.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 65 | `services/camera_service/binder/base/include/istream_capture_photo_callback.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 66 | `services/camera_service/binder/base/include/istream_capture_thumbnail_callback.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 67 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_mock_session_manager_interface.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 68 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_scene_session_manager.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 69 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_window_manager_callback.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 70 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_window_session_manager_service.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 71 | `services/camera_service/include/camera_util.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 72 | `services/camera_service/include/param_update/camera_rotate_param_manager.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 73 | `services/camera_service/src/camera_beauty_notification.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 74 | `services/camera_service/src/camera_util.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 75 | `services/camera_service/src/hcamera_device.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 76 | `services/camera_service/src/hcamera_service.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 77 | `services/deferred_processing_service/include/base/blocking_queue.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 57 |
-| 78 | `services/deferred_processing_service/include/base/dps.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 12 |
-| 79 | `services/deferred_processing_service/include/base/enable_shared_create.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 17 |
-| 80 | `services/deferred_processing_service/include/deferred_processing_service.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 81 | `services/deferred_processing_service/include/dfx/dps_video_report.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 82 | `services/deferred_processing_service/include/event_monitor/events_monitor.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 83 | `services/deferred_processing_service/include/schedule/video_processor/strategy/ivideo_strategy.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
-| 84 | `services/deferred_processing_service/include/schedule/video_processor/video_job_repository/ivideo_job_repository_listener.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 85 | `services/deferred_processing_service/include/utils/dp_power_manager.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 86 | `services/deferred_processing_service/include/utils/dp_safe_map.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 37 |
-| 87 | `services/deferred_processing_service/include/utils/dp_timer.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 88 | `services/deferred_processing_service/include/utils/dp_utils.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 16 |
-| 89 | `test/fuzztest/audiodeferredprocess_fuzzer/audio_deferred_process_fuzzer.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 6 |
-| 90 | `test/fuzztest/cameraserviceproxy_fuzzer/camera_service_proxy_fuzzer.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 91 | `test/fuzztest/hcameraservice_fuzzer/hcamera_service_fuzzer.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 19 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_schedule_test/include/camera_deferred_video_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 17 |
+| 20 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_session_test/src/deferred_photo_session_unittest.cpp` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 21 | `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/include/hcamera_device_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 22 | `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/include/hcamera_service_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 11 |
+| 23 | `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/src/hcamera_device_manager_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 24 | `frameworks/native/camera/test/unittest/camera_service/hdi_stream_test/include/hstream_operator_unittest.h` | tree-sitter-cpp node `missing type_identifier` at 1 site(s) | 1 |
+| 25 | `frameworks/native/camera/test/unittest/camera_service/hdi_stream_test/src/hstream_capture_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 26 | `frameworks/native/camera/test/unittest/framework_native/output/src/photo_output_unittest.cpp` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 27 | `frameworks/native/camera/test/unittest/framework_native/session/src/capture_session_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 28 | `frameworks/native/ndk/impl/camera_manager_impl.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 8 |
+| 29 | `frameworks/native/ndk/impl/metadata_output_impl.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 30 | `frameworks/taihe/include/camera_event_emitter_taihe.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
+| 31 | `frameworks/taihe/include/listener_base_taihe.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 10 |
+| 32 | `frameworks/taihe/src/camera_constructor_taihe.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 33 | `frameworks/taihe/src/camera_picker_constructor_taihe.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 34 | `interfaces/inner_api/native/camera/include/ability/camera_ability_builder.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 35 | `interfaces/inner_api/native/camera/include/input/camera_manager.h` | tree-sitter-cpp node `missing type_identifier` at 1 site(s) | 1 |
+| 36 | `interfaces/inner_api/native/camera/include/input/i_standard_camera_listener.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 37 | `interfaces/inner_api/native/camera/include/output/photo_output.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 38 | `interfaces/kits/js/camera_napi/include/camera_napi_event_emitter.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
+| 39 | `interfaces/kits/js/camera_napi/include/camera_napi_object_types.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 40 | `interfaces/kits/js/camera_napi/include/camera_napi_param_parser.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 30 |
+| 41 | `interfaces/kits/js/camera_napi/include/session/camera_napi_adaptor.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 5 |
+| 42 | `mediastream/test/unittest/filter/src/audio_encoder_filter_unit_test.cpp` | tree-sitter-cpp node `missing ;` at 2 site(s) | 2 |
+| 43 | `moviefile/include/movie_file/plugin/movie_file_video_filter_plugin.h` | tree-sitter-cpp node `missing field_identifier` at 1 site(s) | 1 |
+| 44 | `moviefile/include/pipeline/thread/unified_pipeline_threadpool.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 8 |
+| 45 | `services/camera_service/binder/base/include/icamera_broker.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 46 | `services/camera_service/binder/base/include/icamera_multi_stream_output.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 47 | `services/camera_service/binder/base/include/istream_capture_photo_callback.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 48 | `services/camera_service/binder/base/include/istream_capture_thumbnail_callback.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 49 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_mock_session_manager_interface.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 50 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_scene_session_manager.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 51 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_window_manager_callback.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 52 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_window_session_manager_service.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 53 | `services/camera_service/include/camera_util.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 54 | `services/camera_service/include/param_update/camera_rotate_param_manager.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 55 | `services/camera_service/src/camera_beauty_notification.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 56 | `services/camera_service/src/camera_util.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 57 | `services/camera_service/src/hcamera_device.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 58 | `services/camera_service/src/hcamera_service.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 59 | `services/deferred_processing_service/include/base/blocking_queue.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 57 |
+| 60 | `services/deferred_processing_service/include/base/dps.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 12 |
+| 61 | `services/deferred_processing_service/include/base/enable_shared_create.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 17 |
+| 62 | `services/deferred_processing_service/include/deferred_processing_service.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 63 | `services/deferred_processing_service/include/dfx/dps_video_report.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 64 | `services/deferred_processing_service/include/event_monitor/events_monitor.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 65 | `services/deferred_processing_service/include/schedule/video_processor/strategy/ivideo_strategy.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
+| 66 | `services/deferred_processing_service/include/schedule/video_processor/video_job_repository/ivideo_job_repository_listener.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 67 | `services/deferred_processing_service/include/utils/dp_power_manager.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 68 | `services/deferred_processing_service/include/utils/dp_safe_map.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 37 |
+| 69 | `services/deferred_processing_service/include/utils/dp_timer.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 70 | `services/deferred_processing_service/include/utils/dp_utils.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 16 |
+| 71 | `test/fuzztest/audiodeferredprocess_fuzzer/audio_deferred_process_fuzzer.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 6 |
+| 72 | `test/fuzztest/cameraserviceproxy_fuzzer/camera_service_proxy_fuzzer.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 73 | `test/fuzztest/hcameraservice_fuzzer/hcamera_service_fuzzer.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
 
 ### Per-file details
 
@@ -2785,34 +2767,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 468 | 8 | `ERROR` | `napi_value` |
 | 500 | 20 | `ERROR` | `demoModule` |
 
-#### `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_post_processor_test/src/camera_deferred_post_processor_unittest.cpp`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 34 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 71 | 41 | `missing type_identifier` | `` |
-| 71 | 83 | `missing type_identifier` | `` |
-| 72 | 32 | `missing type_identifier` | `` |
-| 73 | 79 | `missing type_identifier` | `` |
-| 74 | 32 | `missing type_identifier` | `` |
-| 75 | 79 | `missing type_identifier` | `` |
-| 76 | 38 | `missing type_identifier` | `` |
-| 76 | 121 | `missing type_identifier` | `` |
-| 78 | 38 | `missing type_identifier` | `` |
-| 78 | 84 | `missing type_identifier` | `` |
-| 79 | 39 | `missing type_identifier` | `` |
-| 79 | 122 | `missing type_identifier` | `` |
-| 81 | 37 | `missing type_identifier` | `` |
-| 81 | 89 | `missing type_identifier` | `` |
-| 82 | 36 | `missing type_identifier` | `` |
-| 82 | 67 | `missing type_identifier` | `` |
-| 83 | 34 | `missing type_identifier` | `` |
-| 83 | 38 | `missing type_identifier` | `` |
-| 84 | 30 | `missing type_identifier` | `` |
-| 84 | 34 | `missing type_identifier` | `` |
-| … | … | … | *(14 more)* |
-
 #### `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_schedule_test/include/camera_deferred_video_unittest.h`
 
 **Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
@@ -2837,103 +2791,13 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 39 | 74 | `missing ;` | `` |
 | 39 | 83 | `ERROR` | `}` |
 
-#### `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_schedule_test/src/deferred_photo_processor_unittest.cpp`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 26 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 20 | 39 | `missing type_identifier` | `` |
-| 20 | 111 | `missing type_identifier` | `` |
-| 21 | 41 | `missing type_identifier` | `` |
-| 21 | 83 | `missing type_identifier` | `` |
-| 22 | 41 | `missing type_identifier` | `` |
-| 22 | 92 | `missing type_identifier` | `` |
-| 23 | 37 | `missing type_identifier` | `` |
-| 23 | 68 | `missing type_identifier` | `` |
-| 24 | 36 | `missing type_identifier` | `` |
-| 24 | 67 | `missing type_identifier` | `` |
-| 25 | 34 | `missing type_identifier` | `` |
-| 25 | 38 | `missing type_identifier` | `` |
-| 26 | 30 | `missing type_identifier` | `` |
-| 26 | 34 | `missing type_identifier` | `` |
-| 42 | 43 | `missing type_identifier` | `` |
-| 43 | 31 | `missing type_identifier` | `` |
-| 44 | 50 | `missing type_identifier` | `` |
-| 46 | 43 | `missing type_identifier` | `` |
-| 47 | 91 | `missing type_identifier` | `` |
-| 48 | 32 | `missing type_identifier` | `` |
-| … | … | … | *(6 more)* |
-
-#### `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_schedule_test/src/deferred_video_controller_unittest.cpp`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 7 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 23 | 43 | `missing type_identifier` | `` |
-| 23 | 74 | `missing type_identifier` | `` |
-| 24 | 32 | `missing type_identifier` | `` |
-| 25 | 39 | `missing type_identifier` | `` |
-| 25 | 60 | `missing type_identifier` | `` |
-| 26 | 45 | `missing type_identifier` | `` |
-| 26 | 93 | `missing type_identifier` | `` |
-
-#### `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_schedule_test/src/deferred_video_processor_unittest.cpp`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 7 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 24 | 43 | `missing type_identifier` | `` |
-| 24 | 74 | `missing type_identifier` | `` |
-| 25 | 32 | `missing type_identifier` | `` |
-| 26 | 39 | `missing type_identifier` | `` |
-| 26 | 60 | `missing type_identifier` | `` |
-| 27 | 45 | `missing type_identifier` | `` |
-| 27 | 93 | `missing type_identifier` | `` |
-
 #### `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_session_test/src/deferred_photo_session_unittest.cpp`
 
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 13 site(s)
+**Summary:** tree-sitter-cpp node `missing ;` at 1 site(s)
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 32 | 43 | `missing type_identifier` | `` |
-| 33 | 34 | `missing type_identifier` | `` |
-| 34 | 50 | `missing type_identifier` | `` |
-| 36 | 43 | `missing type_identifier` | `` |
-| 37 | 91 | `missing type_identifier` | `` |
-| 38 | 32 | `missing type_identifier` | `` |
-| 39 | 39 | `missing type_identifier` | `` |
-| 40 | 39 | `missing type_identifier` | `` |
-| 42 | 48 | `missing type_identifier` | `` |
-| 43 | 81 | `missing type_identifier` | `` |
-| 44 | 43 | `missing type_identifier` | `` |
-| 46 | 84 | `missing type_identifier` | `` |
-| 74 | 84 | `missing ;` | `` |
-
-#### `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_session_test/src/deferred_video_session_unittest.cpp`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 15 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 58 | 43 | `missing type_identifier` | `` |
-| 58 | 74 | `missing type_identifier` | `` |
-| 59 | 32 | `missing type_identifier` | `` |
-| 60 | 39 | `missing type_identifier` | `` |
-| 60 | 60 | `missing type_identifier` | `` |
-| 61 | 45 | `missing type_identifier` | `` |
-| 61 | 93 | `missing type_identifier` | `` |
-| 175 | 40 | `missing type_identifier` | `` |
-| 175 | 71 | `missing type_identifier` | `` |
-| 176 | 29 | `missing type_identifier` | `` |
-| 176 | 91 | `missing type_identifier` | `` |
-| 177 | 36 | `missing type_identifier` | `` |
-| 177 | 66 | `missing type_identifier` | `` |
-| 178 | 42 | `missing type_identifier` | `` |
-| 178 | 90 | `missing type_identifier` | `` |
+| 66 | 84 | `missing ;` | `` |
 
 #### `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/include/hcamera_device_unittest.h`
 
@@ -2941,7 +2805,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 10 | 32 | `ERROR` | `"OHOS.Anco.Service.Camera"` |
+| 10 | 31 | `ERROR` | `"OHOS.Anco.Service.Camera"` |
 
 #### `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/include/hcamera_service_unittest.h`
 
@@ -2949,17 +2813,17 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 20 | 30 | `ERROR` | `u "` |
-| 20 | 54 | `ERROR` | `"` |
-| 35 | 30 | `ERROR` | `u "` |
-| 35 | 53 | `ERROR` | `"` |
-| 49 | 30 | `ERROR` | `u "` |
-| 49 | 61 | `ERROR` | `"` |
-| 64 | 30 | `ERROR` | `u "` |
-| 64 | 63 | `ERROR` | `"` |
-| 69 | 32 | `ERROR` | `"OHOS.Anco.Service.Camera"` |
-| 101 | 30 | `ERROR` | `u "` |
-| 101 | 59 | `ERROR` | `"` |
+| 20 | 30 | `ERROR` | `u"` |
+| 20 | 53 | `ERROR` | `"` |
+| 35 | 30 | `ERROR` | `u"` |
+| 35 | 52 | `ERROR` | `"` |
+| 49 | 30 | `ERROR` | `u"` |
+| 49 | 60 | `ERROR` | `"` |
+| 64 | 30 | `ERROR` | `u"` |
+| 64 | 62 | `ERROR` | `"` |
+| 69 | 31 | `ERROR` | `"OHOS.Anco.Service.Camera"` |
+| 101 | 30 | `ERROR` | `u"` |
+| 101 | 58 | `ERROR` | `"` |
 
 #### `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/src/hcamera_device_manager_unittest.cpp`
 
@@ -2967,7 +2831,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 12 | 32 | `ERROR` | `"OHOS.Anco.Service.Camera"` |
+| 12 | 31 | `ERROR` | `"OHOS.Anco.Service.Camera"` |
 
 #### `frameworks/native/camera/test/unittest/camera_service/hdi_stream_test/include/hstream_operator_unittest.h`
 
@@ -2984,17 +2848,8 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
 | 17 | 1 | `ERROR` | `class IStreamOperatorFork: public IStreamOperator{ public: DECLARE_HDI_DESCRIPTOR(u` |
-| 19 | 64 | `ERROR` | `)` |
+| 19 | 63 | `ERROR` | `)` |
 | 1210 | 1 | `ERROR` | `}` |
-
-#### `frameworks/native/camera/test/unittest/camera_service/pipeline/src/camera_common_pipeline_unittest.cpp`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 2 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 20 | 28 | `missing type_identifier` | `` |
-| 20 | 32 | `missing type_identifier` | `` |
 
 #### `frameworks/native/camera/test/unittest/framework_native/output/src/photo_output_unittest.cpp`
 
@@ -3004,15 +2859,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 |-----:|----:|-----------|---------|
 | 62 | 74 | `missing ;` | `` |
 
-#### `frameworks/native/camera/test/unittest/framework_native/session/include/composition_feature_unittest.h`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 2 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 23 | 35 | `missing type_identifier` | `` |
-| 23 | 60 | `missing type_identifier` | `` |
-
 #### `frameworks/native/camera/test/unittest/framework_native/session/src/capture_session_unittest.cpp`
 
 **Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
@@ -3020,34 +2866,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
 | 3666 | 25 | `ERROR` | `.operator()` |
-
-#### `frameworks/native/camera/test/unittest/movie_file/src/hcamera_movie_file_output_unittest.cpp`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 30 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 10 | 42 | `missing type_identifier` | `` |
-| 10 | 118 | `missing type_identifier` | `` |
-| 11 | 39 | `missing type_identifier` | `` |
-| 11 | 60 | `missing type_identifier` | `` |
-| 12 | 40 | `missing type_identifier` | `` |
-| 12 | 44 | `missing type_identifier` | `` |
-| 13 | 46 | `missing type_identifier` | `` |
-| 13 | 67 | `missing type_identifier` | `` |
-| 14 | 36 | `missing type_identifier` | `` |
-| 14 | 40 | `missing type_identifier` | `` |
-| 15 | 41 | `missing type_identifier` | `` |
-| 15 | 127 | `missing type_identifier` | `` |
-| 16 | 63 | `missing type_identifier` | `` |
-| 16 | 67 | `missing type_identifier` | `` |
-| 17 | 36 | `missing type_identifier` | `` |
-| 17 | 104 | `missing type_identifier` | `` |
-| 18 | 39 | `missing type_identifier` | `` |
-| 18 | 73 | `missing type_identifier` | `` |
-| 19 | 37 | `missing type_identifier` | `` |
-| 19 | 41 | `missing type_identifier` | `` |
-| … | … | … | *(10 more)* |
 
 #### `frameworks/native/ndk/impl/camera_manager_impl.cpp`
 
@@ -3138,8 +2956,8 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 11 | 30 | `ERROR` | `u "` |
-| 11 | 56 | `ERROR` | `"` |
+| 11 | 30 | `ERROR` | `u"` |
+| 11 | 55 | `ERROR` | `"` |
 
 #### `interfaces/inner_api/native/camera/include/output/photo_output.h`
 
@@ -3212,212 +3030,14 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 152 | 27 | `ERROR` | `*` |
 | 175 | 27 | `ERROR` | `*` |
 
-#### `mediastream/test/unittest/filter/include/audio_capture_filter_unit_test.h`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 8 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 23 | 29 | `missing type_identifier` | `` |
-| 23 | 51 | `missing type_identifier` | `` |
-| 33 | 34 | `missing type_identifier` | `` |
-| 34 | 97 | `missing type_identifier` | `` |
-| 44 | 32 | `missing type_identifier` | `` |
-| 44 | 104 | `missing type_identifier` | `` |
-| 45 | 32 | `missing type_identifier` | `` |
-| 47 | 59 | `missing type_identifier` | `` |
-
-#### `mediastream/test/unittest/filter/include/audio_encoder_filter_unit_test.h`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 24 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 26 | 39 | `missing type_identifier` | `` |
-| 26 | 100 | `missing type_identifier` | `` |
-| 27 | 40 | `missing type_identifier` | `` |
-| 27 | 102 | `missing type_identifier` | `` |
-| 28 | 40 | `missing type_identifier` | `` |
-| 28 | 91 | `missing type_identifier` | `` |
-| 29 | 41 | `missing type_identifier` | `` |
-| 29 | 87 | `missing type_identifier` | `` |
-| 30 | 36 | `missing type_identifier` | `` |
-| 30 | 81 | `missing type_identifier` | `` |
-| 31 | 36 | `missing type_identifier` | `` |
-| 31 | 75 | `missing type_identifier` | `` |
-| 32 | 29 | `missing type_identifier` | `` |
-| 32 | 33 | `missing type_identifier` | `` |
-| 33 | 28 | `missing type_identifier` | `` |
-| 33 | 32 | `missing type_identifier` | `` |
-| 34 | 29 | `missing type_identifier` | `` |
-| 34 | 33 | `missing type_identifier` | `` |
-| 35 | 29 | `missing type_identifier` | `` |
-| 35 | 33 | `missing type_identifier` | `` |
-| … | … | … | *(4 more)* |
-
-#### `mediastream/test/unittest/filter/include/audio_fork_filter_unit_test.h`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 18 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 23 | 29 | `missing type_identifier` | `` |
-| 23 | 51 | `missing type_identifier` | `` |
-| 33 | 34 | `missing type_identifier` | `` |
-| 34 | 97 | `missing type_identifier` | `` |
-| 44 | 36 | `missing type_identifier` | `` |
-| 44 | 115 | `missing type_identifier` | `` |
-| 46 | 38 | `missing type_identifier` | `` |
-| 46 | 72 | `missing type_identifier` | `` |
-| 47 | 37 | `missing type_identifier` | `` |
-| 47 | 71 | `missing type_identifier` | `` |
-| 59 | 32 | `missing type_identifier` | `` |
-| 59 | 104 | `missing type_identifier` | `` |
-| 60 | 32 | `missing type_identifier` | `` |
-| 62 | 59 | `missing type_identifier` | `` |
-| 73 | 32 | `missing type_identifier` | `` |
-| 73 | 104 | `missing type_identifier` | `` |
-| 74 | 32 | `missing type_identifier` | `` |
-| 76 | 59 | `missing type_identifier` | `` |
-
-#### `mediastream/test/unittest/filter/include/audio_process_filter_unit_test.h`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 18 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 23 | 29 | `missing type_identifier` | `` |
-| 23 | 51 | `missing type_identifier` | `` |
-| 33 | 34 | `missing type_identifier` | `` |
-| 34 | 97 | `missing type_identifier` | `` |
-| 44 | 36 | `missing type_identifier` | `` |
-| 44 | 115 | `missing type_identifier` | `` |
-| 46 | 38 | `missing type_identifier` | `` |
-| 46 | 72 | `missing type_identifier` | `` |
-| 47 | 37 | `missing type_identifier` | `` |
-| 47 | 71 | `missing type_identifier` | `` |
-| 59 | 32 | `missing type_identifier` | `` |
-| 59 | 104 | `missing type_identifier` | `` |
-| 60 | 32 | `missing type_identifier` | `` |
-| 62 | 59 | `missing type_identifier` | `` |
-| 73 | 32 | `missing type_identifier` | `` |
-| 73 | 104 | `missing type_identifier` | `` |
-| 74 | 32 | `missing type_identifier` | `` |
-| 76 | 59 | `missing type_identifier` | `` |
-
-#### `mediastream/test/unittest/filter/include/cfilter_unit_test.h`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 4 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 25 | 32 | `missing type_identifier` | `` |
-| 25 | 104 | `missing type_identifier` | `` |
-| 26 | 32 | `missing type_identifier` | `` |
-| 28 | 59 | `missing type_identifier` | `` |
-
-#### `mediastream/test/unittest/filter/include/cinematic_video_cache_filter_unit_test.h`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 14 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 23 | 29 | `missing type_identifier` | `` |
-| 23 | 51 | `missing type_identifier` | `` |
-| 33 | 34 | `missing type_identifier` | `` |
-| 34 | 97 | `missing type_identifier` | `` |
-| 44 | 36 | `missing type_identifier` | `` |
-| 44 | 115 | `missing type_identifier` | `` |
-| 46 | 38 | `missing type_identifier` | `` |
-| 46 | 72 | `missing type_identifier` | `` |
-| 47 | 37 | `missing type_identifier` | `` |
-| 47 | 71 | `missing type_identifier` | `` |
-| 59 | 32 | `missing type_identifier` | `` |
-| 59 | 104 | `missing type_identifier` | `` |
-| 60 | 32 | `missing type_identifier` | `` |
-| 62 | 59 | `missing type_identifier` | `` |
-
-#### `mediastream/test/unittest/filter/include/metadata_filter_unit_test.h`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 14 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 22 | 29 | `missing type_identifier` | `` |
-| 22 | 51 | `missing type_identifier` | `` |
-| 32 | 34 | `missing type_identifier` | `` |
-| 33 | 97 | `missing type_identifier` | `` |
-| 43 | 36 | `missing type_identifier` | `` |
-| 43 | 115 | `missing type_identifier` | `` |
-| 45 | 38 | `missing type_identifier` | `` |
-| 45 | 72 | `missing type_identifier` | `` |
-| 46 | 37 | `missing type_identifier` | `` |
-| 46 | 71 | `missing type_identifier` | `` |
-| 58 | 32 | `missing type_identifier` | `` |
-| 58 | 104 | `missing type_identifier` | `` |
-| 59 | 32 | `missing type_identifier` | `` |
-| 61 | 59 | `missing type_identifier` | `` |
-
-#### `mediastream/test/unittest/filter/include/muxer_filter_unit_test.h`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 22 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 23 | 29 | `missing type_identifier` | `` |
-| 23 | 51 | `missing type_identifier` | `` |
-| 33 | 34 | `missing type_identifier` | `` |
-| 34 | 97 | `missing type_identifier` | `` |
-| 44 | 36 | `missing type_identifier` | `` |
-| 44 | 115 | `missing type_identifier` | `` |
-| 46 | 38 | `missing type_identifier` | `` |
-| 46 | 72 | `missing type_identifier` | `` |
-| 47 | 37 | `missing type_identifier` | `` |
-| 47 | 71 | `missing type_identifier` | `` |
-| 59 | 32 | `missing type_identifier` | `` |
-| 59 | 104 | `missing type_identifier` | `` |
-| 60 | 32 | `missing type_identifier` | `` |
-| 62 | 59 | `missing type_identifier` | `` |
-| 73 | 29 | `missing type_identifier` | `` |
-| 73 | 33 | `missing type_identifier` | `` |
-| 74 | 28 | `missing type_identifier` | `` |
-| 74 | 32 | `missing type_identifier` | `` |
-| 75 | 32 | `missing type_identifier` | `` |
-| 75 | 99 | `missing type_identifier` | `` |
-| … | … | … | *(2 more)* |
-
-#### `mediastream/test/unittest/filter/include/video_encoder_filter_unit_test.h`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 4 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 24 | 32 | `missing type_identifier` | `` |
-| 24 | 104 | `missing type_identifier` | `` |
-| 25 | 32 | `missing type_identifier` | `` |
-| 27 | 59 | `missing type_identifier` | `` |
-
 #### `mediastream/test/unittest/filter/src/audio_encoder_filter_unit_test.cpp`
 
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 4 site(s)
+**Summary:** tree-sitter-cpp node `missing ;` at 2 site(s)
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 131 | 32 | `missing type_identifier` | `` |
-| 131 | 104 | `missing type_identifier` | `` |
 | 185 | 113 | `missing ;` | `` |
 | 451 | 117 | `missing ;` | `` |
-
-#### `mediastream/test/unittest/pipeline/pipeline_unit_test.h`
-
-**Summary:** tree-sitter-cpp node `missing type_identifier` at 4 site(s)
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 11 | 32 | `missing type_identifier` | `` |
-| 11 | 104 | `missing type_identifier` | `` |
-| 12 | 32 | `missing type_identifier` | `` |
-| 14 | 59 | `missing type_identifier` | `` |
 
 #### `moviefile/include/movie_file/plugin/movie_file_video_filter_plugin.h`
 
@@ -3448,7 +3068,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 20 | 32 | `ERROR` | `"OHOS.Anco.Service.Camera"` |
+| 20 | 31 | `ERROR` | `"OHOS.Anco.Service.Camera"` |
 
 #### `services/camera_service/binder/base/include/icamera_multi_stream_output.h`
 
@@ -3464,8 +3084,8 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 14 | 30 | `ERROR` | `u "` |
-| 14 | 60 | `ERROR` | `"` |
+| 14 | 30 | `ERROR` | `u"` |
+| 14 | 59 | `ERROR` | `"` |
 
 #### `services/camera_service/binder/base/include/istream_capture_thumbnail_callback.h`
 
@@ -3473,8 +3093,8 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 15 | 30 | `ERROR` | `u "` |
-| 15 | 64 | `ERROR` | `"` |
+| 15 | 30 | `ERROR` | `u"` |
+| 15 | 63 | `ERROR` | `"` |
 
 #### `services/camera_service/binder/base/include/window_manager_service_utils/icamera_mock_session_manager_interface.h`
 
@@ -3482,7 +3102,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 9 | 32 | `ERROR` | `"OHOS.IMockSessionManager"` |
+| 9 | 31 | `ERROR` | `"OHOS.IMockSessionManager"` |
 
 #### `services/camera_service/binder/base/include/window_manager_service_utils/icamera_scene_session_manager.h`
 
@@ -3490,8 +3110,8 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 13 | 32 | `ERROR` | `"OHOS.IWindowManager"` |
-| 28 | 32 | `ERROR` | `"OHOS.ISceneSessionManager"` |
+| 13 | 31 | `ERROR` | `"OHOS.IWindowManager"` |
+| 28 | 31 | `ERROR` | `"OHOS.ISceneSessionManager"` |
 
 #### `services/camera_service/binder/base/include/window_manager_service_utils/icamera_window_manager_callback.h`
 
@@ -3499,7 +3119,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 12 | 32 | `ERROR` | `"OHOS.IWindowManagerAgent"` |
+| 12 | 31 | `ERROR` | `"OHOS.IWindowManagerAgent"` |
 
 #### `services/camera_service/binder/base/include/window_manager_service_utils/icamera_window_session_manager_service.h`
 
@@ -3507,7 +3127,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 9 | 32 | `ERROR` | `"OHOS.ISessionManagerService"` |
+| 9 | 31 | `ERROR` | `"OHOS.ISessionManagerService"` |
 
 #### `services/camera_service/include/camera_util.h`
 
@@ -3760,7 +3380,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 94 | 32 | `ERROR` | `"OHOS.Anco.Service.Camera"` |
+| 94 | 31 | `ERROR` | `"OHOS.Anco.Service.Camera"` |
 
 #### `test/fuzztest/hcameraservice_fuzzer/hcamera_service_fuzzer.h`
 
@@ -3768,6 +3388,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 122 | 32 | `ERROR` | `"OHOS.Anco.Service.Camera"` |
+| 122 | 31 | `ERROR` | `"OHOS.Anco.Service.Camera"` |
 
 ---

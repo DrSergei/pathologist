@@ -1,9 +1,57 @@
 # Evaluation Report
 
-**Date:** 2026-09-02  
-**Binary:** current tree (`trace-cli` release)  
-**Solver budget:** 800,000 pops (`TRACE_SOLVE_BUDGET_POPS`)  
-**Machine:** Linux, 16 logical CPUs, `--jobs 8`, minimal SQLite export  
+- **Date:** 2026-09-04
+- **Binary:** current tree (`trace-cli` release)
+- **Solver budget:** 800,000 pops (`TRACE_SOLVE_BUDGET_POPS`)
+- **Machine (timings):** Linux, 16 logical CPUs, `--jobs 8`, minimal SQLite
+  export — the per-corpus timing tables below were measured there. The
+  2026-09-04 metric re-capture was run on macOS (Darwin), 8 logical CPUs,
+  with the same `--jobs 8` and solver budget; the counts are
+  machine-independent, the timings are not.
+
+**Re-verified 2026-09-04 (gMock fallback macros, #15):** the pinned Camera
+corpus was re-analyzed with the current release binary and with a binary built
+from `master`, so every delta below is attributed rather than assumed. Without
+the gMock headers, `MOCK_METHOD` and the legacy numbered `MOCK_METHODn` /
+`MOCK_CONST_METHODn` forms survived preprocessing and corrupted the mock class
+containing them. Each is now recovered as the member prototype it declares:
+the modern form keeps its return type, parameters and C++ qualifiers, and the
+legacy forms are split at the parameter list of their single function-type
+argument, so the recovered declaration spells the mocked return type and
+parameters instead of a placeholder. (Prototype parameters are not lowered
+into the IR today, so this shows up in the preprocessed text and in the
+`cargo test` regressions rather than in the corpus metrics below.)
+
+Parse failures drop from **91 to 73 files** (all three corpora, 304 → 286).
+Camera's `missing type_identifier` category falls **22 → 2 files**; the
+`gtest/HWTEST` category rises 16 → 18 because two files, once their gMock
+errors were gone, reclassified to their remaining `missing ;` sites. The 18
+recovered files are exactly the diagnostics delta **4,794 → 4,776**;
+`preprocess`-stage diagnostics are unchanged at 4,703.
+
+The recovered member prototypes add 114 external symbols, so functions move
+**25,771 → 25,885** with defined functions unchanged at 18,964. Indirect
+edges (109), arg-flow edges (17,334) and dlsym edges (0) are unchanged.
+Direct edges move **19,513 → 19,503** and external edges **53,307 → 53,441**:
+in each of the ten cases an unresolvable `ON_CALL(*this, Capture(_, _, _))`
+argument, previously parsed as a call to whatever global of that name the
+corpus happened to define, now resolves to the mock's own member (for example
+`MockStreamOperator::Capture`), which is a declaration and therefore an
+external edge. That is a precision gain, not a lost edge.
+
+`Pipeline::LinkFilters`'s `LinkNext` may-target set widens **18 → 23**, adding
+the five now-indexed mock overrides (`FilterMock`, `MockFilter`,
+`MockNextFilter`, `MockPrevFilter`, `TestFilter`); this is the intended sound
+may-analysis result. All other checked dispatch target sets are unchanged, and
+`scripts/eval_check.py` passes all 67 checks. Regenerating
+`docs/PARSE_FAILURES.md` also corrected stale error columns in the HDF and
+Hiview sections (col 32 → 31 on `u"…"` literals); the `master` binary reports
+the same columns, so those predate this change and come from the C++11
+literal lexing in #14.
+
+`scripts/eval_expected.json` and `docs/PARSE_FAILURES.md` were re-captured
+from this run; the focused preprocessor and end-to-end indexing regressions
+cover the fallback behavior.
 
 **Re-verified 2026-09-02:** all three corpora are pinned to fixed upstream revisions (table in
 the Appendix) and were re-analyzed fresh with the current tree (`cargo test --workspace`
@@ -2104,14 +2152,14 @@ Hang / stack-overflow checks, not dispatch-hub evals. PCH-style header IR is wha
 | Metric | Value |
 |--------|------:|
 | Files | 1,593 |
-| Functions | 25,771 (18,964 defined / 6,807 external) |
-| Call edges | 72,929 |
-| Direct / indirect / external | 19,513 / **109** / 53,307 |
+| Functions | 25,885 (18,964 defined / 6,921 external) |
+| Call edges | 73,053 |
+| Direct / indirect / external | 19,503 / **109** / 53,441 |
 | Arg-flow edges | 17,334 |
-| Parse warnings | 91 |
+| Parse warnings | 73 |
 | Preprocess diagnostics | 4,703 |
 
-Completes. The **109** indirect edges are almost all fuzzer `FuzzedDataProvider` calls; production dispatch is recovered as **direct** CHA. The rise in direct / arg-flow edges vs the previous snapshot is the same C++ name-lookup improvement — namespace-qualified header prototypes; ADL / `using` resolution for unqualified calls — not a resolution loss — every case target above is unchanged. The **external** total additionally reflects the expansion-site attribution fix shipped with #13 (+8,416 external edges): macro-generated call sites are keyed by their invocation instead of their `#define`, so sites that previously collided are no longer merged away. Function counts, the **109** indirect edges and the diagnostics are unaffected by it; the raw-string lexer fix (#14) later took the parse warnings **93 → 91** without moving anything else here.
+Completes. The **109** indirect edges are almost all fuzzer `FuzzedDataProvider` calls; production dispatch is recovered as **direct** CHA. The rise in direct / arg-flow edges vs the previous snapshot is the same C++ name-lookup improvement — namespace-qualified header prototypes; ADL / `using` resolution for unqualified calls — not a resolution loss — every case target above is unchanged. The **external** total additionally reflects the expansion-site attribution fix shipped with #13 (+8,416 external edges): macro-generated call sites are keyed by their invocation instead of their `#define`, so sites that previously collided are no longer merged away. Function counts, the **109** indirect edges and the diagnostics are unaffected by it; the raw-string lexer fix (#14) later took the parse warnings **93 → 91** without moving anything else here. The gMock fallbacks (#15) then took them **91 → 73** and added the 114 recovered mock member prototypes to the external functions; the ten direct edges they moved to **external** are `ON_CALL` arguments that now resolve to the mock's own declared member instead of an unrelated global of the same name.
 
 **Indirect edge changes vs. master** (exact-match metric, both sides):
 - **Lost 16** phantom variable targets (`depthProfile`, `depthProfileRet1..4` in `CreateDepthDataOutput`, `infoDumper` in `DumpCameraSummary`): these were bare-stub false positives that the qualified-prototype merge now resolves correctly.

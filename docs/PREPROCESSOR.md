@@ -82,6 +82,59 @@ offenders:
 | `PRI[diuxXo](8\|16\|32\|64)` | format-specifier string literal (e.g. `PRIu64` → `"llu"`) | `"%" PRIu64` leaves an identifier between string literals |
 | `container_of(ptr, type, member)` | `((type *)(void *)(ptr))` | a type keyword in expression position; the fallback keeps the pointer flow and target type |
 | `HWTEST(a, b, level)`, `HWTEST_F`, `HWTEST_P` | `static void a##_##b()` | gtest/OpenHarmony test macros followed by a body are unparseable, losing every test body in a file |
+| `MOCK_METHOD(ret, name, params[, specs])` | `ret name params [const] [noexcept] [override] [final];` | unexpanded gMock declarations corrupt the enclosing mock class and drop its member prototypes (and their virtual-dispatch targets) from the index. gMock's comma-protecting parentheses — one pair around a comma-containing return type, one around such a parameter type — are the macro's own syntax and are removed; of the spec list only what C++ accepts on a declaration survives, spelled in C++'s order — cv-qualifier, `ref(&)`/`ref(&&)`, `noexcept` (with its expression, if any), `override`/`final`; `Calltype(...)` has no declaration spelling and is dropped. Only the *top level* of that list holds specifiers: an identifier nested in one of their argument lists belongs to an expression, so the `const` of `noexcept(is_nothrow<const T&>::value)` is part of the type `noexcept` asks about and `Calltype(final)` names a calling convention, neither being a qualifier of the member |
+| `MOCK_METHOD0`–`MOCK_METHOD10` and `MOCK_CONST_METHOD0`–`MOCK_CONST_METHOD10`, each also in its `_T`, `_WITH_CALLTYPE` and `_T_WITH_CALLTYPE` spelling | `ret name(params) [const];` | legacy gMock passes one function type `ret(params)`, split here at its parameter list so the declaration matches the mocked signature; the leading calling-convention argument is dropped |
+
+Two shapes cannot be recovered exactly. A return type that is itself a
+parenthesized declarator (`void (*)(int)`, `int (&)[4]`, `void (C::*)(int)`,
+`void (C<T>::*)(int)`, and the legacy `void (*())(int)` whose trailing group
+belongs to the returned pointer rather than to the method) would have to be
+re-spelled around the member name, so it degrades to `void` — the member and
+its class survive, the type does not.
+
+A parenthesized group counts as that declarator only when it holds a
+ptr-operator sequence and nothing else — `(*)`, `(&)`, `(&&)`, `(*const)`, or
+a nested declarator behind one, as in the `(&())` of `int (&())[4]`. Only a
+nested-name-specifier may precede it, naming the class a pointer to member
+points into (`(C::*)`, `(::C::*)`, `(C<T>::*)`), and it has to end in `::` or
+the group is an argument list — `(int *, char)`, which a macro spelling a
+comma-containing type leaves behind. What follows the ptr-operators separates
+a declarator from an expression that merely starts with one: a declarator runs
+on into the group's `)`, a nested declarator or an array bound, never into a
+name. So the other things that put parentheses in a return type keep their
+spelling and are expanded by the rescan: template arguments
+(`std::function<void(int)>`) and `decltype(...)`, whose operand is never a
+declarator however it starts — `decltype(*p)` and `decltype(*(p))` alike.
+
+Because the arguments are read structurally rather than rescanned in place,
+they are macro-expanded *before* they are read — unlike a replacement list,
+whose arguments the rescan reaches later. An alias would otherwise be
+invisible to every one of those tests: `#define RET (std::pair<int, int>)` is
+one identifier, so its protecting parentheses would survive into the
+declaration, and `#define PARAMS (int, int)` would look like no parameter list
+at all. For the same reason the expansion carries the macro's hide set onto
+the argument tokens it promotes into the declaration, so a member that happens
+to be named after the macro is declared rather than rescanned as a fresh
+invocation.
+
+An invocation gMock itself would reject expands to nothing instead of to a
+broken declaration: a comma-containing type left unparenthesized (or still
+holding a comma once its protecting parentheses come off, so it was a list
+rather than a type), an invocation naming no return type or no member, and a
+legacy signature whose parameter list is not the last thing in it
+(`int(int) const`) — the group cannot be split off, and spelling the signature
+whole in front of the member name is not a declaration.
+
+Expanding an argument ahead of the rescan builds a token vector instead of
+writing to the output, so it is charged to the same per-token expansion budget
+the emitting path uses; nothing else would bound its width, and an expansion
+bomb reached through a gMock argument would otherwise allocate without limit
+before the emitting path saw its first token.
+
+The gMock entries are not replacement lists: a replacement list cannot split
+one macro argument or unwrap parentheses, so the preprocessor expands them in
+code (`expand_gmock_method`). They obey the same override and conditional
+rules as every other fallback.
 
 Semantics — a fallback is a definition of last resort, never an answer to
 "is this defined?":
@@ -242,5 +295,10 @@ A mid-run stop inside ONE nested header must not invalidate the whole TU: indexi
 
 - Unit tests: `trace-preproc/src/`
 - Integration fixtures: `tests/fixtures/preproc/` (including `self_ref_macro.c` for C11 hide-set / X-macro lists, `include_macro.c` for `#include FOO`, `unterminated_if_include.c` + `unterminated_if_header.h` for an `#if` left open by a header, `stray_closer_include.c` + `stray_{endif,else,elif}.h` for closers that would otherwise act on the includer's frame, `stringize.c` for `#param` in log/assert-shaped macros, `raw_string.cpp` for C++11 raw string literals in the shapes the corpora use and `raw_string_shapes.c` for the same text as valid C, where `R` and the would-be ud-suffix are macros that must still expand; the `\`-newline splice cases are unit tests, checked against gcc/clang)
+- Builtin fallback fixtures: `tests/fixtures/builtin_macros/` (`kdriver.c` for the
+  kernel/driver table, `hwtest.cpp` for the gtest/OpenHarmony test macros and
+  `gmock.cpp` for the gMock declaration macros in their modern, legacy,
+  `_WITH_CALLTYPE`, comma-protected, pointer-to-member and
+  wrapped-across-lines forms)
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how preprocessing fits the full workflow.

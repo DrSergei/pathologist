@@ -59,7 +59,8 @@ Current kinds: `Copy`, `AddrOfVar`, `AddrOfFn`, `Store`, `Load`, `GepField`, `Ar
 
 1. Document in `docs/PREPROCESSOR.md` first
 2. Add lexer tests if new token kinds are needed
-3. Add fixture under `tests/fixtures/preproc/`
+3. Add fixture under `tests/fixtures/preproc/` (builtin fallback macros go
+   under `tests/fixtures/builtin_macros/`)
 4. Update phase table (P0/P1/P2) in docs
 
 ## Libc summaries

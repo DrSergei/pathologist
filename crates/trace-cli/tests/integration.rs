@@ -100,7 +100,26 @@ fn builtin_macro_fallbacks_fixture() {
         parse_diags.is_empty(),
         "expected no parse diagnostics, got: {parse_diags:?}"
     );
-    for name in ["FooTest_Bar", "DevRead", "DevInit", "DevExit"] {
+    for name in [
+        "FooTest_Bar",
+        "DevRead",
+        "DevInit",
+        "DevExit",
+        "MockInterface::LinkNext",
+        "MockInterface::Pair",
+        "MockInterface::Peek",
+        "MockInterface::CheckMap",
+        "MockInterface::GetHandler",
+        "MockInterface::Start",
+        "MockInterface::Attach",
+        "MockInterface::Inspect",
+        "MockInterface::GetCallback",
+        "MockInterface::Send",
+        "MockInterface::Poll",
+        "MockInterface::OnLinked",
+        "MockInterface::GetMemberPtr",
+        "MockInterface::Wait",
+    ] {
         assert!(
             program.symbols.functions.iter().any(|f| f.name == name),
             "function {name} missing from index"
