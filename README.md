@@ -619,8 +619,14 @@ tests/fixtures/    Integration test C corpora
 - [SQLite schema (detailed)](docs/SQLITE_SCHEMA.md)
 - [Roadmap](docs/ROADMAP.md)
 - [C++ next slices (hiview)](docs/CPP_ROADMAP.md)
-- [Contributor / agent guide](AGENTS.md)
+- [Contributing](CONTRIBUTING.md)
+- [Agent guide](AGENTS.md)
+- [License](LICENSE)
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and pull-request guidelines.
 
 ## License
 
-MIT
+This project is licensed under the [MIT License](LICENSE).
