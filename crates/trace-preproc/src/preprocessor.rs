@@ -1,5 +1,7 @@
 use crate::macros::{lex_macro_body, MacroDef, MacroOp, MacroTable};
-use crate::{Diagnostic, DiagnosticSeverity, Lexer, LineMap, PreprocessOptions, Token, TokenKind};
+use crate::{
+    Diagnostic, DiagnosticSeverity, Language, Lexer, LineMap, PreprocessOptions, Token, TokenKind,
+};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,6 +35,9 @@ pub struct PreprocessResult {
 #[derive(Debug)]
 struct PreprocessorState {
     opts: PreprocessOptions,
+    /// Language the whole run lexes as: the TU's, for every header it
+    /// includes (a header has no language of its own).
+    language: Language,
     macros: MacroTable,
     /// Names in `macros` defined only by a builtin fallback (see
     /// `install_builtin_macros`). These expand normally but are invisible to
@@ -104,8 +109,10 @@ struct CacheFrame {
 
 impl PreprocessorState {
     fn new(opts: PreprocessOptions, file: PathBuf) -> Self {
+        let language = opts.language.unwrap_or_else(|| Language::from_path(&file));
         let mut state = Self {
             opts,
+            language,
             macros: MacroTable::new(),
             fallback_macros: HashSet::new(),
             include_stack: vec![file.clone()],
@@ -174,7 +181,7 @@ impl PreprocessorState {
             self.insert_macro(
                 name,
                 MacroDef::Object {
-                    replacement: lex_macro_body(&val),
+                    replacement: lex_macro_body(&val, self.language),
                 },
             );
         }
@@ -192,7 +199,7 @@ impl PreprocessorState {
             self.insert_macro(
                 name,
                 MacroDef::Object {
-                    replacement: lex_macro_body(&val),
+                    replacement: lex_macro_body(&val, self.language),
                 },
             );
         }
@@ -401,11 +408,8 @@ impl PreprocessorState {
         let Some(cache) = &self.opts.include_expansion_cache else {
             return false;
         };
-        let Some(entry) = cache
-            .read()
-            .ok()
-            .and_then(|guard| guard.get(canonical).cloned())
-        else {
+        let key = (canonical.to_path_buf(), self.language);
+        let Some(entry) = cache.read().ok().and_then(|guard| guard.get(&key).cloned()) else {
             return false;
         };
         if !self.opts.inline_include_bodies {
@@ -466,10 +470,8 @@ impl PreprocessorState {
 
     fn cached_expansion(&self, canonical: &Path) -> Option<crate::IncludeExpansion> {
         let cache = self.opts.include_expansion_cache.as_ref()?;
-        cache
-            .read()
-            .ok()
-            .and_then(|guard| guard.get(canonical).cloned())
+        let key = (canonical.to_path_buf(), self.language);
+        cache.read().ok().and_then(|guard| guard.get(&key).cloned())
     }
 
     fn is_cacheable_header(path: &Path) -> bool {
@@ -602,7 +604,15 @@ impl PreprocessorState {
             return Ok(());
         }
 
-        if self.splice_cached(&canonical) {
+        // The root of this run is the file whose text IS the output, so it
+        // is never replayed from the expansion cache: an entry for it can
+        // already exist when another header pulled it in first (a
+        // macro-spelled `#include` the include graph could not order), and
+        // with `inline_include_bodies` off a replay would yield an empty
+        // run. `include_stack` holds only the root at this point (see
+        // `Preprocessor::new`); nested includes push on top of it.
+        let is_root = self.include_stack.len() == 1;
+        if !is_root && self.splice_cached(&canonical) {
             return Ok(());
         }
 
@@ -655,7 +665,7 @@ impl PreprocessorState {
         self.current_file = path.to_path_buf();
         self.include_stack.push(path.to_path_buf());
 
-        let tokens = Lexer::new(&content).tokenize();
+        let tokens = Lexer::new(&content, self.language).tokenize();
         if let Err(e) = self.process_file_tokens(&tokens) {
             // Attribute the stop to the file being processed when it failed,
             // not the including TU — downstream consumers key fallback and
@@ -718,12 +728,14 @@ impl PreprocessorState {
                 };
                 if !composed.is_empty() || !ops.is_empty() || !new_files.is_empty() {
                     if let Ok(mut guard) = cache.write() {
-                        guard.entry(canonical).or_insert(crate::IncludeExpansion {
-                            text: composed.into(),
-                            files: Arc::new(new_files),
-                            line_map: Arc::new(composed_map),
-                            ops,
-                        });
+                        guard.entry((canonical, self.language)).or_insert(
+                            crate::IncludeExpansion {
+                                text: composed.into(),
+                                files: Arc::new(new_files),
+                                line_map: Arc::new(composed_map),
+                                ops,
+                            },
+                        );
                     }
                 }
             }
@@ -1664,7 +1676,7 @@ fn parse_include_header(tokens: &[Token]) -> Option<String> {
         i += 1;
     }
     match tokens.get(i).map(|t| &t.kind) {
-        Some(TokenKind::String(s)) => Some(s.clone()),
+        Some(TokenKind::String(s)) => plain_string_body(s).map(str::to_string),
         Some(TokenKind::Punct(s)) if s == "<" => {
             let mut header = String::new();
             i += 1;
@@ -1890,8 +1902,12 @@ fn substitute_macro(
                             .unwrap_or_default()
                     };
                     out.push(
-                        Token::new(TokenKind::String(text), body[i].line, body[i].col)
-                            .with_macro_hide(origin, macro_name),
+                        Token::new(
+                            TokenKind::String(format!("\"{text}\"")),
+                            body[i].line,
+                            body[i].col,
+                        )
+                        .with_macro_hide(origin, macro_name),
                     );
                     i += 2;
                     continue;
@@ -1975,13 +1991,14 @@ fn concat_width_at(tokens: &[Token], i: usize) -> usize {
 /// indexed tree does not ship (gtest, kernel headers, `<inttypes.h>`). Left
 /// unexpanded they produce tree-sitter ERROR nodes and whole functions get
 /// dropped from the index (docs/PARSE_FAILURES.md catalogs the impact).
-/// Built once; `install_builtin_macros` clones entries per preprocess.
+/// Built once; `install_builtin_macros` clones entries per preprocess. The
+/// bodies are plain C, so the C lexer serves both languages.
 static BUILTIN_FALLBACK_MACROS: LazyLock<Vec<(String, MacroDef)>> = LazyLock::new(|| {
     let object = |name: &str, replacement: &str| {
         (
             name.to_string(),
             MacroDef::Object {
-                replacement: lex_macro_body(replacement),
+                replacement: lex_macro_body(replacement, Language::C),
             },
         )
     };
@@ -1990,7 +2007,7 @@ static BUILTIN_FALLBACK_MACROS: LazyLock<Vec<(String, MacroDef)>> = LazyLock::ne
             name.to_string(),
             MacroDef::Function {
                 params: params.iter().map(|s| s.to_string()).collect(),
-                replacement: lex_macro_body(replacement),
+                replacement: lex_macro_body(replacement, Language::C),
                 variadic: false,
             },
         )
@@ -2110,6 +2127,17 @@ fn needs_leading_space(output: &str, kind: &TokenKind) -> bool {
 /// that does not start exactly where the previous one ended (or that sits
 /// on a later line) was separated by whitespace.
 fn stringize_spelling(arg: &[Token]) -> String {
+    // Literals carry their quotes, which get escaped like any other `"` in
+    // the spelling (`STR(R"(a)")` is `"R\"(a)\""`, as in gcc).
+    spell_tokens(arg, escape_for_stringize)
+}
+
+/// Tokens spelled back as source text: tokens that touched in the source
+/// touch here, anything else is one space apart. Whitespace width never
+/// moves a token boundary but adjacency does (`R"(x)"` versus `R "(x)"`),
+/// so this round-trips through the lexer. `literal` maps each string or
+/// character literal's spelling.
+pub(crate) fn spell_tokens(arg: &[Token], literal: impl Fn(&str) -> String) -> String {
     let mut text = String::new();
     let mut prev_end: Option<(u32, u32)> = None;
     for tok in arg {
@@ -2117,8 +2145,7 @@ fn stringize_spelling(arg: &[Token]) -> String {
             TokenKind::Newline | TokenKind::Eof => continue,
             TokenKind::Identifier(s) | TokenKind::Number(s) | TokenKind::Punct(s) => s.clone(),
             TokenKind::Hash => "#".to_string(),
-            TokenKind::String(s) => format!("\\\"{}\\\"", escape_for_stringize(s)),
-            TokenKind::Char(s) => format!("'{}'", escape_for_stringize(s)),
+            TokenKind::String(s) | TokenKind::Char(s) => literal(s),
         };
         if let Some((line, col)) = prev_end {
             // A `\`-newline splice is deleted in phase 2, so a token it
@@ -2135,27 +2162,52 @@ fn stringize_spelling(arg: &[Token]) -> String {
     text
 }
 
-/// Where the character after `tok` sits in the source: the lexer counts one
-/// column per character, and string/char literals carry their delimiters.
-/// Shared with `parse_macro_args`, which compares this against a `\`-newline's
-/// position to decide whether the splice was tight.
+/// Where the character after `tok` sits in the source: its spelling walked
+/// from its start the way the lexer counts (one column per character; a
+/// newline — only a raw string literal contains one — starts the next line
+/// at column 1). `Newline` itself is zero-width so a `\`-newline on the
+/// following line does not look adjacent to it. Shared with
+/// `parse_macro_args`, which compares this against a `\`-newline's position
+/// to decide whether the splice was tight.
 fn token_end(tok: &Token) -> (u32, u32) {
-    let width = match &tok.kind {
-        TokenKind::Identifier(s) | TokenKind::Number(s) | TokenKind::Punct(s) => s.chars().count(),
-        TokenKind::String(s) | TokenKind::Char(s) => s.chars().count() + 2,
-        TokenKind::Hash => 1,
-        TokenKind::Newline | TokenKind::Eof => 0,
+    let spelling: &str = match &tok.kind {
+        TokenKind::Identifier(s)
+        | TokenKind::Number(s)
+        | TokenKind::Punct(s)
+        | TokenKind::String(s)
+        | TokenKind::Char(s) => s,
+        TokenKind::Hash => "#",
+        TokenKind::Newline | TokenKind::Eof => return (tok.line, tok.col),
     };
-    (tok.line, tok.col + width as u32)
+    match spelling.rsplit_once('\n') {
+        Some((head, last)) => (
+            tok.line + head.matches('\n').count() as u32 + 1,
+            last.chars().count() as u32 + 1,
+        ),
+        None => (tok.line, tok.col + spelling.chars().count() as u32),
+    }
 }
 
-fn escape_for_stringize(literal_body: &str) -> String {
-    let mut out = String::with_capacity(literal_body.len());
-    for c in literal_body.chars() {
-        if matches!(c, '\\' | '"') {
-            out.push('\\');
+/// A literal's spelling as it appears inside the string `#` builds:
+/// backslashes and quotes escaped, and a bare newline — only a raw string
+/// literal can contain one — written as `\n`, as gcc does, so the result is
+/// still a single-line string literal. A CRLF is one newline: translation
+/// phase 1 normalizes line endings before the raw string is read, so
+/// gcc/clang stringize it as `\n`, never `\r\n`.
+fn escape_for_stringize(spelling: &str) -> String {
+    let mut out = String::with_capacity(spelling.len());
+    let mut chars = spelling.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' if chars.peek() == Some(&'\n') => {}
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
         }
-        out.push(c);
     }
     out
 }
@@ -2164,8 +2216,8 @@ fn token_to_string(kind: &TokenKind) -> String {
     match kind {
         TokenKind::Identifier(s) => s.clone(),
         TokenKind::Number(s) => s.clone(),
-        TokenKind::String(s) => format!("\"{s}\""),
-        TokenKind::Char(s) => format!("'{s}'"),
+        TokenKind::String(s) => s.clone(),
+        TokenKind::Char(s) => s.clone(),
         TokenKind::Punct(s) => s.clone(),
         TokenKind::Hash => "#".to_string(),
         TokenKind::Newline => "\n".to_string(),
@@ -2567,15 +2619,29 @@ impl<'a> PpExprParser<'a> {
             return PpVal::signed(0);
         };
         match &tok.kind {
+            // A number or character constant that is not an integer
+            // constant — a ud-suffix (`10_km`, `'a'_x`), a floating literal
+            // — is an error for gcc/clang, not a value; marking the
+            // expression malformed keeps the branch closed.
             TokenKind::Number(s) => {
-                let v = parse_pp_int(s);
                 self.pos += 1;
-                v
+                match parse_pp_int(s) {
+                    Some(v) => v,
+                    None => {
+                        self.err = true;
+                        PpVal::signed(0)
+                    }
+                }
             }
             TokenKind::Char(s) => {
-                let v = PpVal::signed(char_value(s));
                 self.pos += 1;
-                v
+                match char_literal_body(s) {
+                    Some(body) => PpVal::signed(char_value(body)),
+                    None => {
+                        self.err = true;
+                        PpVal::signed(0)
+                    }
+                }
             }
             TokenKind::Punct(p) if p == "(" => {
                 self.pos += 1;
@@ -2635,10 +2701,11 @@ impl<'a> PpExprParser<'a> {
 }
 
 /// Parse a C preprocessor integer literal (decimal, hex, octal, binary,
-/// with optional u/U/l/L suffixes). Unparseable text evaluates to 0.
-/// The value is unsigned when it carries a `u`/`U` suffix or does not fit
-/// in a signed 64-bit intmax_t (hex/octal ladder reaching uintmax_t).
-fn parse_pp_int(s: &str) -> PpVal {
+/// with optional u/U/l/L suffixes). Anything else — a floating literal, a
+/// user-defined-literal suffix — is `None`. The value is unsigned when it
+/// carries a `u`/`U` suffix or does not fit in a signed 64-bit intmax_t
+/// (hex/octal ladder reaching uintmax_t).
+fn parse_pp_int(s: &str) -> Option<PpVal> {
     let t = s.trim_end_matches(['u', 'U', 'l', 'L']);
     let unsigned_suffix = s[t.len()..].contains(['u', 'U']);
     let (digits, radix) = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
@@ -2650,17 +2717,30 @@ fn parse_pp_int(s: &str) -> PpVal {
     } else {
         (t, 10)
     };
-    match u128::from_str_radix(digits, radix) {
-        Ok(v) => PpVal {
-            bits: v as u64,
-            unsigned_: unsigned_suffix || v > i64::MAX as u128,
-        },
-        Err(_) => PpVal::signed(0),
-    }
+    let v = u128::from_str_radix(digits, radix).ok()?;
+    Some(PpVal {
+        bits: v as u64,
+        unsigned_: unsigned_suffix || v > i64::MAX as u128,
+    })
 }
 
-/// Value of a character constant's content (quotes already stripped by the
-/// lexer; escapes kept verbatim).
+/// Body of an ordinary, unprefixed `"…"` literal spelling — the only form
+/// that names a header in `#include`.
+fn plain_string_body(spelling: &str) -> Option<&str> {
+    spelling.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+}
+
+/// Body of a character literal spelling, any encoding prefix dropped
+/// (`L'\n'` → `\n`). `None` when the spelling does not end at its closing
+/// quote — a user-defined literal such as `'a'_x`, which is not a
+/// character constant.
+fn char_literal_body(spelling: &str) -> Option<&str> {
+    let open = spelling.find('\'').map_or(0, |i| i + 1);
+    spelling[open..].strip_suffix('\'')
+}
+
+/// Value of a character constant's body (see `char_literal_body`; escapes
+/// kept verbatim).
 fn char_value(s: &str) -> i64 {
     let mut chars = s.chars().peekable();
     match chars.next() {
@@ -2718,7 +2798,7 @@ pub fn preprocess_file(
 
 pub fn preprocess_string(source: &str, file: &Path, opts: &PreprocessOptions) -> PreprocessResult {
     let mut state = PreprocessorState::new(opts.clone(), file.to_path_buf());
-    let tokens = Lexer::new(source).tokenize();
+    let tokens = Lexer::new(source, state.language).tokenize();
     if let Err(e) = state.process_file_tokens(&tokens) {
         state.warn(1, format!("preprocess stopped: {e}"));
     }
@@ -2728,7 +2808,7 @@ pub fn preprocess_string(source: &str, file: &Path, opts: &PreprocessOptions) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::options::IncludeExpansion;
+    use crate::options::{ExpansionKey, IncludeExpansion};
     use std::sync::{Arc, RwLock};
 
     #[test]
@@ -3134,6 +3214,221 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
     }
 
     #[test]
+    fn raw_string_literal_is_emitted_verbatim() {
+        // Issue #14: `R"(a "quoted" b)"` came out as `R "(a " quoted " b)"`.
+        let src =
+            "const char* j = R\"(a \"quoted\" b)\";\nauto r = R\"~(=((\".*?\")|(\\S*)))~\";\n";
+        let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
+        let out = &result.output;
+        assert!(out.contains("j= R\"(a \"quoted\" b)\" ;"), "{out}");
+        assert!(out.contains("r= R\"~(=((\".*?\")|(\\S*)))~\" ;"), "{out}");
+    }
+
+    #[test]
+    fn raw_string_spanning_lines_keeps_following_lines_mapped() {
+        let src = "std::string s = R\"~({\n  \"k\": 1,\n  \"v\": 2})~\";\nint z;\n";
+        let mut opts = PreprocessOptions::new();
+        opts.track_line_map = true;
+        let result = preprocess_string(src, Path::new("t.cpp"), &opts);
+        assert!(
+            result
+                .output
+                .contains("R\"~({\n  \"k\": 1,\n  \"v\": 2})~\" ;\nint z ;"),
+            "{}",
+            result.output
+        );
+        let at = result.output.find("int z").unwrap();
+        let entry = result.line_map.lookup(at).unwrap();
+        assert_eq!((entry.line, entry.col), (4, 1), "{entry:?}");
+        // Offsets inside the literal attribute to where it starts.
+        let inside = result.output.find("\"v\"").unwrap();
+        let entry = result.line_map.lookup(inside).unwrap();
+        assert_eq!((entry.line, entry.col), (1, 17), "{entry:?}");
+    }
+
+    #[test]
+    fn raw_string_passes_through_macro_bodies_and_arguments() {
+        let src = "#define ID(x) x\n#define J R\"~({\"k\":1})~\"\nauto a = ID(R\"(p, \"q\")\");\nauto b = J;\n";
+        let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("a= R\"(p, \"q\")\" ;"),
+            "{}",
+            result.output
+        );
+        assert!(
+            result.output.contains("b= R\"~({\"k\":1})~\" ;"),
+            "{}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn raw_user_defined_literal_keeps_its_suffix_adjacent() {
+        let src = "#define ID(x) x\n#define STR(x) #x\nauto a = R\"(json)\"_json;\nauto b = ID(R\"~(k)~\"_json);\nauto c = STR(R\"(a)\"_json);\n";
+        let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
+        let out = &result.output;
+        assert!(out.contains("a= R\"(json)\"_json ;"), "{out}");
+        assert!(out.contains("b= R\"~(k)~\"_json ;"), "{out}");
+        assert!(out.contains("c= \"R\\\"(a)\\\"_json\" ;"), "{out}");
+    }
+
+    #[test]
+    fn stringize_escapes_raw_string_argument_like_gcc() {
+        // gcc/clang: `STR(R"(a "b")")` is `"R\"(a \"b\")\""`.
+        let src = "#define STR(x) #x\nconst char* s = STR(R\"(a \"b\")\");\n";
+        let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("s= \"R\\\"(a \\\"b\\\")\\\"\" ;"),
+            "{}",
+            result.output
+        );
+        // A newline inside the raw string is written as `\n` (gcc's
+        // cpp_quote_string), so the result stays a single-line literal.
+        let src = "#define STR(x) #x\nconst char* m = STR(R\"~(a\nb)~\");\n";
+        let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("m= \"R\\\"~(a\\nb)~\\\"\" ;"),
+            "{}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn encoding_prefixed_literals_stay_attached_to_their_prefix() {
+        // `L'x'` used to come out as `L 'x'` (a tree-sitter ERROR site) and
+        // `L"w"` as `L "w"`.
+        let src = "#define STR(x) #x\nwchar_t c = L'x';\nconst char* s = u8\"s\";\nconst char* t = STR(L\"a\\n\");\n#if L'a' == 97 && u'\\n' == 10\nyes\n#else\nno\n#endif\n";
+        let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
+        let out = &result.output;
+        assert!(out.contains("c= L'x' ;"), "{out}");
+        assert!(out.contains("s= u8\"s\" ;"), "{out}");
+        assert!(out.contains("t= \"L\\\"a\\\\n\\\"\" ;"), "{out}");
+        assert!(out.contains("yes") && !out.contains("no"), "{out}");
+    }
+
+    #[test]
+    fn c_lexes_raw_string_and_udl_shapes_as_separate_tokens() {
+        // Valid C: `R` and `C` are macros, and the literals next to them are
+        // separate preprocessing tokens (C11 6.4). The same text in a C++ TU
+        // is one raw-string / user-defined-literal token, so the macros do
+        // not expand there.
+        let src = "#define R const char *s =\nR\"(x)\";\n#define C + 1\nint n = 'a'C;\n";
+        let c = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new()).output;
+        assert!(c.contains("s= \"(x)\" ;"), "{c}");
+        assert!(c.contains("n= 'a'+ 1 ;"), "{c}");
+        let cpp = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new()).output;
+        assert!(cpp.contains("R\"(x)\" ;"), "{cpp}");
+        assert!(cpp.contains("n= 'a'C ;"), "{cpp}");
+        // The language option overrides the extension.
+        let forced = preprocess_string(
+            src,
+            Path::new("t.c"),
+            &PreprocessOptions::new().with_language(Language::Cpp),
+        )
+        .output;
+        assert!(forced.contains("R\"(x)\" ;"), "{forced}");
+    }
+
+    #[test]
+    fn expansion_cache_keeps_one_entry_per_language() {
+        // One shared cache, a header reached from a C++ unit and then a C
+        // unit. The C++ entry must not be replayed into the C unit: its
+        // `VAL` replacement list is one Char token there, so `C` would
+        // never expand.
+        let dir = unique_tmp_dir("cache_language");
+        fs::write(dir.join("shared.h"), "#define C + 1\n#define VAL 'a'C\n").unwrap();
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let run = |name: &str| {
+            let path = dir.join(name);
+            fs::write(&path, "#include \"shared.h\"\nint n = VAL;\n").unwrap();
+            let opts = PreprocessOptions::new()
+                .with_include_expansion_cache(Arc::clone(&cache))
+                .with_include(dir.clone());
+            preprocess_file(&path, &opts).unwrap().output
+        };
+        let cpp = run("t.cpp");
+        assert!(cpp.contains("n= 'a'C ;"), "{cpp}");
+        let c = run("t.c");
+        assert!(c.contains("n= 'a'+ 1 ;"), "{c}");
+        // Both entries live side by side; a third run of each hits its own.
+        let keys: Vec<Language> = cache
+            .read()
+            .unwrap()
+            .keys()
+            .filter(|(p, _)| p.ends_with("shared.h"))
+            .map(|(_, l)| *l)
+            .collect();
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert!(keys.contains(&Language::C) && keys.contains(&Language::Cpp));
+        assert!(run("u.c").contains("n= 'a'+ 1 ;"));
+        assert!(run("u.cpp").contains("n= 'a'C ;"));
+    }
+
+    #[test]
+    fn included_header_is_lexed_as_the_including_tu() {
+        let dir = unique_tmp_dir("header_language");
+        fs::write(dir.join("raw.h"), "#define R const char *s =\nR\"(x)\";\n").unwrap();
+        let tu = |name: &str| {
+            let path = dir.join(name);
+            fs::write(&path, "#include \"raw.h\"\n").unwrap();
+            preprocess_file(&path, &PreprocessOptions::new())
+                .unwrap()
+                .output
+        };
+        let c = tu("t.c");
+        assert!(c.contains("s= \"(x)\" ;"), "{c}");
+        let cpp = tu("t.cpp");
+        assert!(cpp.contains("R\"(x)\" ;"), "{cpp}");
+    }
+
+    #[test]
+    fn user_defined_literal_in_if_expression_is_malformed() {
+        // gcc/clang reject a ud-suffix in a preprocessing expression; the
+        // literal must not evaluate as if the suffix were not there.
+        for cond in ["'a'_x == 97", "10_km", "0x10_u == 16", "1.5"] {
+            let src = format!("#if {cond}\nyes\n#else\nno\n#endif\n");
+            let out = preprocess_string(&src, Path::new("t.cpp"), &PreprocessOptions::new()).output;
+            assert!(
+                out.contains("no") && !out.contains("yes"),
+                "#if {cond}: {out}"
+            );
+        }
+        // The plain forms still evaluate.
+        let src = "#if 'a' == 97 && 0x10u == 16 && 10 == 10\nyes\n#else\nno\n#endif\n";
+        let out = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new()).output;
+        assert!(out.contains("yes") && !out.contains("no"), "{out}");
+    }
+
+    #[test]
+    fn stringize_coalesces_crlf_inside_raw_string() {
+        // Translation phase 1 turns CRLF into a newline, so clang stringizes
+        // a raw string spanning CRLF lines with `\n` alone.
+        let src = "#define STR(x) #x\r\nconst char* m = STR(R\"~(a\r\nb)~\");\r\n";
+        let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("m= \"R\\\"~(a\\nb)~\\\"\" ;"),
+            "{}",
+            result.output
+        );
+        assert_eq!(escape_for_stringize("a\r\nb"), "a\\nb");
+        assert_eq!(escape_for_stringize("a\rb"), "a\\rb");
+    }
+
+    #[test]
+    fn literal_body_helpers_strip_delimiters() {
+        assert_eq!(plain_string_body("\"a.h\""), Some("a.h"));
+        assert_eq!(plain_string_body("\"\""), Some(""));
+        assert_eq!(plain_string_body("L\"a.h\""), None);
+        assert_eq!(plain_string_body("R\"(a.h)\""), None);
+        assert_eq!(char_literal_body("'a'"), Some("a"));
+        assert_eq!(char_literal_body("L'\\n'"), Some("\\n"));
+        assert_eq!(char_literal_body("u8'x'"), Some("x"));
+        // A ud-suffix means the spelling is not a plain character constant.
+        assert_eq!(char_literal_body("'a'_x"), None);
+    }
+
+    #[test]
     fn hwtest_macros_predefined_as_functions() {
         let src = "HWTEST_F(FooTest, Bar, TestSize.Level1)\n{\n    int x = 0;\n    (void)x;\n}\n";
         let result = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new());
@@ -3205,7 +3500,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "#ifndef container_of\n#define container_of(p, t, m) REAL_CONTAINER(p)\n#endif\n",
         )
         .unwrap();
-        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
             .with_include(dir.clone())
@@ -3251,7 +3546,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         // The declaration makes the header content-bearing so a cache entry
         // is actually stored and the second TU takes the replay path.
         fs::write(dir.join("u.h"), "int u_decl;\n#undef __init\n").unwrap();
-        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
             .with_include(dir.clone())
@@ -3280,7 +3575,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         // X is undefined when the entry is created, so a state diff records
         // nothing — only a log of executed directives catches this #undef.
         fs::write(dir.join("u.h"), "int u_decl;\n#undef X\n").unwrap();
-        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
             .with_include(dir.clone())
@@ -3303,7 +3598,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         let dir = unique_tmp_dir("undef_redef");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("r.h"), "int r_decl;\n#undef X\n#define X 9\n").unwrap();
-        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
             .with_include(dir.clone())
@@ -3332,7 +3627,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         let dir = unique_tmp_dir("replay_overwrite");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("r.h"), "int r_decl;\n#define X 9\n").unwrap();
-        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
             .with_include(dir.clone())
@@ -3358,7 +3653,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         let dir = unique_tmp_dir("replay_accum");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("m.h"), "int m_decl;\n#define FROM_HDR 5\n").unwrap();
-        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let src = "#include \"m.h\"\n";
         let shared1 = Arc::new(RwLock::new(MacroTable::new()));
@@ -3852,7 +4147,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         .unwrap();
 
         let shared = Arc::new(RwLock::new(MacroTable::new()));
-        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
         // Warm-style pass over the first twin: defines LIST_H, caches text.
@@ -3887,7 +4182,11 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             r2.diagnostics
         );
         // (b) outer.h's cached entry must not claim b/list.h as content-bearing
-        let outer_entry = cache.read().unwrap().get(&dir.join("outer.h")).cloned();
+        let outer_entry = cache
+            .read()
+            .unwrap()
+            .get(&(dir.join("outer.h"), Language::C))
+            .cloned();
         let claimed_b = outer_entry
             .as_ref()
             .map(|e| e.files.iter().any(|f| *f == b.join("list.h")))
@@ -3919,14 +4218,14 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             let mut t = shared.write().unwrap();
             use crate::macros::MacroDef;
             use crate::{Lexer, TokenKind};
-            let toks: Vec<_> = Lexer::new("1")
+            let toks: Vec<_> = Lexer::new("1", Language::C)
                 .tokenize()
                 .into_iter()
                 .filter(|t| !matches!(t.kind, TokenKind::Eof))
                 .collect();
             t.insert("G_H".to_string(), MacroDef::Object { replacement: toks });
         }
-        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
             .with_shared_macros(Arc::clone(&shared))
@@ -3975,7 +4274,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         )
         .unwrap();
 
-        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let warm = PreprocessOptions::new()
             .with_include_expansion_cache(Arc::clone(&cache))
@@ -3996,7 +4295,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         let right = cache
             .read()
             .unwrap()
-            .get(&dir.join("right.h"))
+            .get(&(dir.join("right.h"), Language::C))
             .cloned()
             .expect("right.h cached");
         assert!(
@@ -4033,7 +4332,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             src.push_str(&format!("int v{i};\n#endif\n"));
             fs::write(dir.join(format!("h{i}.h")), src).unwrap();
         }
-        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
             .with_include_expansion_cache(Arc::clone(&cache))
@@ -4123,7 +4422,7 @@ int x = A;
             "#ifndef TOP_H\n#define TOP_H\n#include \"common.h\"\nint from_top;\n#endif\n",
         )
         .unwrap();
-        let cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>> =
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let opts = PreprocessOptions::new()
             .with_include_expansion_cache(Arc::clone(&cache))
@@ -4143,13 +4442,69 @@ int x = A;
         let common = cache
             .read()
             .unwrap()
-            .get(&dir.join("common.h"))
+            .get(&(dir.join("common.h"), Language::C))
             .cloned()
             .expect("common.h cached");
         assert!(
             common.text.contains("NeedThis"),
             "child cache still holds its own text: {}",
             common.text
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_file_is_emitted_even_when_the_cache_already_holds_it() {
+        // via.h includes late.h through a macro, so an indexer's raw include
+        // scanner cannot order late.h before via.h; preprocessing via.h
+        // first puts late.h into the expansion cache. A later run rooted at
+        // late.h must still emit late.h's own text rather than replay that
+        // entry (which, with `inline_include_bodies` off, emits nothing).
+        let dir = unique_tmp_dir("root_cached");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("late.h"),
+            "#ifndef LATE_H_
+#define LATE_H_
+int from_late;
+#endif
+",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("via.h"),
+            "#ifndef VIA_H
+#define VIA_H
+#define LATE_H \"late.h\"
+#include LATE_H
+#endif
+",
+        )
+        .unwrap();
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = PreprocessOptions::new()
+            .with_include_expansion_cache(Arc::clone(&cache))
+            .with_include(dir.clone())
+            .with_inline_include_bodies(false);
+        let via = preprocess_file(&dir.join("via.h"), &opts).unwrap();
+        assert!(
+            !via.output.contains("from_late"),
+            "nested body stays out of the parent's output: {}",
+            via.output
+        );
+        assert!(
+            cache
+                .read()
+                .unwrap()
+                .contains_key(&(dir.join("late.h"), Language::C)),
+            "the macro include put late.h into the cache"
+        );
+        let late = preprocess_file(&dir.join("late.h"), &opts).unwrap();
+        assert!(
+            late.output.contains("from_late"),
+            "a run rooted at late.h must emit its text: {:?}",
+            late.output
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -4687,6 +5042,66 @@ int x = A;
             result.output
         );
         assert!(!result.output.contains('#'), "{}", result.output);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn raw_string_fixture_survives_preprocessing_intact() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/preproc/raw_string.cpp");
+        let result = preprocess_file(&path, &PreprocessOptions::new()).unwrap();
+        // The single-literal, macro and stringize shapes are asserted by the
+        // unit tests above; the file adds the multi-line literal, prefixes
+        // and concatenation, and the whole-file "nothing was split" check.
+        let out = &result.output;
+        for literal in [
+            "R\"~({\n  \"file\": \"/data/log/test\",\n  \"pc\": \"0x1234\"\n})~\"",
+            "LR\"(w \"x\")\"",
+            "u8R\"(y \"z\")\"",
+            "R\"~({\"k\":\")~\" \"v\" R\"~(\"})~\"",
+            "json= R\"({\"k\":1})\"_json ;",
+            "jsonViaMacro= R\"~({\"k\":2})~\"_json ;",
+            "sec= \"text\"s+ 10_s ;",
+            "wc= L'x' ;",
+            "c16= u'y' ;",
+            "int Rect= R+ 1 ;",
+        ] {
+            assert!(out.contains(literal), "missing {literal:?} in:\n{out}");
+        }
+        assert!(!out.contains("R \""), "a raw string was split:\n{out}");
+        assert!(
+            !out.contains("\" _json"),
+            "a ud-suffix was split off:\n{out}"
+        );
+        assert!(
+            !out.contains("L '"),
+            "a prefixed char literal was split:\n{out}"
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn c_fixture_expands_macros_next_to_raw_string_and_udl_shapes() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/preproc/raw_string_shapes.c");
+        let result = preprocess_file(&path, &PreprocessOptions::new()).unwrap();
+        let out = &result.output;
+        for expected in [
+            "const char* s= \"(x)\" ;",
+            "int n= 'a'+ 1 ;",
+            "int m[]={1 \"y\" , 2 } ;",
+            "w= L\"w\" ;",
+            "u= u8\"s\" ;",
+            "c16= u'y' ;",
+        ] {
+            assert!(out.contains(expected), "missing {expected:?} in:\n{out}");
+        }
+        assert!(
+            !out.contains("R\""),
+            "R was lexed as a raw-string prefix:\n{out}"
+        );
         assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     }
 

@@ -14,7 +14,7 @@ use trace_ir::{
     CallSite, Diagnostic, DiagnosticSeverity, FieldId, FlowConstraint, FnId, Function, Linkage,
     Program, ReturnFlow, ScalarKind, Span, StorageClass, TypeDesc, VarId, Variable,
 };
-use trace_preproc::{macro_table_from_defines, MacroTable, PreprocessOptions};
+use trace_preproc::{macro_table_from_defines, Language, MacroTable, PreprocessOptions};
 use tree_sitter::Node;
 
 /// Nested AST walk cap. Pathological left-deep trees (comma-operator
@@ -237,9 +237,24 @@ pub fn build_program_with_jobs(
     // headers' final macro states — because cached expansions are replayed
     // without executing their #define directives, so TU-local code needs the
     // macros those headers define.
-    let union_macros: Arc<std::sync::RwLock<MacroTable>> = Arc::new(std::sync::RwLock::new(
-        macro_table_from_defines(&opts.defines),
-    ));
+    //
+    // One union per language: a `-D` body and a header's replacement lists
+    // are token sequences, and the C and C++ lexers disagree on raw strings
+    // and ud-suffixes, so a TU inherits the table lexed its own way. Both
+    // unions still hold EVERY warmed header's macros (same-language warm
+    // preferred, the other language's re-lexed for the destination as
+    // fallback): a header not reached from a unit of that language is rare
+    // in one but not the other, and the union's job — twin-guard dedup and
+    // a macro superset for orphan and PCH headers — must not depend on
+    // which language reached it.
+    let union_macros: HashMap<Language, Arc<std::sync::RwLock<MacroTable>>> =
+        [Language::C, Language::Cpp]
+            .into_iter()
+            .map(|l| {
+                let table = macro_table_from_defines(&opts.defines, l);
+                (l, Arc::new(std::sync::RwLock::new(table)))
+            })
+            .collect();
     let project_headers: Vec<PathBuf> = include_graph
         .project_files
         .iter()
@@ -247,74 +262,170 @@ pub fn build_program_with_jobs(
         .cloned()
         .collect();
     let c_sources: HashSet<PathBuf> = files.iter().cloned().collect();
-    let reachable_from_c = include_graph.reachable_from(&c_sources);
-    let headers_for_macro_warm: Vec<PathBuf> = include_graph.index_order(
-        &project_headers
-            .iter()
-            .filter(|p| reachable_from_c.contains(*p))
-            .cloned()
-            .collect::<Vec<_>>(),
-    );
 
     // `.h` is language-ambiguous. Parse it as C++ when a C++ TU can reach it
     // (the pre-PCH behavior: header tokens were spliced into that TU).
-    // `.hpp`/`.hh`/… are always C++ via `SourceLang::from_path`.
+    // `.hpp`/`.hh`/… are always C++ via `Language::from_path`.
     let cpp_tus: HashSet<PathBuf> = files
         .iter()
         .filter(|p| crate::discover::is_cpp_path(p))
         .cloned()
         .collect();
+    let c_tus: HashSet<PathBuf> = files
+        .iter()
+        .filter(|p| !cpp_tus.contains(*p))
+        .cloned()
+        .collect();
+    let forced_language = eff_opts.language;
 
+    // A header is lexed as the unit including it, and the expansion cache
+    // is keyed by (path, language), so a header reached from both C and C++
+    // units is warmed once per language: each unit then replays the
+    // tokenization its own lexer would produce (raw strings and
+    // ud-suffixes are one token in C++, identifier + literal in C). The
+    // first language listed is the one the header is parsed as (C++ when a
+    // C++ TU can reach it, as `index_language` decides) and feeds the source
+    // cache; any other only fills the expansion cache and its union table.
+    // An explicit `PreprocessOptions::with_language` lexes everything as
+    // that language.
+    //
+    // Reachability is decided on the include graph, and warming grows that
+    // graph: a `#include MACRO` the raw scanner cannot see is discovered
+    // only while preprocessing the header spelling it. A `.h` first reached
+    // from C alone may turn out to be reachable from a C++ unit through
+    // such an edge, and it is then parsed as C++ — so its cached text must
+    // be the C++ preprocess, not the C one. The pass therefore runs to a
+    // fixed point: after each round the discovered edges are added, every
+    // header's language list is recomputed, and any header whose list
+    // changed (or that only became reachable) is evicted and warmed again
+    // under a fresh table. Rounds beyond the first touch only reclassified
+    // headers, and the graph only grows, so this terminates.
     let source_cache = IndexSourceCache::new();
-    let warm_n = headers_for_macro_warm.len();
-    index_progress(format!(
-        "warm: {warm_n} reachable headers (jobs={jobs} after this sequential pass)"
-    ));
-    for (i, path) in headers_for_macro_warm.iter().enumerate() {
-        let t = Instant::now();
-        index_item_progress(
-            i,
-            warm_n,
-            format!("warm: {}/{} {}", i + 1, warm_n, path.display()),
-        );
-        let header_macros: Arc<std::sync::RwLock<MacroTable>> = Arc::new(std::sync::RwLock::new(
-            macro_table_from_defines(&opts.defines),
-        ));
-        let header_prep_opts = eff_opts
-            .clone()
-            .with_shared_macros(Arc::clone(&header_macros))
-            .with_accumulate_macros(true);
-        if let Err(e) = source_cache.get_or_preprocess(path, &include_graph, &header_prep_opts) {
-            program.add_diagnostic(Diagnostic {
-                severity: DiagnosticSeverity::Warning,
-                file: None,
-                line: 0,
-                message: format!("macro warm preprocess failed for {}: {e}", path.display()),
-                stage: "preprocess".into(),
-            });
-            continue;
+    let mut warmed_as: HashMap<PathBuf, Vec<Language>> = HashMap::new();
+    let mut round = 0usize;
+    loop {
+        for (from, headers) in source_cache.included_by_file() {
+            include_graph.add_preprocess_includes(&from, &headers);
         }
-        if let Ok(mut union) = union_macros.write() {
-            if let Ok(done) = header_macros.read() {
-                for (name, def) in done.iter() {
-                    union.insert(name.clone(), def.clone());
+        let reachable_from_c = include_graph.reachable_from(&c_sources);
+        let reachable_from_cpp = include_graph.reachable_from(&cpp_tus);
+        let reachable_from_c_units = include_graph.reachable_from(&c_tus);
+        let warm_languages = |path: &PathBuf| -> Vec<Language> {
+            if let Some(l) = forced_language {
+                return vec![l];
+            }
+            let mut langs = Vec::new();
+            if crate::discover::is_cpp_header_path(path) || reachable_from_cpp.contains(path) {
+                langs.push(Language::Cpp);
+            }
+            if reachable_from_c_units.contains(path) {
+                langs.push(Language::C);
+            }
+            if langs.is_empty() {
+                langs.push(Language::from_path(path));
+            }
+            langs
+        };
+        let headers_for_macro_warm: Vec<(PathBuf, Vec<Language>)> = include_graph
+            .index_order(
+                &project_headers
+                    .iter()
+                    .filter(|p| reachable_from_c.contains(*p))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+            .into_iter()
+            .map(|p| {
+                let langs = warm_languages(&p);
+                (p, langs)
+            })
+            .filter(|(p, langs)| warmed_as.get(p) != Some(langs))
+            .collect();
+        if headers_for_macro_warm.is_empty() {
+            break;
+        }
+        round += 1;
+        let warm_n = headers_for_macro_warm.len();
+        index_progress(format!(
+            "warm[{round}]: {warm_n} reachable headers (jobs={jobs} after this sequential pass)"
+        ));
+        for (i, (path, languages)) in headers_for_macro_warm.iter().enumerate() {
+            let t = Instant::now();
+            index_item_progress(
+                i,
+                warm_n,
+                format!("warm: {}/{} {}", i + 1, warm_n, path.display()),
+            );
+            if warmed_as.insert(path.clone(), languages.clone()).is_some() {
+                source_cache.evict(path, &include_graph);
+            }
+            let mut failed = false;
+            let mut warmed: Vec<(Language, Arc<std::sync::RwLock<MacroTable>>)> = Vec::new();
+            for (k, language) in languages.iter().copied().enumerate() {
+                let header_macros: Arc<std::sync::RwLock<MacroTable>> = Arc::new(
+                    std::sync::RwLock::new(macro_table_from_defines(&opts.defines, language)),
+                );
+                let header_prep_opts = eff_opts
+                    .clone()
+                    .with_shared_macros(Arc::clone(&header_macros))
+                    .with_accumulate_macros(true)
+                    .with_language(language);
+                let result = if k == 0 {
+                    source_cache
+                        .get_or_preprocess(path, &include_graph, &header_prep_opts)
+                        .map(|_| ())
+                } else {
+                    source_cache.preprocess_uncached(path, &include_graph, &header_prep_opts)
+                };
+                if let Err(e) = result {
+                    program.add_diagnostic(Diagnostic {
+                        severity: DiagnosticSeverity::Warning,
+                        file: None,
+                        line: 0,
+                        message: format!(
+                            "macro warm preprocess failed for {}: {e}",
+                            path.display()
+                        ),
+                        stage: "preprocess".into(),
+                    });
+                    failed = true;
+                    break;
+                }
+                warmed.push((language, header_macros));
+            }
+            if failed {
+                continue;
+            }
+            for (language, union) in &union_macros {
+                let Some((from, done)) = warmed
+                    .iter()
+                    .find(|(l, _)| l == language)
+                    .or_else(|| warmed.first())
+                else {
+                    continue;
+                };
+                if let (Ok(mut union), Ok(done)) = (union.write(), done.read()) {
+                    for (name, def) in done.iter() {
+                        let def = if from == language {
+                            def.clone()
+                        } else {
+                            def.relexed(*language)
+                        };
+                        union.insert(name.clone(), def);
+                    }
                 }
             }
-        }
-        index_item_progress(
-            i,
-            warm_n,
-            format!(
-                "warm-done: {}/{} {:.1}s",
-                i + 1,
+            index_item_progress(
+                i,
                 warm_n,
-                t.elapsed().as_secs_f64()
-            ),
-        );
-    }
-
-    for (from, headers) in source_cache.included_by_file() {
-        include_graph.add_preprocess_includes(&from, &headers);
+                format!(
+                    "warm-done: {}/{} {:.1}s",
+                    i + 1,
+                    warm_n,
+                    t.elapsed().as_secs_f64()
+                ),
+            );
+        }
     }
 
     // Macro includes discovered while warming can make a previously "orphan"
@@ -350,9 +461,19 @@ pub fn build_program_with_jobs(
     // entries were produced sequentially and deterministically, while worker
     // inserts are first-writer-wins races that make output scheduling-
     // dependent. Misses expand inline under each TU's own macro/guard state.
-    let index_opts = eff_opts
-        .with_shared_macros(union_macros)
-        .with_frozen_expansion_cache(true);
+    // One option set per language; each file takes the one matching the
+    // language it is lexed and parsed as (`index_language`).
+    let index_opts: HashMap<Language, PreprocessOptions> = union_macros
+        .iter()
+        .map(|(l, table)| {
+            let o = eff_opts
+                .clone()
+                .with_shared_macros(Arc::clone(table))
+                .with_frozen_expansion_cache(true)
+                .with_language(*l);
+            (*l, o)
+        })
+        .collect();
 
     index_progress(format!(
         "parse: {} orphan headers, {} TUs (jobs={jobs})",
@@ -389,10 +510,9 @@ pub fn build_program_with_jobs(
                     path,
                     root,
                     &include_graph,
-                    &index_opts,
+                    &index_opts[&index_language(path, &cpp_parse, forced_language)],
                     &source_cache,
                     Some(&header_ir_map),
-                    &cpp_parse,
                     pch_order.as_ref(),
                 );
                 header_ir_map.insert(include_graph.intern_path(path), Arc::new(unit));
@@ -408,10 +528,9 @@ pub fn build_program_with_jobs(
                                 path,
                                 root,
                                 &include_graph,
-                                &index_opts,
+                                &index_opts[&index_language(path, &cpp_parse, forced_language)],
                                 &source_cache,
                                 Some(&snapshot),
-                                &cpp_parse,
                                 pch_order.as_ref(),
                             ),
                         )
@@ -428,10 +547,9 @@ pub fn build_program_with_jobs(
             &path,
             root,
             &include_graph,
-            &index_opts,
+            &index_opts[&index_language(&path, &cpp_parse, forced_language)],
             &source_cache,
             Some(&header_ir_map),
-            &cpp_parse,
             pch_order.as_ref(),
         );
         header_ir_map.insert(include_graph.intern_path(&path), Arc::new(unit));
@@ -469,10 +587,9 @@ pub fn build_program_with_jobs(
                         path,
                         root,
                         &include_graph,
-                        &index_opts,
+                        &index_opts[&index_language(path, &cpp_parse, forced_language)],
                         &source_cache,
                         Some(&header_ir),
-                        &cpp_parse,
                         pch_order.as_ref(),
                     ),
                 );
@@ -497,10 +614,9 @@ pub fn build_program_with_jobs(
                             path,
                             root,
                             &include_graph,
-                            &index_opts,
+                            &index_opts[&index_language(path, &cpp_parse, forced_language)],
                             &source_cache,
                             Some(&header_ir),
-                            &cpp_parse,
                             pch_order.as_ref(),
                         ),
                     )
@@ -529,10 +645,9 @@ pub fn build_program_with_jobs(
                         path,
                         root,
                         &include_graph,
-                        &index_opts,
+                        &index_opts[&index_language(path, &cpp_parse, forced_language)],
                         &source_cache,
                         Some(&header_ir),
-                        &cpp_parse,
                         pch_order.as_ref(),
                     ),
                 );
@@ -557,10 +672,9 @@ pub fn build_program_with_jobs(
                             path,
                             root,
                             &include_graph,
-                            &index_opts,
+                            &index_opts[&index_language(path, &cpp_parse, forced_language)],
                             &source_cache,
                             Some(&header_ir),
-                            &cpp_parse,
                             pch_order.as_ref(),
                         ),
                     )
@@ -836,13 +950,25 @@ fn headers_to_merge<'a>(
     out
 }
 
-fn index_lang(path: &Path, cpp_parse: &HashSet<PathBuf>) -> crate::parse::SourceLang {
-    if crate::parse::SourceLang::from_path(path) == crate::parse::SourceLang::Cpp
-        || cpp_parse.contains(path)
-    {
-        crate::parse::SourceLang::Cpp
-    } else {
-        crate::parse::SourceLang::C
+/// The one language decision for a file during indexing: it is lexed,
+/// preprocessed AND parsed (tree-sitter grammar, C++ lowering rules) as
+/// this. An explicit `PreprocessOptions::with_language` wins; otherwise a
+/// file reachable from a C++ TU is C++ (a `.h` included from `.cpp`), and
+/// anything else follows its extension.
+fn index_language(path: &Path, cpp_parse: &HashSet<PathBuf>, forced: Option<Language>) -> Language {
+    forced.unwrap_or_else(|| {
+        if cpp_parse.contains(path) {
+            Language::Cpp
+        } else {
+            Language::from_path(path)
+        }
+    })
+}
+
+fn source_lang(language: Language) -> crate::parse::SourceLang {
+    match language {
+        Language::C => crate::parse::SourceLang::C,
+        Language::Cpp => crate::parse::SourceLang::Cpp,
     }
 }
 
@@ -854,7 +980,6 @@ fn index_source_file(
     index_opts: &PreprocessOptions,
     source_cache: &IndexSourceCache,
     header_ir: Option<&HashMap<PathBuf, Arc<UnitIndex>>>,
-    cpp_parse: &HashSet<PathBuf>,
     pch_order: &[PathBuf],
 ) -> UnitIndex {
     let mut program = Program::new(root.to_path_buf());
@@ -865,7 +990,6 @@ fn index_source_file(
         index_opts,
         source_cache,
         header_ir,
-        cpp_parse,
         pch_order,
     ) {
         Ok(()) => {
@@ -913,7 +1037,6 @@ fn process_indexed_file(
     index_opts: &PreprocessOptions,
     source_cache: &IndexSourceCache,
     header_ir: Option<&HashMap<PathBuf, Arc<UnitIndex>>>,
-    cpp_parse: &HashSet<PathBuf>,
     pch_order: &[PathBuf],
 ) -> Result<(), String> {
     let pre = source_cache.get_or_preprocess(path, graph, index_opts)?;
@@ -955,7 +1078,15 @@ fn process_indexed_file(
         );
         let _ = std::fs::write(std::path::Path::new(&dir).join(fname), pre.text.as_ref());
     }
-    let lang = index_lang(path, cpp_parse);
+    // `index_opts` was chosen by `index_language`, so its language is the
+    // one the text was lexed as; the grammar must not be re-derived from
+    // the path or a forced language would preprocess as one language and
+    // parse as the other.
+    let lang = source_lang(
+        index_opts
+            .language
+            .unwrap_or_else(|| Language::from_path(path)),
+    );
     let parsed = crate::parse::parse_source_with_lang(Arc::clone(&pre.text), lang)?;
     if crate::parse::has_parse_errors(&parsed.tree) {
         program.add_diagnostic(Diagnostic {

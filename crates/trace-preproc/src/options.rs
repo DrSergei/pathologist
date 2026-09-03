@@ -1,6 +1,43 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+
+/// The language a translation unit is lexed as. Lexing is not identical
+/// across the two: C++11 raw string literals (`R"(…)"`) and user-defined
+/// literal suffixes (`"x"_s`, `'c'_w`) are single tokens in C++ but two
+/// tokens in C, where `R` and the suffix are identifiers that may well be
+/// macros (`#define R …` / `'a'C`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Language {
+    C,
+    Cpp,
+}
+
+impl Language {
+    /// Language implied by a file's extension: the C++ TU and header
+    /// spellings GCC recognizes (`.cpp`, `.cc`, `.cxx`, `.c++`, `.C`,
+    /// `.hpp`, `.hh`, `.hxx`, `.h++`, `.H`, `.inl`, `.ipp`) are C++;
+    /// everything else, including the language-ambiguous `.h`, is C. This
+    /// is the one place that decides; the indexer's discovery and grammar
+    /// choice derive from it.
+    pub fn from_path(path: &Path) -> Self {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some(
+                "cpp" | "cc" | "cxx" | "c++" | "C" | "hpp" | "hh" | "hxx" | "h++" | "H" | "inl"
+                | "ipp",
+            ) => Language::Cpp,
+            _ => Language::C,
+        }
+    }
+}
+
+/// Key of the include-expansion cache: a header's canonical path and the
+/// [`Language`] it was lexed as. A header has no language of its own — it
+/// is lexed as the translation unit including it — and the two lexers
+/// disagree on raw strings and ud-suffixes, so a header reached from both
+/// C and C++ units gets one entry per language rather than the first
+/// unit's tokenization replayed into the other.
+pub type ExpansionKey = (PathBuf, Language);
 
 /// Cached preprocessed body for a `#include`d file (shared across translation units).
 #[derive(Debug, Clone)]
@@ -27,8 +64,9 @@ pub struct PreprocessOptions {
     pub defines: indexmap::IndexMap<String, String>,
     /// Canonical path → raw file contents (skips disk reads during `#include` expansion).
     pub source_cache: Option<std::sync::Arc<HashMap<PathBuf, std::sync::Arc<str>>>>,
-    /// Shared cache of expanded `#include` bodies keyed by canonical path.
-    pub include_expansion_cache: Option<Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>>>,
+    /// Shared cache of expanded `#include` bodies keyed by canonical path
+    /// and lexing language (see [`ExpansionKey`]).
+    pub include_expansion_cache: Option<Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>>>,
     /// Basename → project paths for fast include resolution.
     pub basename_index: Option<Arc<HashMap<String, Vec<PathBuf>>>>,
     /// Shared macro table populated during header warm-up; inherited by translation units.
@@ -54,6 +92,10 @@ pub struct PreprocessOptions {
     /// header IR is merged later). Default true keeps standalone
     /// `preprocess_file` self-contained.
     pub inline_include_bodies: bool,
+    /// Language the translation unit (and every header it includes) is
+    /// lexed as. `None` derives it from the TU path via
+    /// [`Language::from_path`].
+    pub language: Option<Language>,
 }
 
 impl Default for PreprocessOptions {
@@ -72,6 +114,7 @@ impl Default for PreprocessOptions {
             max_include_depth: 64,
             max_expanded_tokens: 8_000_000,
             inline_include_bodies: true,
+            language: None,
         }
     }
 }
@@ -93,7 +136,7 @@ impl PreprocessOptions {
 
     pub fn with_include_expansion_cache(
         mut self,
-        cache: Arc<RwLock<HashMap<PathBuf, IncludeExpansion>>>,
+        cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>>,
     ) -> Self {
         self.include_expansion_cache = Some(cache);
         self
@@ -146,6 +189,11 @@ impl PreprocessOptions {
 
     pub fn with_inline_include_bodies(mut self, inline_bodies: bool) -> Self {
         self.inline_include_bodies = inline_bodies;
+        self
+    }
+
+    pub fn with_language(mut self, language: Language) -> Self {
+        self.language = Some(language);
         self
     }
 }

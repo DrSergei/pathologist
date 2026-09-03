@@ -1,4 +1,4 @@
-use crate::{Token, TokenKind};
+use crate::{Language, Token, TokenKind};
 use indexmap::IndexMap;
 use std::sync::{Arc, RwLock};
 
@@ -19,6 +19,36 @@ pub enum MacroDef {
     },
 }
 
+impl MacroDef {
+    /// This definition re-lexed as `language`. A replacement list is a
+    /// token sequence, and the C and C++ lexers disagree on raw strings and
+    /// ud-suffixes — `R"(x)"` is one C++ token but `R` + `"(x)"` in C,
+    /// `'a'C` one C++ token but `'a'` + `C` in C — so a definition lexed
+    /// for one language must not reach a unit of the other as is. The
+    /// tokens are spelled back with their adjacency intact, which is all
+    /// the two lexers disagree about, and lexed again.
+    pub fn relexed(&self, language: Language) -> MacroDef {
+        let relex = |tokens: &[Token]| {
+            let spelling = crate::preprocessor::spell_tokens(tokens, str::to_string);
+            lex_macro_body(&spelling, language)
+        };
+        match self {
+            MacroDef::Object { replacement } => MacroDef::Object {
+                replacement: relex(replacement),
+            },
+            MacroDef::Function {
+                params,
+                replacement,
+                variadic,
+            } => MacroDef::Function {
+                params: params.clone(),
+                replacement: relex(replacement),
+                variadic: *variadic,
+            },
+        }
+    }
+}
+
 /// One executed macro directive, in program order. Cached include entries
 /// record these so replay reproduces the header's effects exactly — a
 /// state diff cannot represent a no-op `#undef` (name absent at capture,
@@ -37,13 +67,18 @@ pub fn new_shared_macro_table() -> SharedMacroTable {
     Arc::new(RwLock::new(MacroTable::new()))
 }
 
-pub fn macro_table_from_defines(defines: &indexmap::IndexMap<String, String>) -> MacroTable {
+/// Object-like macros for command-line `-D` definitions, their bodies
+/// lexed as `language` (see [`Language`] for what differs).
+pub fn macro_table_from_defines(
+    defines: &indexmap::IndexMap<String, String>,
+    language: Language,
+) -> MacroTable {
     let mut table = MacroTable::new();
     for (name, val) in defines {
         table.insert(
             name.clone(),
             MacroDef::Object {
-                replacement: lex_macro_body(val),
+                replacement: lex_macro_body(val, language),
             },
         );
     }
@@ -51,10 +86,89 @@ pub fn macro_table_from_defines(defines: &indexmap::IndexMap<String, String>) ->
 }
 
 /// Tokenize a macro replacement list from source text (Eof stripped).
-pub(crate) fn lex_macro_body(src: &str) -> Vec<Token> {
-    crate::Lexer::new(src)
+pub(crate) fn lex_macro_body(src: &str, language: Language) -> Vec<Token> {
+    crate::Lexer::new(src, language)
         .tokenize()
         .into_iter()
         .filter(|t| !matches!(t.kind, TokenKind::Eof))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kinds(def: &MacroDef) -> Vec<TokenKind> {
+        match def {
+            MacroDef::Object { replacement } | MacroDef::Function { replacement, .. } => {
+                replacement.iter().map(|t| t.kind.clone()).collect()
+            }
+        }
+    }
+
+    fn object(src: &str, language: Language) -> MacroDef {
+        MacroDef::Object {
+            replacement: lex_macro_body(src, language),
+        }
+    }
+
+    #[test]
+    fn relexed_changes_only_the_language_dependent_token_shapes() {
+        let ident = |s: &str| TokenKind::Identifier(s.to_string());
+        let string = |s: &str| TokenKind::String(s.to_string());
+        let chr = |s: &str| TokenKind::Char(s.to_string());
+        // C -> C++: `R` glued to `"(x)"` becomes one raw string; `'a'` glued
+        // to `C` one user-defined literal.
+        let c = object("R\"(x)\"[0] + 'a'C", Language::C);
+        assert_eq!(kinds(&c)[..2], [ident("R"), string("\"(x)\"")]);
+        let cpp = c.relexed(Language::Cpp);
+        assert_eq!(
+            kinds(&cpp),
+            vec![
+                string("R\"(x)\""),
+                TokenKind::Punct("[".into()),
+                TokenKind::Number("0".into()),
+                TokenKind::Punct("]".into()),
+                TokenKind::Punct("+".into()),
+                chr("'a'C"),
+            ]
+        );
+        // C++ -> C: the round trip splits them again.
+        assert_eq!(kinds(&cpp.relexed(Language::C)), kinds(&c));
+        // Whitespace in the source keeps tokens apart in both languages.
+        let spaced = object("R \"(x)\" 'a' C", Language::C);
+        assert_eq!(kinds(&spaced.relexed(Language::Cpp)), kinds(&spaced));
+        // Same-language re-lexing is the identity.
+        assert_eq!(kinds(&c.relexed(Language::C)), kinds(&c));
+    }
+
+    #[test]
+    fn relexed_keeps_function_like_shape_and_operators() {
+        let def = MacroDef::Function {
+            params: vec!["x".into(), "__VA_ARGS__".into()],
+            replacement: lex_macro_body("#x ## _t(__VA_ARGS__) R\"(x)\"", Language::Cpp),
+            variadic: true,
+        };
+        let MacroDef::Function {
+            params,
+            replacement,
+            variadic,
+        } = def.relexed(Language::C)
+        else {
+            panic!("function-like shape lost");
+        };
+        assert_eq!(params, vec!["x".to_string(), "__VA_ARGS__".to_string()]);
+        assert!(variadic);
+        let k: Vec<TokenKind> = replacement.iter().map(|t| t.kind.clone()).collect();
+        assert_eq!(k[0], TokenKind::Hash);
+        assert_eq!(k[1], TokenKind::Identifier("x".into()));
+        assert_eq!(k[2], TokenKind::Punct("##".into()));
+        assert_eq!(
+            &k[k.len() - 2..],
+            &[
+                TokenKind::Identifier("R".into()),
+                TokenKind::String("\"(x)\"".into())
+            ]
+        );
+    }
 }

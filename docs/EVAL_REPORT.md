@@ -100,6 +100,52 @@ site); values it does not touch were left on upstream's baseline. `docs/PARSE_FA
 regenerated from this run. `cargo test --workspace` is green and `eval_check.py` is back to
 **67/67 PASS** against the re-captured file.
 
+**Re-verified 2026-09-03 (C++11 raw string literals, #14):** all three corpora were re-analyzed
+at the pinned checkouts with the pre-fix (`#8`/`#13` branch head) and post-fix binaries. The
+pre-fix binary scores **67/67** against the previous `eval_expected.json`, so every delta below is
+this change alone. The lexer used to split `R"(a "q" b)"` into `R "(a " q " b)"`, so every raw
+string literal — the JSON templates, regexes and `logPath:` fragments that hiview's tests and a
+few production files are full of — spilled inner quotes and parentheses into the surrounding
+code. It is now one token, re-emitted verbatim.
+
+*hiview* is where the literals live. The `parse_failures` TSV drops **954 → 102** ERROR rows
+and the failing-file set **57 → 37**: 20 files leave and **none enter** — 18 unit tests
+(`faultlog_{formatter,cppcrash,database,jserror,cjerror}_test`, `sys_event_dao_test`,
+`sys_event_service_ohos_test`, `sys_event_test`, `event_raw_encoded_and_decoded_test`,
+`freeze_detector_unittest`, `event_export_write_test`, `event_{field_validator,logger_config_validate}_test`,
+`bbox_detector_base_unit_test`, `utility_common_utils_test`, `cpp_crash_unittest`,
+`syswarning_unittest`, `sys_event_store_utility_test`) plus two production files,
+`faultlogger/.../faultlog_dump.cpp` (the `FAULTLOGGER_CMD_USAGE_INFO` literal the `#13` note
+above called out) and `bbox_detectors/.../panic_report_recovery.cpp` (a `REGEX_FORMAT` regex).
+The `)~ "`, `"file":`, `"pc":`, `"symbol":` and bare-`"` ERROR sites are all gone. Because those
+20 files now parse, the corpus gains code: `diagnostics` **57 → 37**, call edges
+**28,075 → 28,287** (direct 7,693 → 7,791, external 20,358 → 20,472), arg-flow
+**9,107 → 9,243**, functions 11,467 → 11,464 with **7,727 → 7,772 defined** and
+3,740 → 3,692 external (test bodies that used to be swallowed by a broken literal now define
+their functions instead of leaving phantom externals). Indirect edges stay at **24**, `dlsym`
+edges at 1, and **every hub target-name set and site check is unchanged**.
+
+*camera* loses its two raw-string users, `camera_rotate_param_{manager,reader}_unittest.cpp`
+(31 ERROR rows, **850 → 819**), so `diagnostics` goes **93 → 91**; every other camera metric is
+within the usual ±1 run-to-run drift and no site check moves. *hdf* has no raw string literals;
+its TSV is **byte-identical** (615 rows, 176 files) and all its metrics are unchanged.
+
+`scripts/eval_expected.json` was re-captured for the hiview globals and the two `diagnostics`
+counts; `docs/PARSE_FAILURES.md` was regenerated from this run (hiview's "generic ERROR nodes"
+category 43 → 24 files). `cargo test --workspace` is green and `eval_check.py` is back to
+**67/67 PASS** against the re-captured file. The follow-up that makes every string/char literal
+carry its spelling — so encoding-prefixed literals (`L'x'`, `u8"s"`) are one token instead of
+`L 'x'`, a tree-sitter ERROR site — was re-run the same way and is **metric-identical**: the
+three corpora contain no prefixed literal outside format strings and character arrays (every
+`u"` / `u'` grep hit is `%{public}u"` or `{'s','u',...}`), so it is carried by the fixture and
+unit tests. A review pass on top of that (stringizing a raw string that spans lines now writes
+the embedded newline as `\n`, as gcc does, instead of emitting a string literal with a bare
+newline in it) was re-run the same way and is also metric-identical: no corpus file passes a
+multi-line raw string through `#`. Likewise the follow-up that keeps a C++11 user-defined-literal
+suffix inside its literal token (`R"(json)"_json` used to come out as `R"(json)" _json`, which is
+no longer a user-defined literal): 67/67 and metric-identical, since none of the three corpora
+uses a user-defined literal.
+
 Performance was re-measured with the current binary (fresh runs, `--jobs 8`; stage timers
 are stable, wall-clock varies with cache so values are rounded).
 
@@ -1605,14 +1651,14 @@ Same 13 drivers as case 48, `Set*Disable` stores. Complete vs source.
 | Metric | Value |
 |--------|------:|
 | Files | 1,428 |
-| Functions | 11,467 (7,727 defined / 3,740 external) |
-| Call edges | 28,075 |
-| Direct / indirect / external | 7,693 / **24** / 20,358 |
-| Arg-flow edges | 9,107 |
-| Parse warnings | 57 |
+| Functions | 11,464 (7,772 defined / 3,692 external) |
+| Call edges | 28,287 |
+| Direct / indirect / external | 7,791 / **24** / 20,472 |
+| Arg-flow edges | 9,243 |
+| Parse warnings | 37 |
 | `dlsym` PAG edges | 1 |
 
-The tree previously aborted with a preprocessor stack overflow on `PRIVATE_MESSAGE_TYPE`. Hide-set painting is what makes it finish. The **24** indirect edges include `$lambda` / JSON accessors and C++ overload record splits; production dispatch is recovered as **direct** CHA edges. On this corpus the phantom-bare-stub count fell ~500 records (~3,959 → ~3,740 external), **direct** free-function edges rose ~1,900, arg-flow edges rose with them, and garbage `externalLogJson` indirect sites disappeared — dispatch-site correctness invariants are unchanged. The edge totals above also carry the expansion-site attribution fix shipped with #13 (+147 call edges, +70 arg-flow): macro-generated call sites are keyed by their invocation, so sites that used to collide on shared `#define` coordinates now survive merge dedup. Function counts, the **24** indirect edges and the 57 diagnostics are unaffected by it.
+The tree previously aborted with a preprocessor stack overflow on `PRIVATE_MESSAGE_TYPE`. Hide-set painting is what makes it finish. The **24** indirect edges include `$lambda` / JSON accessors and C++ overload record splits; production dispatch is recovered as **direct** CHA edges. On this corpus the phantom-bare-stub count fell ~500 records (~3,959 → ~3,740 external), **direct** free-function edges rose ~1,900, arg-flow edges rose with them, and garbage `externalLogJson` indirect sites disappeared — dispatch-site correctness invariants are unchanged. The edge totals above also carry the expansion-site attribution fix shipped with #13 (+147 call edges, +70 arg-flow): macro-generated call sites are keyed by their invocation, so sites that used to collide on shared `#define` coordinates now survive merge dedup. Function counts, the **24** indirect edges and the diagnostics are unaffected by it. The raw-string lexer fix (#14) then moved the parse warnings **57 → 37** and, through the 20 files that now parse, +212 call edges, +136 arg-flow edges and +45 defined functions (see the `#14` block at the top).
 
 **Indirect edge changes vs. master** (exact-match metric, both sides):
 - **Lost 3** phantom `externalLogJson` targets in `CopyExternalLogsToSandBox` (these were bare-stub false positives that the qualified-prototype merge now resolves correctly as direct calls).
@@ -2020,9 +2066,9 @@ Hang / stack-overflow checks, not dispatch-hub evals. PCH-style header IR is wha
 | Call edges | 72,929 |
 | Direct / indirect / external | 19,513 / **109** / 53,307 |
 | Arg-flow edges | 17,334 |
-| Parse warnings | 93 |
+| Parse warnings | 91 |
 
-Completes. The **109** indirect edges are almost all fuzzer `FuzzedDataProvider` calls; production dispatch is recovered as **direct** CHA. The rise in direct / arg-flow edges vs the previous snapshot is the same C++ name-lookup improvement — namespace-qualified header prototypes; ADL / `using` resolution for unqualified calls — not a resolution loss — every case target above is unchanged. The **external** total additionally reflects the expansion-site attribution fix shipped with #13 (+8,416 external edges): macro-generated call sites are keyed by their invocation instead of their `#define`, so sites that previously collided are no longer merged away. Function counts, the **109** indirect edges and the 93 diagnostics are unaffected by it.
+Completes. The **109** indirect edges are almost all fuzzer `FuzzedDataProvider` calls; production dispatch is recovered as **direct** CHA. The rise in direct / arg-flow edges vs the previous snapshot is the same C++ name-lookup improvement — namespace-qualified header prototypes; ADL / `using` resolution for unqualified calls — not a resolution loss — every case target above is unchanged. The **external** total additionally reflects the expansion-site attribution fix shipped with #13 (+8,416 external edges): macro-generated call sites are keyed by their invocation instead of their `#define`, so sites that previously collided are no longer merged away. Function counts, the **109** indirect edges and the diagnostics are unaffected by it; the raw-string lexer fix (#14) later took the parse warnings **93 → 91** without moving anything else here.
 
 **Indirect edge changes vs. master** (exact-match metric, both sides):
 - **Lost 16** phantom variable targets (`depthProfile`, `depthProfileRet1..4` in `CreateDepthDataOutput`, `infoDumper` in `DumpCameraSummary`): these were bare-stub false positives that the qualified-prototype merge now resolves correctly.

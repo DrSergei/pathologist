@@ -47,15 +47,15 @@
       "dir": "hiviewdfx_hiview",
       "globals": {
         "files": {"cmp": "exact", "value": 1428},
-        "functions_total": {"cmp": "band", "value": 11472, "tol": 120},
-        "functions_defined": {"cmp": "band", "value": 7727, "tol": 120},
-        "functions_external": {"cmp": "band", "value": 3745, "tol": 120},
-        "edges_total": {"cmp": "band", "value": 28075, "tol": 160},
-        "edges_direct": {"cmp": "band", "value": 7693, "tol": 160},
+        "functions_total": {"cmp": "band", "value": 11464, "tol": 120},
+        "functions_defined": {"cmp": "band", "value": 7772, "tol": 120},
+        "functions_external": {"cmp": "band", "value": 3692, "tol": 120},
+        "edges_total": {"cmp": "band", "value": 28287, "tol": 160},
+        "edges_direct": {"cmp": "band", "value": 7791, "tol": 160},
         "edges_indirect": {"cmp": "exact", "value": 24},
-        "edges_external": {"cmp": "band", "value": 20358, "tol": 160},
-        "arg_flow_edges": {"cmp": "band", "value": 9107, "tol": 120},
-        "diagnostics": {"cmp": "exact", "value": 57},
+        "edges_external": {"cmp": "band", "value": 20472, "tol": 160},
+        "arg_flow_edges": {"cmp": "band", "value": 9243, "tol": 120},
+        "diagnostics": {"cmp": "exact", "value": 37},
         "dlsym_edges": {"cmp": "exact", "value": 1}
       },
       "sites": [
@@ -87,7 +87,7 @@
         "edges_indirect": {"cmp": "exact", "value": 109},
         "edges_external": {"cmp": "band", "value": 53307, "tol": 420},
         "arg_flow_edges": {"cmp": "band", "value": 17334, "tol": 250},
-        "diagnostics": {"cmp": "exact", "value": 93},
+        "diagnostics": {"cmp": "exact", "value": 91},
         "dlsym_edges": {"cmp": "exact", "value": 0}
       },
       "sites": [

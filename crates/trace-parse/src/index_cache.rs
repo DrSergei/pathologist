@@ -54,6 +54,31 @@ impl IndexSourceCache {
         Ok(src)
     }
 
+    /// Preprocess `path` for its side effects only — the include-expansion
+    /// cache and shared macro table carried by `eff_opts` — without storing
+    /// the result here. The warm pass uses it for the second language of a
+    /// header reached from both C and C++ units: this cache keeps the text
+    /// in the language the header is parsed as.
+    pub fn preprocess_uncached(
+        &self,
+        path: &Path,
+        graph: &IncludeGraph,
+        eff_opts: &PreprocessOptions,
+    ) -> Result<(), String> {
+        read_index_source(path, graph, eff_opts).map(|_| ())
+    }
+
+    /// Drop `path` so the next `get_or_preprocess` runs the preprocessor
+    /// again. The warm pass uses it for a header whose language changed
+    /// after a macro-spelled include made it reachable from the other
+    /// language's units: the text cached so far was lexed the old way.
+    pub fn evict(&self, path: &Path, graph: &IncludeGraph) {
+        let canonical = graph.intern_path(path);
+        if let Ok(mut guard) = self.inner.write() {
+            guard.remove(&canonical);
+        }
+    }
+
     /// Canonical file → project headers it `#include`d during preprocess.
     pub fn included_by_file(&self) -> Vec<(PathBuf, Vec<PathBuf>)> {
         let Ok(guard) = self.inner.read() else {
