@@ -1405,7 +1405,7 @@ impl PreprocessorState {
                     .then_some((params, variadic));
             }
             match tokens.get(*i).map(|t| &t.kind) {
-                Some(TokenKind::Punct(s)) if s == ")" => {
+                Some(TokenKind::Punct(s)) if *s == ")" => {
                     *i += 1;
                     break;
                 }
@@ -1426,11 +1426,11 @@ impl PreprocessorState {
                     .then_some((params, variadic));
             }
             match tokens.get(*i).map(|t| &t.kind) {
-                Some(TokenKind::Punct(s)) if s == ")" => {
+                Some(TokenKind::Punct(s)) if *s == ")" => {
                     *i += 1;
                     break;
                 }
-                Some(TokenKind::Punct(s)) if s == "," => {
+                Some(TokenKind::Punct(s)) if *s == "," => {
                     *i += 1;
                 }
                 _ => return self.malformed_param_list(tokens, *i),
@@ -1461,7 +1461,7 @@ impl PreprocessorState {
         loop {
             skip_param_ws(tokens, i);
             match tokens.get(*i).map(|t| &t.kind) {
-                Some(TokenKind::Punct(s)) if s == ")" => {
+                Some(TokenKind::Punct(s)) if *s == ")" => {
                     *i += 1;
                     return true;
                 }
@@ -1485,7 +1485,7 @@ impl PreprocessorState {
     /// phase 2"), so no check here can see through the splice; fixing it
     /// means splice-aware munching in the lexer (#38).
     fn token_is_ellipsis(&self, tokens: &[Token], i: usize) -> bool {
-        matches!(&tokens.get(i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if s == "...")
+        matches!(&tokens.get(i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if *s == "...")
     }
 
     fn next_non_newline_is(&self, tokens: &[Token], mut i: usize, punct: &str) -> bool {
@@ -1494,7 +1494,7 @@ impl PreprocessorState {
         }
         matches!(
             tokens.get(i).map(|t| &t.kind),
-            Some(TokenKind::Punct(s)) if s == punct
+            Some(TokenKind::Punct(s)) if *s == punct
         )
     }
 
@@ -1506,7 +1506,7 @@ impl PreprocessorState {
         while *i < tokens.len() && matches!(tokens[*i].kind, TokenKind::Newline) {
             *i += 1;
         }
-        if !matches!(tokens.get(*i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if s == "(") {
+        if !matches!(tokens.get(*i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if *s == "(") {
             return Ok(MacroArgs::default());
         }
         *i += 1;
@@ -1550,22 +1550,22 @@ impl PreprocessorState {
             tok.spliced_before |= std::mem::take(&mut spliced_before);
             last_end = Some(token_end(&tok));
             match &tok.kind {
-                TokenKind::Punct(s) if s == "(" => {
+                TokenKind::Punct(s) if *s == "(" => {
                     depth += 1;
                     current.push(tok);
                     *i += 1;
                 }
-                TokenKind::Punct(s) if s == ")" && depth == 0 => {
+                TokenKind::Punct(s) if *s == ")" && depth == 0 => {
                     args.args.push(current);
                     *i += 1;
                     break;
                 }
-                TokenKind::Punct(s) if s == ")" => {
+                TokenKind::Punct(s) if *s == ")" => {
                     depth -= 1;
                     current.push(tok);
                     *i += 1;
                 }
-                TokenKind::Punct(s) if s == "," && depth == 0 => {
+                TokenKind::Punct(s) if *s == "," && depth == 0 => {
                     args.args.push(current);
                     args.separators.push(tok);
                     current = Vec::new();
@@ -1620,7 +1620,7 @@ impl PreprocessorState {
             match &tokens[*i].kind {
                 TokenKind::Newline | TokenKind::Eof => break,
                 TokenKind::Punct(p)
-                    if p == "\\"
+                    if *p == "\\"
                         && matches!(
                             tokens.get(*i + 1).map(|t| &t.kind),
                             Some(TokenKind::Newline)
@@ -1762,7 +1762,7 @@ impl PreprocessorState {
             match &tokens[*i].kind {
                 TokenKind::Newline | TokenKind::Eof => break,
                 TokenKind::Punct(p)
-                    if p == "\\"
+                    if *p == "\\"
                         && matches!(
                             tokens.get(*i + 1).map(|t| &t.kind),
                             Some(TokenKind::Newline)
@@ -1802,17 +1802,18 @@ fn parse_include_header(tokens: &[Token]) -> Option<String> {
     }
     match tokens.get(i).map(|t| &t.kind) {
         Some(TokenKind::String(s)) => plain_string_body(s).map(str::to_string),
-        Some(TokenKind::Punct(s)) if s == "<" => {
+        Some(TokenKind::Punct(s)) if *s == "<" => {
             let mut header = String::new();
             i += 1;
             while i < tokens.len() {
                 match &tokens[i].kind {
-                    TokenKind::Identifier(s) | TokenKind::Number(s) | TokenKind::Punct(s)
-                        if s != ">" =>
-                    {
+                    TokenKind::Identifier(s) | TokenKind::Number(s) => {
                         header.push_str(s);
                     }
-                    TokenKind::Punct(s) if s == ">" => return Some(header),
+                    TokenKind::Punct(s) if *s != ">" => {
+                        header.push_str(s);
+                    }
+                    TokenKind::Punct(s) if *s == ">" => return Some(header),
                     _ => return None,
                 }
                 i += 1;
@@ -1853,7 +1854,7 @@ fn skip_directive_line(tokens: &[Token], i: &mut usize) {
 /// A `\` token followed by a newline token — a line continuation the lexer
 /// does not splice, so token consumers skip the pair.
 fn is_line_continuation(tokens: &[Token], i: usize) -> bool {
-    matches!(tokens.get(i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if s == "\\")
+    matches!(tokens.get(i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if *s == "\\")
         && matches!(tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Newline))
 }
 
@@ -1911,7 +1912,7 @@ fn parameter_list_open(tokens: &[Token], name_idx: usize) -> Option<usize> {
     }
     let next = tokens.get(i)?;
     let adjacent = next.line == line && next.col == col;
-    (adjacent && matches!(&next.kind, TokenKind::Punct(s) if s == "(")).then_some(i)
+    (adjacent && matches!(&next.kind, TokenKind::Punct(s) if *s == "(")).then_some(i)
 }
 
 /// Collect a `#define` replacement list up to the end of the line, splicing
@@ -2082,11 +2083,11 @@ impl PreprocessorState {
 /// spelling and are expanded by the rescan. A malformed invocation expands to
 /// nothing rather than to a broken declaration.
 fn expand_gmock_method(macro_name: &str, origin: &Token, args: &MacroArgs) -> Vec<Token> {
-    let synth = |text: &str| {
+    let synth = |text: &'static str| {
         let kind = if text.chars().all(char::is_alphabetic) {
             TokenKind::Identifier(text.into())
         } else {
-            TokenKind::Punct(text.into())
+            TokenKind::Punct(text)
         };
         Token::new(kind, origin.line, origin.col).with_macro_hide(origin, macro_name)
     };
@@ -2252,8 +2253,8 @@ fn top_level_ident(spec: &[Token], name: &str) -> Option<usize> {
     let mut depth = 0_u32;
     for (idx, token) in spec.iter().enumerate() {
         match &token.kind {
-            TokenKind::Punct(s) if s == "(" => depth += 1,
-            TokenKind::Punct(s) if s == ")" => depth = depth.saturating_sub(1),
+            TokenKind::Punct(s) if *s == "(" => depth += 1,
+            TokenKind::Punct(s) if *s == ")" => depth = depth.saturating_sub(1),
             TokenKind::Identifier(s) if depth == 0 && s == name => return Some(idx),
             _ => {}
         }
@@ -2262,7 +2263,7 @@ fn top_level_ident(spec: &[Token], name: &str) -> Option<usize> {
 }
 
 fn is_punct(token: &Token, punct: &str) -> bool {
-    matches!(&token.kind, TokenKind::Punct(s) if s == punct)
+    matches!(&token.kind, TokenKind::Punct(s) if *s == punct)
 }
 
 fn is_ident(token: &Token, name: &str) -> bool {
@@ -2295,7 +2296,7 @@ fn is_parenthesized_declarator(tokens: &[Token]) -> bool {
     let mut paren = 0_u32;
     for (idx, token) in tokens.iter().enumerate() {
         match &token.kind {
-            TokenKind::Punct(s) if s == "(" => {
+            TokenKind::Punct(s) if *s == "(" => {
                 // A later group can still be the declarator: the first one in
                 // `decltype(x) (*)(int)` is not. What `decltype` encloses is
                 // an operand and never a declarator, however that expression
@@ -2310,10 +2311,10 @@ fn is_parenthesized_declarator(tokens: &[Token]) -> bool {
                 }
                 paren += 1;
             }
-            TokenKind::Punct(s) if s == ")" => paren = paren.saturating_sub(1),
-            TokenKind::Punct(s) if s == "<" && paren == 0 => angle += 1,
-            TokenKind::Punct(s) if s == ">" && paren == 0 => angle -= 1,
-            TokenKind::Punct(s) if s == ">>" && paren == 0 => angle -= 2,
+            TokenKind::Punct(s) if *s == ")" => paren = paren.saturating_sub(1),
+            TokenKind::Punct(s) if *s == "<" && paren == 0 => angle += 1,
+            TokenKind::Punct(s) if *s == ">" && paren == 0 => angle -= 1,
+            TokenKind::Punct(s) if *s == ">>" && paren == 0 => angle -= 2,
             _ => {}
         }
     }
@@ -2339,8 +2340,8 @@ fn opens_declarator(body: &[Token]) -> bool {
     while let Some(token) = body.get(i) {
         match &token.kind {
             TokenKind::Identifier(_) => i += 1,
-            TokenKind::Punct(s) if s == ":" => i += 1,
-            TokenKind::Punct(s) if s == "<" => match skip_angle_group(body, i) {
+            TokenKind::Punct(s) if *s == ":" => i += 1,
+            TokenKind::Punct(s) if *s == "<" => match skip_angle_group(body, i) {
                 Some(next) => i = next,
                 None => return false,
             },
@@ -2376,9 +2377,9 @@ fn skip_angle_group(tokens: &[Token], at: usize) -> Option<usize> {
     let mut depth = 0_i32;
     for (idx, token) in tokens.iter().enumerate().skip(at) {
         match &token.kind {
-            TokenKind::Punct(s) if s == "<" => depth += 1,
-            TokenKind::Punct(s) if s == ">" => depth -= 1,
-            TokenKind::Punct(s) if s == ">>" => depth -= 2,
+            TokenKind::Punct(s) if *s == "<" => depth += 1,
+            TokenKind::Punct(s) if *s == ">" => depth -= 1,
+            TokenKind::Punct(s) if *s == ">>" => depth -= 2,
             _ => continue,
         }
         if depth <= 0 {
@@ -2397,17 +2398,17 @@ fn has_top_level_comma(tokens: &[Token]) -> bool {
     let mut paren = 0_u32;
     for token in tokens {
         match &token.kind {
-            TokenKind::Punct(s) if s == "(" => paren += 1,
-            TokenKind::Punct(s) if s == ")" => paren = paren.saturating_sub(1),
+            TokenKind::Punct(s) if *s == "(" => paren += 1,
+            TokenKind::Punct(s) if *s == ")" => paren = paren.saturating_sub(1),
             // Only outside a parenthesis is `>` a template closer; inside one
             // it is greater-than, and counting it would unbalance the depth
             // for everything after the group — the comma of
             // `std::conditional_t<(A > B), X, Y>` would read as top-level and
             // the whole invocation would be rejected as an argument list.
-            TokenKind::Punct(s) if s == "<" && paren == 0 => angle += 1,
-            TokenKind::Punct(s) if s == ">" && paren == 0 => angle -= 1,
-            TokenKind::Punct(s) if s == ">>" && paren == 0 => angle -= 2,
-            TokenKind::Punct(s) if s == "," && paren == 0 && angle <= 0 => return true,
+            TokenKind::Punct(s) if *s == "<" && paren == 0 => angle += 1,
+            TokenKind::Punct(s) if *s == ">" && paren == 0 => angle -= 1,
+            TokenKind::Punct(s) if *s == ">>" && paren == 0 => angle -= 2,
+            TokenKind::Punct(s) if *s == "," && paren == 0 && angle <= 0 => return true,
             _ => {}
         }
     }
@@ -2422,16 +2423,16 @@ fn has_top_level_paren(tokens: &[Token]) -> bool {
     let mut paren = 0_u32;
     for token in tokens {
         match &token.kind {
-            TokenKind::Punct(s) if s == "(" => {
+            TokenKind::Punct(s) if *s == "(" => {
                 if paren == 0 && angle <= 0 {
                     return true;
                 }
                 paren += 1;
             }
-            TokenKind::Punct(s) if s == ")" => paren = paren.saturating_sub(1),
-            TokenKind::Punct(s) if s == "<" && paren == 0 => angle += 1,
-            TokenKind::Punct(s) if s == ">" && paren == 0 => angle -= 1,
-            TokenKind::Punct(s) if s == ">>" && paren == 0 => angle -= 2,
+            TokenKind::Punct(s) if *s == ")" => paren = paren.saturating_sub(1),
+            TokenKind::Punct(s) if *s == "<" && paren == 0 => angle += 1,
+            TokenKind::Punct(s) if *s == ">" && paren == 0 => angle -= 1,
+            TokenKind::Punct(s) if *s == ">>" && paren == 0 => angle -= 2,
             _ => {}
         }
     }
@@ -2555,7 +2556,7 @@ fn substitute_macro(
                     if is_va_tail
                         && matches!(
                             out.last().map(|t| &t.kind),
-                            Some(TokenKind::Punct(s)) if s == ","
+                            Some(TokenKind::Punct(s)) if *s == ","
                         )
                     {
                         // GNU `, ## args`: with the varargs omitted the
@@ -2677,7 +2678,7 @@ fn apply_concatenation(mut tokens: Vec<Token>) -> Vec<Token> {
 }
 
 fn concat_width_at(tokens: &[Token], i: usize) -> usize {
-    if matches!(&tokens[i].kind, TokenKind::Punct(s) if s == "##") {
+    if matches!(&tokens[i].kind, TokenKind::Punct(s) if *s == "##") {
         return 1;
     }
     if matches!(&tokens[i].kind, TokenKind::Hash)
@@ -2804,7 +2805,7 @@ fn token_paste_fragment(kind: &TokenKind) -> String {
     match kind {
         TokenKind::Identifier(s) => s.clone(),
         TokenKind::Number(s) => s.clone(),
-        TokenKind::Punct(s) if s != "##" => s.clone(),
+        TokenKind::Punct(s) if *s != "##" => (*s).to_string(),
         _ => String::new(),
     }
 }
@@ -2851,7 +2852,7 @@ fn needs_leading_space(output: &str, kind: &TokenKind) -> bool {
         // pasting always yields an `Identifier`). It is kept because it is
         // the behaviour the arm would need if `::` ever becomes one token
         // (see #37), not because it fires now.
-        TokenKind::Punct(s) => match s.as_str() {
+        TokenKind::Punct(s) => match *s {
             ";" | "," | "}" | "::" | "." => true,
             "&" | "*" => last == '>',
             // A pp-number swallows `.` and alphanumerics (C11 6.4.8), so an
@@ -2893,7 +2894,8 @@ pub(crate) fn spell_tokens(arg: &[Token], literal: impl Fn(&str) -> String) -> S
     for tok in arg {
         let spelling = match &tok.kind {
             TokenKind::Newline | TokenKind::Eof => continue,
-            TokenKind::Identifier(s) | TokenKind::Number(s) | TokenKind::Punct(s) => s.clone(),
+            TokenKind::Identifier(s) | TokenKind::Number(s) => s.clone(),
+            TokenKind::Punct(s) => (*s).to_string(),
             TokenKind::Hash => "#".to_string(),
             TokenKind::String(s) | TokenKind::Char(s) => literal(s),
         };
@@ -2923,9 +2925,9 @@ fn token_end(tok: &Token) -> (u32, u32) {
     let spelling: &str = match &tok.kind {
         TokenKind::Identifier(s)
         | TokenKind::Number(s)
-        | TokenKind::Punct(s)
         | TokenKind::String(s)
         | TokenKind::Char(s) => s,
+        TokenKind::Punct(s) => s,
         TokenKind::Hash => "#",
         TokenKind::Newline | TokenKind::Eof => return (tok.line, tok.col),
     };
@@ -2968,7 +2970,7 @@ fn token_to_string(kind: &TokenKind) -> String {
         TokenKind::Number(s) => s.clone(),
         TokenKind::String(s) => s.clone(),
         TokenKind::Char(s) => s.clone(),
-        TokenKind::Punct(s) => s.clone(),
+        TokenKind::Punct(s) => (*s).to_string(),
         TokenKind::Hash => "#".to_string(),
         TokenKind::Newline => "\n".to_string(),
         TokenKind::Eof => String::new(),
@@ -2980,7 +2982,7 @@ fn token_to_string(kind: &TokenKind) -> String {
 /// lists and the index after the closing `)`, or `None` when the next token
 /// is not `(` (uninvoked name) or the list is unterminated.
 fn parse_cond_macro_args(toks: &[Token], mut i: usize) -> Option<(MacroArgs, usize)> {
-    if !matches!(toks.get(i).map(|t| &t.kind), Some(TokenKind::Punct(p)) if p == "(") {
+    if !matches!(toks.get(i).map(|t| &t.kind), Some(TokenKind::Punct(p)) if *p == "(") {
         return None;
     }
     i += 1;
@@ -2989,19 +2991,19 @@ fn parse_cond_macro_args(toks: &[Token], mut i: usize) -> Option<(MacroArgs, usi
     let mut depth = 0u32;
     while i < toks.len() {
         match &toks[i].kind {
-            TokenKind::Punct(p) if p == "(" => {
+            TokenKind::Punct(p) if *p == "(" => {
                 depth += 1;
                 current.push(toks[i].clone());
             }
-            TokenKind::Punct(p) if p == ")" && depth == 0 => {
+            TokenKind::Punct(p) if *p == ")" && depth == 0 => {
                 args.args.push(current);
                 return Some((args, i + 1));
             }
-            TokenKind::Punct(p) if p == ")" => {
+            TokenKind::Punct(p) if *p == ")" => {
                 depth -= 1;
                 current.push(toks[i].clone());
             }
-            TokenKind::Punct(p) if p == "," && depth == 0 => {
+            TokenKind::Punct(p) if *p == "," && depth == 0 => {
                 args.args.push(current);
                 args.separators.push(toks[i].clone());
                 current = Vec::new();
@@ -3025,12 +3027,12 @@ fn defined_operand(
 ) -> (bool, usize) {
     let is_defined = |n: &str| macros.contains_key(n) && !fallbacks.contains(n);
     match toks.get(i + 1).map(|t| &t.kind) {
-        Some(TokenKind::Punct(p)) if p == "(" => {
+        Some(TokenKind::Punct(p)) if *p == "(" => {
             if let (Some(TokenKind::Identifier(n)), Some(TokenKind::Punct(c))) = (
                 toks.get(i + 2).map(|t| &t.kind),
                 toks.get(i + 3).map(|t| &t.kind),
             ) {
-                if c == ")" {
+                if *c == ")" {
                     return (is_defined(n), 4);
                 }
             }
@@ -3110,7 +3112,7 @@ struct PpExprParser<'a> {
 impl<'a> PpExprParser<'a> {
     fn peek_punct(&self) -> Option<&str> {
         match self.toks.get(self.pos).map(|t| &t.kind) {
-            Some(TokenKind::Punct(s)) => Some(s.as_str()),
+            Some(TokenKind::Punct(s)) => Some(s),
             _ => None,
         }
     }
@@ -3393,7 +3395,7 @@ impl<'a> PpExprParser<'a> {
                     }
                 }
             }
-            TokenKind::Punct(p) if p == "(" => {
+            TokenKind::Punct(p) if *p == "(" => {
                 self.pos += 1;
                 let v = self.ternary();
                 if !self.eat(")") {
@@ -3421,8 +3423,8 @@ impl<'a> PpExprParser<'a> {
                     let mut closed = false;
                     while let Some(t) = self.toks.get(self.pos) {
                         match &t.kind {
-                            TokenKind::Punct(p) if p == "(" => depth += 1,
-                            TokenKind::Punct(p) if p == ")" => {
+                            TokenKind::Punct(p) if *p == "(" => depth += 1,
+                            TokenKind::Punct(p) if *p == ")" => {
                                 depth -= 1;
                                 if depth == 0 {
                                     self.pos += 1;
@@ -4819,7 +4821,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             assert!(
                 kinds
                     .iter()
-                    .any(|k| matches!(k, TokenKind::Punct(s) if s == "...")),
+                    .any(|k| matches!(k, TokenKind::Punct(s) if *s == "...")),
                 "ellipsis must survive re-lexing: {out:?} -> {kinds:?}"
             );
             assert!(

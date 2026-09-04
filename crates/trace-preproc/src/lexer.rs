@@ -16,7 +16,15 @@ pub enum TokenKind {
     /// A character literal spelled as written, prefix and quotes included
     /// (`'a'`, `L'\n'`).
     Char(String),
-    Punct(String),
+    /// A punctuator, spelled from the fixed set the lexer recognizes — so
+    /// `&'static str` rather than an owned `String`. Punctuators are ~48% of
+    /// the tokens in a C++ corpus and 94% of those are one character, so an
+    /// owned spelling meant well over a million allocations per translation
+    /// unit's worth of lexing, every one of them a copy of a string literal.
+    /// The type also states the invariant: a punctuator's spelling is never
+    /// computed, it is chosen from `single_char_punct` / `two_char_punct` /
+    /// `three_char_punct`.
+    Punct(&'static str),
     Hash, // #
     Newline,
     Eof,
@@ -163,7 +171,7 @@ impl<'a> Lexer<'a> {
             if self.peek_char_at(1) == '#' {
                 self.advance_char();
                 self.advance_char();
-                return Token::new(TokenKind::Punct("##".to_string()), line, col);
+                return Token::new(TokenKind::Punct("##"), line, col);
             }
             self.advance_char();
             return Token::new(TokenKind::Hash, line, col);
@@ -211,7 +219,7 @@ impl<'a> Lexer<'a> {
             for _ in 1..spelling.len() {
                 self.advance_char();
             }
-            return Token::new(TokenKind::Punct(spelling.to_string()), line, col);
+            return Token::new(TokenKind::Punct(spelling), line, col);
         }
 
         // Unknown char - skip
@@ -611,8 +619,8 @@ mod tests {
         TokenKind::Char(s.to_string())
     }
 
-    fn punct(s: &str) -> TokenKind {
-        TokenKind::Punct(s.to_string())
+    fn punct(s: &'static str) -> TokenKind {
+        TokenKind::Punct(s)
     }
 
     #[test]

@@ -137,10 +137,10 @@ mod tests {
             kinds(&cpp),
             vec![
                 string("R\"(x)\""),
-                TokenKind::Punct("[".into()),
+                TokenKind::Punct("["),
                 TokenKind::Number("0".into()),
-                TokenKind::Punct("]".into()),
-                TokenKind::Punct("+".into()),
+                TokenKind::Punct("]"),
+                TokenKind::Punct("+"),
                 chr("'a'C"),
             ]
         );
@@ -173,7 +173,7 @@ mod tests {
         let k: Vec<TokenKind> = replacement.iter().map(|t| t.kind.clone()).collect();
         assert_eq!(k[0], TokenKind::Hash);
         assert_eq!(k[1], TokenKind::Identifier("x".into()));
-        assert_eq!(k[2], TokenKind::Punct("##".into()));
+        assert_eq!(k[2], TokenKind::Punct("##"));
         assert_eq!(
             &k[k.len() - 2..],
             &[
