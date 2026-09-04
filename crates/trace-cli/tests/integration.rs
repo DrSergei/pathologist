@@ -128,6 +128,8 @@ fn builtin_macro_fallbacks_fixture() {
         "MockInterface::OnLinked",
         "MockInterface::GetMemberPtr",
         "MockInterface::Wait",
+        // decltype return type, indexable since #29
+        "MockInterface::Deref",
     ] {
         assert!(
             program.symbols.functions.iter().any(|f| f.name == name),

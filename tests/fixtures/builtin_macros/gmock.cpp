@@ -16,4 +16,8 @@ public:
         (override));
     MOCK_METHOD((void (Registry<int>::*)(int)), GetMemberPtr, (), (override));
     MOCK_METHOD(int, Wait, (), (noexcept(is_nothrow<const int&>::value)));
+    // A `decltype(...)` return type is kept as written rather than degraded
+    // to void; the member is indexable since #29.
+    MOCK_METHOD(decltype(*handle_), Deref, (), (const));
+    int *handle_;
 };

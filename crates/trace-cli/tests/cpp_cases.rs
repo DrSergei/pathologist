@@ -1471,3 +1471,55 @@ fn cpp_inner_namespace_hides_global_static() {
         "global static sf must be hidden by hidesf::sf, not kept as a candidate"
     );
 }
+
+/// Every function name the index holds for `src`, lowered as C++.
+fn member_names(tag: &str, src: &str) -> Vec<String> {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("trace_{tag}_"))
+        .tempdir()
+        .unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("k.cpp"), src).unwrap();
+    let program = build_program(root, &default_opts(root)).expect("build");
+    let mut names: Vec<String> = program
+        .symbols
+        .functions
+        .iter()
+        .map(|f| f.name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn decltype_return_type_does_not_swallow_the_member_name() {
+    // Issue #29: `member_short_name` walked the whole field_declaration in
+    // order and took the first `identifier` it met. In a `decltype(...)`
+    // return type that identifier belongs to the *operand expression*, so
+    // `decltype(*p_) Deref() const;` was indexed as the member `p_` at the
+    // decltype's line and `Deref` was dropped — silently, with no
+    // diagnostic, since the file parses cleanly.
+    let names = member_names(
+        "decltype_ret",
+        "class K {\n\
+         public:\n\
+         \x20   decltype(*p_) Deref() const;\n\
+         \x20   decltype(kSize) Sized() const;\n\
+         \x20   int Plain() const;\n\
+         \x20   int *p_;\n\
+         };\n",
+    );
+    assert!(
+        names.iter().any(|n| n == "K::Deref"),
+        "decltype-returning member must be indexed: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "K::Sized"),
+        "a decltype over a plain identifier too: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "K::p_" || n == "K::kSize"),
+        "the decltype operand must not be indexed as the member: {names:?}"
+    );
+    assert!(names.iter().any(|n| n == "K::Plain"), "{names:?}");
+}

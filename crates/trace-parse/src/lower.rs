@@ -1478,6 +1478,8 @@ fn lower_using_declaration(ctx: &mut LowerContext, source: &str, node: Node) {
 fn member_decl_is_function(node: Node) -> bool {
     fn walk(n: Node) -> bool {
         match n.kind() {
+            // Type position, not declarator position — see member_short_name.
+            "decltype" => return false,
             "destructor_name" => return true,
             "function_declarator" => {
                 if let Some(inner) = n.child_by_field_name("declarator") {
@@ -1741,6 +1743,12 @@ fn template_member_decl(node: Node) -> Option<Node> {
 fn member_short_name(source: &str, node: Node) -> Option<String> {
     fn walk(source: &str, n: Node) -> Option<String> {
         match n.kind() {
+            // A `decltype(...)` sits in the *type* position and holds an
+            // expression, not a declarator. Walking into it takes the first
+            // `identifier` of that expression as the member's name, so
+            // `decltype(*p_) Deref() const;` was indexed as `p_` and `Deref`
+            // was lost — silently, since the file parses cleanly (#29).
+            "decltype" => return None,
             "destructor_name" => return Some(normalize_qualified(node_text(source, &n))),
             "operator_name" => return Some(normalize_qualified(node_text(source, &n))),
             "function_declarator" => {
