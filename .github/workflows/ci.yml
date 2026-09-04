@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [master]
+    tags: ['v*']
   pull_request:
     branches: [master]
 
@@ -14,6 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate release tag
+        if: github.ref_type == 'tag'
+        run: sh scripts/check_release_tag.sh "${{ github.ref_name }}"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -44,6 +49,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Pin build provenance instead of leaving the build script to infer it
+      # from the runner's checkout, which a restored build-script cache can
+      # otherwise carry over stale.
+      - name: Pin build metadata
+        run: |
+          {
+            echo "TRACE_BUILD_GIT_SHA=$(git rev-parse --short=7 HEAD)"
+            echo "TRACE_BUILD_GIT_DIRTY=false"
+            echo "TRACE_BUILD_DATE=$(date -u +%Y-%m-%d)"
+          } >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -105,6 +121,8 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -112,14 +130,24 @@ jobs:
           merge-multiple: true
 
       - name: Delete existing master-latest release
+        if: github.ref == 'refs/heads/master'
         continue-on-error: true
         run: gh release delete master-latest --yes --cleanup-tag
 
-      - name: Create release
+      - name: Create master-latest release
+        if: github.ref == 'refs/heads/master'
         run: |
           gh release create master-latest \
             --target "${{ github.sha }}" \
             --title "master-latest" \
             --notes "Latest build from master" \
             --prerelease \
+            artifacts/*
+
+      - name: Create tagged release
+        if: github.ref_type == 'tag'
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
             artifacts/*

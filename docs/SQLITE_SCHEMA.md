@@ -1,6 +1,6 @@
 # SQLite schema
 
-Schema version: **v1**
+Schema version: **v2**
 
 See also the [README](../README.md) for CLI flags that control what is exported.
 
@@ -57,7 +57,8 @@ diagnostics
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | INTEGER PK | Run id |
-| `trace_version` | TEXT | trace version string |
+| `trace_version` | TEXT | Full binary identity: package version, source revision, dirty state, and build date |
+| `schema_version` | INTEGER | Database layout version (currently `2`) |
 | `target_root` | TEXT | Analyzed directory |
 | `created_at` | TEXT | Unix timestamp (seconds) |
 | `options_json` | TEXT | JSON: `include_paths`, `defines`, `include_points_to`, `full_detail` |

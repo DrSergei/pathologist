@@ -124,6 +124,7 @@ fn export_program_with_options(
         analysis,
         &trace_db::ExportOptions {
             output: out.path().to_path_buf(),
+            trace_version: env!("CARGO_PKG_VERSION").to_owned(),
             include_points_to: false,
             full_detail,
             model_files: Vec::new(),

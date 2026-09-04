@@ -7,10 +7,16 @@ use trace_db::{export_to_sqlite, open_db, ExportOptions};
 use trace_parse::build_program_with_jobs;
 use trace_preproc::PreprocessOptions;
 
+mod build_info;
+
+#[cfg(test)]
+#[path = "../build_support.rs"]
+mod build_support;
+
 #[derive(Parser)]
 #[command(
     name = "trace",
-    version,
+    version = build_info::TRACE_VERSION,
     about = "C call graph and pointer analysis tool"
 )]
 struct Cli {
@@ -291,6 +297,7 @@ fn run_analyze(
         &analysis,
         &ExportOptions {
             output: output.clone(),
+            trace_version: build_info::TRACE_VERSION.to_owned(),
             include_points_to: debug_points_to,
             full_detail: full_export,
             model_files: model_files

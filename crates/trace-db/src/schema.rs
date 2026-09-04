@@ -1,7 +1,10 @@
-pub const SCHEMA_V1: &str = r#"
+pub const SCHEMA_VERSION: i64 = 2;
+
+pub const SCHEMA_V2: &str = r#"
 CREATE TABLE IF NOT EXISTS analysis_run (
     id INTEGER PRIMARY KEY,
     trace_version TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
     target_root TEXT NOT NULL,
     created_at TEXT NOT NULL,
     options_json TEXT NOT NULL

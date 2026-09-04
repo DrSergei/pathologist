@@ -1,14 +1,19 @@
-use crate::schema::SCHEMA_V1;
+use crate::schema::{SCHEMA_V2, SCHEMA_VERSION};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use rustc_hash::FxHashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use trace_analysis::{AnalysisResult, ConstraintKind, LocKind, Pag, PagNodeKind};
-use trace_ir::{Linkage, Program, StorageClass, TypeDesc, VarId, TRACE_VERSION};
+use trace_ir::{Linkage, Program, StorageClass, TypeDesc, VarId};
 
 pub struct ExportOptions {
     pub output: PathBuf,
+    /// Identity of the binary producing the database. `trace` passes its
+    /// full build identity (version, revision, dirty state, build date);
+    /// `minimal` falls back to this crate's package version for library
+    /// callers that have no build identity of their own.
+    pub trace_version: String,
     /// Export points-to debug table (requires analysis with `retain_points_to`).
     pub include_points_to: bool,
     /// Export types, all variables, and PAG locations (slower, larger DB).
@@ -21,6 +26,7 @@ impl ExportOptions {
     pub fn minimal(output: PathBuf) -> Self {
         Self {
             output,
+            trace_version: env!("CARGO_PKG_VERSION").to_owned(),
             include_points_to: false,
             full_detail: false,
             model_files: Vec::new(),
@@ -47,7 +53,7 @@ pub fn export_to_sqlite(
             "PRAGMA foreign_keys = OFF; PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY;",
         )?;
         conn.execute_batch("BEGIN IMMEDIATE;")?;
-        conn.execute_batch(SCHEMA_V1)?;
+        conn.execute_batch(SCHEMA_V2)?;
 
         let options_json = serde_json::json!({
             "include_paths": program.include_paths,
@@ -59,9 +65,10 @@ pub fn export_to_sqlite(
         .to_string();
 
         conn.execute(
-            "INSERT INTO analysis_run (trace_version, target_root, created_at, options_json) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO analysis_run (trace_version, schema_version, target_root, created_at, options_json) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
-                TRACE_VERSION,
+                opts.trace_version,
+                SCHEMA_VERSION,
                 program.root.display().to_string(),
                 chrono_lite_now(),
                 options_json

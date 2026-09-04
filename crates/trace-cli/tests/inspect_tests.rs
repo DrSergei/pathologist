@@ -36,6 +36,7 @@ fn build_and_export(name: &str) -> TempDb {
         &analysis,
         &ExportOptions {
             output: out.to_path_buf(),
+            trace_version: env!("CARGO_PKG_VERSION").to_owned(),
             include_points_to: false,
             full_detail: false,
             model_files: Vec::new(),

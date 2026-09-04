@@ -335,7 +335,7 @@ So unresolved indirect sites (e.g. `sbuf->impl->readBuffer` before a fix) still 
 
 ## SQLite database schema
 
-Schema version: **v1**. Foreign keys are declared in DDL; exports temporarily disable FK enforcement for bulk load speed.
+Schema version: **v2**. Foreign keys are declared in DDL; exports temporarily disable FK enforcement for bulk load speed.
 
 ### Entity relationship (overview)
 
@@ -358,7 +358,8 @@ Metadata for one `trace analyze` invocation.
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | INTEGER PK | Run id (always `1` per file). |
-| `trace_version` | TEXT | trace crate version string. |
+| `trace_version` | TEXT | Full binary identity: package version, source revision, dirty state, and build date. |
+| `schema_version` | INTEGER | Database layout version (currently `2`). |
 | `target_root` | TEXT | Absolute or normalized `<TARGET>` path. |
 | `created_at` | TEXT | Unix timestamp (seconds). |
 | `options_json` | TEXT | JSON: `include_paths`, `defines`, `include_points_to`, `full_detail`. |

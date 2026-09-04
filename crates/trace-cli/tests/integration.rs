@@ -49,6 +49,7 @@ fn export_sqlite_roundtrip() {
         &analysis,
         &ExportOptions {
             output: out.clone(),
+            trace_version: "0.1.0 (test000 2026-09-02)".into(),
             include_points_to: false,
             full_detail: false,
             model_files: Vec::new(),
@@ -61,6 +62,14 @@ fn export_sqlite_roundtrip() {
         .query_row("SELECT COUNT(*) FROM call_edges", [], |r| r.get(0))
         .unwrap();
     assert!(count >= 1);
+    let versions: (String, i64) = conn
+        .query_row(
+            "SELECT trace_version, schema_version FROM analysis_run",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(versions, ("0.1.0 (test000 2026-09-02)".to_owned(), 2));
 }
 
 #[test]

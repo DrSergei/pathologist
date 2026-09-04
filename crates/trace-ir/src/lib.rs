@@ -15,5 +15,3 @@ pub use program::*;
 pub use span::*;
 pub use symbol::*;
 pub use types::*;
-
-pub const TRACE_VERSION: &str = env!("CARGO_PKG_VERSION");
