@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 from collections import Counter, defaultdict
@@ -18,6 +19,11 @@ OUT = REPO / "docs" / "PARSE_FAILURES.md"
 # — `python3 scripts/fetch_corpora.py` produces exactly this layout. Same
 # convention as eval_check.py: $TRACE_CORPUS_BASE, default ~
 # (PARSE_CORPUS_BASE is still honoured).
+CORPUS_ENV = "TRACE_CORPUS_BASE"
+
+# Record kinds examples/parse_failures.rs emits; anything else means the
+# TSV did not come from that tool (or came from a different version).
+TSV_KINDS = {"ERROR", "PARSE", "PREPROCESS"}
 CORPUS_BASE = Path(
     os.path.expanduser(
         os.environ.get("TRACE_CORPUS_BASE") or os.environ.get("PARSE_CORPUS_BASE") or "~"
@@ -29,21 +35,18 @@ CORPORA = [
         "id": "hdf",
         "name": "drivers_hdf_core",
         "root": CORPUS_BASE / "drivers_hdf_core",
-        "db": Path("/tmp/hdf_parse_check.db"),
         "tsv": Path("/tmp/parse_failures_hdf.tsv"),
     },
     {
         "id": "hiview",
         "name": "hiviewdfx_hiview",
         "root": CORPUS_BASE / "hiviewdfx_hiview",
-        "db": Path("/tmp/hiview_parse_check.db"),
         "tsv": Path("/tmp/parse_failures_hiview.tsv"),
     },
     {
         "id": "camera",
         "name": "multimedia_camera_framework",
         "root": CORPUS_BASE / "multimedia_camera_framework",
-        "db": Path("/tmp/camera_parse_check.db"),
         "tsv": Path("/tmp/parse_failures_camera.tsv"),
     },
 ]
@@ -105,13 +108,46 @@ def summarize(errs: list[dict], note: str | None) -> str:
 
 
 def load_tsv(tsv: Path, root: Path) -> dict[str, dict]:
-    files: dict[str, dict] = defaultdict(lambda: {"errors": [], "note": None})
+    # Absence is the failure signal, emptiness is not: an empty TSV is the
+    # legitimate result for a corpus with zero parse failures, and that is
+    # the end state this report exists to measure. The recipe writes each
+    # TSV to a `.part` file and renames it only on success, so a failed
+    # analyze leaves no final file rather than an empty one (plain
+    # redirection would create the file even when the command dies, which
+    # is how a failed run used to rewrite the report with a zero row).
     if not tsv.exists():
-        return files
-    for line in tsv.read_text().splitlines():
-        parts = line.split("\t", 4)
-        if len(parts) < 3:
+        sys.exit(
+            f"{tsv} does not exist -- regenerate it (see the recipe at the top "
+            f"of {OUT.relative_to(REPO)}); refusing to write a partial report"
+        )
+    text = tsv.read_text()
+    # The producer writes whole lines, so a non-empty file that does not end
+    # in a newline was cut off mid-write. Structural row checks cannot catch
+    # that on their own: a truncated stream of well-formed rows just looks
+    # like a shorter result.
+    if text and not text.endswith("\n"):
+        sys.exit(
+            f"{tsv}: does not end in a newline, so it was truncated mid-write "
+            f"-- regenerate it; refusing to write a partial report"
+        )
+    files: dict[str, dict] = defaultdict(lambda: {"errors": [], "note": None})
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if not line:
             continue
+        # Structural validation, not just "did the producer exit 0". The
+        # rename below guarantees the process finished; it says nothing
+        # about what it wrote, and silently skipping rows it does not
+        # understand would turn truncated or foreign output into a
+        # zero/partial corpus -- exactly the failure the empty-is-valid
+        # rule would then hide. Every row is FILE<tab>path<tab>KIND<tab>detail
+        # (examples/parse_failures.rs); maxsplit=3 keeps a tab in `detail`.
+        parts = line.split("\t", 3)
+        if len(parts) != 4 or parts[0] != "FILE" or parts[2] not in TSV_KINDS:
+            sys.exit(
+                f"{tsv}:{lineno}: malformed row, refusing to write a partial "
+                f"report -- expected FILE<tab>path<tab>"
+                f"{{{'|'.join(sorted(TSV_KINDS))}}}<tab>detail, got:\n  {line!r}"
+            )
         _, path, kind, *rest = parts
         rel = (
             str(Path(path).relative_to(root))
@@ -229,14 +265,41 @@ def main() -> int:
     )
     out.append("")
     out.append("```bash")
+    out.append("set -euo pipefail   # stop at the first failure, do not run on with stale inputs")
+    out.append("")
+    out.append("# One corpus base for every step: fetch_corpora.py, the analyze runs")
+    out.append("# below and this script all read $%s." % CORPUS_ENV)
+    out.append(f"export {CORPUS_ENV}={shlex.quote(str(CORPUS_BASE))}")
+    out.append("")
     out.append("python3 scripts/fetch_corpora.py   # corpora at the revisions pinned in scripts/eval_expected.json")
-    out.append("trace analyze <ROOT> -o /tmp/out.db --jobs 8")
-    out.append(
-        "cargo run -p trace-cli --release --example parse_failures -- "
-        "<ROOT> --from-db /tmp/out.db > /tmp/parse_failures.tsv"
-    )
+    out.append("cargo build --release -p trace-cli && cargo build --release -p trace-cli --examples")
+    out.append("")
+    out.append("# One analyze + one TSV per corpus, read back by these exact names.")
+    out.append("# Each TSV is written to a .part file and renamed only if the")
+    out.append("# command succeeded, so a failed run leaves no final file at all")
+    out.append("# -- the generator treats a MISSING file as an error and an EMPTY")
+    out.append("# one as a corpus with zero parse failures. Clear stale files first.")
+    out.append("rm -f /tmp/parse_failures_{hdf,hiview,camera}.tsv{,.part}")
+    for corpus in CORPORA:
+        root = f'"${CORPUS_ENV}/{corpus["name"]}"'
+        out.append(
+            f"target/release/trace analyze {root} "
+            f"-o /tmp/{corpus['id']}_parse_check.db --jobs 8"
+        )
+        out.append(
+            f"target/release/examples/parse_failures {root} "
+            f"--from-db /tmp/{corpus['id']}_parse_check.db > {corpus['tsv']}.part"
+        )
+        out.append(f"mv {corpus['tsv']}.part {corpus['tsv']}")
+    out.append("")
     out.append("python3 scripts/gen_parse_failures_report.py")
     out.append("```")
+    out.append("")
+    out.append(
+        "The `parse_failures` example re-preprocesses with whatever build runs it; "
+        "the DB only selects the failing-file set. Build the binary *and* the "
+        "examples (the `--examples` flag alone leaves `target/release/trace` stale)."
+    )
     out.append("")
     out.append("## Overview")
     out.append("")

@@ -192,39 +192,26 @@ impl<'a> Lexer<'a> {
             return self.read_identifier(line, col);
         }
 
-        if "+-<>=!&|^~*/%.,;:()[]{}?\\".contains(ch) {
-            let mut s = String::new();
-            s.push(ch);
+        if let Some(one) = single_char_punct(ch) {
             self.advance_char();
-            // two-char operators
-            if self.pos < self.input.len() {
-                let two = format!("{}{}", s, self.peek_char());
-                if matches!(
-                    two.as_str(),
-                    "<<" | ">>"
-                        | "<="
-                        | ">="
-                        | "=="
-                        | "!="
-                        | "&&"
-                        | "||"
-                        | "++"
-                        | "--"
-                        | "+="
-                        | "-="
-                        | "*="
-                        | "/="
-                        | "%="
-                        | "&="
-                        | "|="
-                        | "^="
-                        | "->"
-                ) {
-                    s = two;
-                    self.advance_char();
-                }
+            // Longest match wins, and every spelling is a `&'static str`, so
+            // a punctuator costs one allocation instead of an intermediate
+            // `String` per candidate length. `next` is read once and reused.
+            let next = self.peek_char();
+            let spelling = if ch == '.' && next == '.' && self.peek_char_at(1) == '.' {
+                // `...` is the only three-character punctuator the token
+                // stream needs; the others in the C++ set are still one token
+                // per character (issue #28, docs/PREPROCESSOR.md).
+                "..."
+            } else {
+                two_char_punct(ch, next).unwrap_or(one)
+            };
+            // `ch` is consumed; take the rest. Punctuators are all ASCII, so
+            // the byte length is the character count.
+            for _ in 1..spelling.len() {
+                self.advance_char();
             }
-            return Token::new(TokenKind::Punct(s), line, col);
+            return Token::new(TokenKind::Punct(spelling.to_string()), line, col);
         }
 
         // Unknown char - skip
@@ -481,6 +468,67 @@ impl<'a> Lexer<'a> {
     fn is_at_end(&self) -> bool {
         self.pos >= self.input.len()
     }
+}
+
+/// The punctuator spelling for a character that can begin one, or `None` if
+/// it cannot. Doubles as the "is this a punctuator?" test, so the dispatch
+/// does not also scan a string of the alphabet.
+fn single_char_punct(ch: char) -> Option<&'static str> {
+    Some(match ch {
+        '+' => "+",
+        '-' => "-",
+        '<' => "<",
+        '>' => ">",
+        '=' => "=",
+        '!' => "!",
+        '&' => "&",
+        '|' => "|",
+        '^' => "^",
+        '~' => "~",
+        '*' => "*",
+        '/' => "/",
+        '%' => "%",
+        '.' => ".",
+        ',' => ",",
+        ';' => ";",
+        ':' => ":",
+        '(' => "(",
+        ')' => ")",
+        '[' => "[",
+        ']' => "]",
+        '{' => "{",
+        '}' => "}",
+        '?' => "?",
+        '\\' => "\\",
+        _ => return None,
+    })
+}
+
+/// The two-character operator `a`+`b` spell, or `None` if they do not form
+/// one. `b` is `\0` at end of input, which matches nothing.
+fn two_char_punct(a: char, b: char) -> Option<&'static str> {
+    Some(match (a, b) {
+        ('<', '<') => "<<",
+        ('>', '>') => ">>",
+        ('<', '=') => "<=",
+        ('>', '=') => ">=",
+        ('=', '=') => "==",
+        ('!', '=') => "!=",
+        ('&', '&') => "&&",
+        ('|', '|') => "||",
+        ('+', '+') => "++",
+        ('-', '-') => "--",
+        ('+', '=') => "+=",
+        ('-', '=') => "-=",
+        ('*', '=') => "*=",
+        ('/', '=') => "/=",
+        ('%', '=') => "%=",
+        ('&', '=') => "&=",
+        ('|', '=') => "|=",
+        ('^', '=') => "^=",
+        ('-', '>') => "->",
+        _ => return None,
+    })
 }
 
 fn is_ident_start(ch: char) -> bool {
@@ -820,5 +868,43 @@ mod tests {
             kinds_c("10_km"),
             vec![TokenKind::Number("10_km".to_string())]
         );
+    }
+
+    #[test]
+    fn ellipsis_is_one_punctuator() {
+        // Issue #28: `...` used to lex as three `.` tokens, which the token
+        // re-speller wrote back as `. . .`, breaking every variadic
+        // declaration.
+        assert_eq!(
+            kinds_c("int f(const char *fmt, ...);"),
+            vec![
+                id("int"),
+                id("f"),
+                punct("("),
+                id("const"),
+                id("char"),
+                punct("*"),
+                id("fmt"),
+                punct(","),
+                punct("..."),
+                punct(")"),
+                punct(";"),
+            ]
+        );
+        assert_eq!(
+            kinds("template <class... T> void f(T... a);")[3],
+            punct("...")
+        );
+    }
+
+    #[test]
+    fn two_dots_stay_separate_tokens() {
+        // Only a full `...` is one token; a shorter run is still one `.`
+        // each, so `x..y` keeps its token boundaries.
+        assert_eq!(
+            kinds_c("x..y"),
+            vec![id("x"), punct("."), punct("."), id("y")]
+        );
+        assert_eq!(kinds_c("....."), vec![punct("..."), punct("."), punct(".")]);
     }
 }

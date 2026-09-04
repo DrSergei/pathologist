@@ -1375,7 +1375,7 @@ impl PreprocessorState {
                 // like a named `args...` variadic.
                 variadic = true;
                 params.push("__VA_ARGS__".to_string());
-                *i = self.skip_ellipsis(tokens, *i);
+                *i += 1;
                 return self
                     .finish_param_list_tail(tokens, i)
                     .then_some((params, variadic));
@@ -1396,7 +1396,7 @@ impl PreprocessorState {
             skip_param_ws(tokens, i);
             if self.token_is_ellipsis(tokens, *i) {
                 variadic = true;
-                *i = self.skip_ellipsis(tokens, *i);
+                *i += 1;
                 return self
                     .finish_param_list_tail(tokens, i)
                     .then_some((params, variadic));
@@ -1449,19 +1449,19 @@ impl PreprocessorState {
         }
     }
 
+    /// An ellipsis the lexer munched is one `...` token (#28). Dots it did
+    /// not munch stay one `.` each and take the malformed-list path, which
+    /// is right for `. . .` and for dots split by a comment —
+    /// `invalid token in macro parameter list` in gcc and clang — but is a
+    /// **known false rejection** for an ellipsis split by a `\`-newline:
+    /// phase 2 deletes the splice before tokens are recognized, so
+    /// `#define F(x, .\`-newline-`..)` is a valid variadic macro that gcc
+    /// and clang accept and this parser drops. The lexer does not run phase
+    /// 2 before tokenizing (see docs/PREPROCESSOR.md, "General translation
+    /// phase 2"), so no check here can see through the splice; fixing it
+    /// means splice-aware munching in the lexer (#38).
     fn token_is_ellipsis(&self, tokens: &[Token], i: usize) -> bool {
         matches!(&tokens.get(i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if s == "...")
-            || (matches!(&tokens.get(i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if s == ".")
-                && matches!(&tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Punct(s)) if s == ".")
-                && matches!(&tokens.get(i + 2).map(|t| &t.kind), Some(TokenKind::Punct(s)) if s == "."))
-    }
-
-    fn skip_ellipsis(&self, tokens: &[Token], i: usize) -> usize {
-        if matches!(&tokens.get(i).map(|t| &t.kind), Some(TokenKind::Punct(s)) if s == "...") {
-            i + 1
-        } else {
-            i + 3
-        }
     }
 
     fn next_non_newline_is(&self, tokens: &[Token], mut i: usize, punct: &str) -> bool {
@@ -2708,6 +2708,26 @@ fn token_paste_fragment(kind: &TokenKind) -> String {
     }
 }
 
+/// Whether the text already emitted ends in a preprocessing number, i.e.
+/// whether a following `.` would be absorbed into it. Decided from the
+/// trailing run of pp-number characters: the run is maximal, so if it opens
+/// with a digit (or `.` then a digit) the lexer read it as a number, and if
+/// it opens with a letter or `_` the lexer read it as an identifier, which
+/// does not absorb a `.`.
+fn output_ends_in_pp_number(output: &str) -> bool {
+    let run_start = output
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '.'))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let mut run = output[run_start..].chars();
+    match run.next() {
+        Some(c) if c.is_ascii_digit() => true,
+        Some('.') => run.next().is_some_and(|c| c.is_ascii_digit()),
+        _ => false,
+    }
+}
+
 fn needs_leading_space(output: &str, kind: &TokenKind) -> bool {
     if output.is_empty() {
         return false;
@@ -2724,9 +2744,23 @@ fn needs_leading_space(output: &str, kind: &TokenKind) -> bool {
         // After a template `>`, a space before `&` / `*` keeps
         // `shared_ptr<T> &p` from gluing into `>&` which tree-sitter
         // fails to parse as a reference parameter.
+        //
+        // `"::"` is unreachable today: the lexer spells a scope operator as
+        // two `:` tokens and nothing else builds a `Punct("::")` (token
+        // pasting always yields an `Identifier`). It is kept because it is
+        // the behaviour the arm would need if `::` ever becomes one token
+        // (see #37), not because it fires now.
         TokenKind::Punct(s) => match s.as_str() {
             ";" | "," | "}" | "::" | "." => true,
             "&" | "*" => last == '>',
+            // A pp-number swallows `.` and alphanumerics (C11 6.4.8), so an
+            // ellipsis written straight after one re-lexes *into* it: the
+            // GNU case range `case 1 ... 10:` emitted as `case 1...10:`
+            // comes back as the single number `1...10` instead of
+            // `1` `...` `10`. Same for `[0 ... 9]` designated ranges. Only
+            // a number needs this — `Args...` after an identifier re-lexes
+            // correctly and must stay glued.
+            "..." => output_ends_in_pp_number(output),
             _ => false,
         },
         TokenKind::Newline => false,
@@ -4603,6 +4637,126 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "varargs must be substituted exactly once: {}",
             result.output
         );
+    }
+
+    #[test]
+    fn spaced_dots_are_not_an_ellipsis_in_a_parameter_list() {
+        // `#define F(x, . . .)` is `invalid token in macro parameter list`
+        // in gcc and clang. Before #28 the lexer had no `...` token, so the
+        // parameter parser had to accept three `.` tokens and took this
+        // spelling with them; now a real ellipsis is always one token.
+        let src = "#define F(x, . . .) x\nint value = F(1, 2);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("in macro parameters")),
+            "expected a malformed-parameter-list diagnostic, got {:?}",
+            result.diagnostics
+        );
+        // The definition is dropped, so the invocation stays as written.
+        assert!(result.output.contains("F(1"), "{}", result.output);
+    }
+
+    #[test]
+    fn splice_split_ellipsis_is_a_known_false_rejection() {
+        // KNOWN GAP, not desired behaviour. Phase 2 deletes `\`-newline
+        // before preprocessing tokens are recognized, so this is a valid
+        // variadic macro and gcc/clang expand the call to `1`. The lexer
+        // does not splice before tokenizing (docs/PREPROCESSOR.md,
+        // "General translation phase 2"), so the dots never munch into one
+        // `...` and the definition is dropped. Pinned so the day the lexer
+        // becomes splice-aware, this test fails and gets inverted.
+        let src = "#define F(x, .\\\n..) x\nint value = F(1, 2);\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("in macro parameters")),
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(
+            result.output.contains("F(1"),
+            "definition dropped, so the call stays unexpanded: {}",
+            result.output
+        );
+    }
+
+    /// Token kinds the C lexer reads back out of preprocessed output.
+    fn relex(output: &str) -> Vec<TokenKind> {
+        crate::lexer::Lexer::new(output, crate::Language::C)
+            .tokenize()
+            .into_iter()
+            .map(|t| t.kind)
+            .filter(|k| !matches!(k, TokenKind::Newline | TokenKind::Eof))
+            .collect()
+    }
+
+    #[test]
+    fn gnu_case_range_survives_the_round_trip() {
+        // A pp-number absorbs `.` and alphanumerics, so `case 1 ... 10:`
+        // emitted as `case 1...10:` re-lexes as the single number
+        // `1...10`. The ellipsis keeps its leading space after a number.
+        for (src, want) in [
+            (
+                "void f(int x) { switch (x) { case 1 ... 10: break; } }\n",
+                "1 ...10",
+            ),
+            // A pp-number can end in a letter, so a digit test is not enough.
+            (
+                "void f(int x) { switch (x) { case 0x1F ... 0x2F: break; } }\n",
+                "0x1F ...0x2F",
+            ),
+            ("int a[] = { [0 ... 9] = 1 };\n", "0 ...9"),
+        ] {
+            let out = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new()).output;
+            assert!(out.contains(want), "want {want:?} in {out:?}");
+            let kinds = relex(&out);
+            assert!(
+                kinds
+                    .iter()
+                    .any(|k| matches!(k, TokenKind::Punct(s) if s == "...")),
+                "ellipsis must survive re-lexing: {out:?} -> {kinds:?}"
+            );
+            assert!(
+                !kinds
+                    .iter()
+                    .any(|k| matches!(k, TokenKind::Number(n) if n.contains('.'))),
+                "no number may absorb the ellipsis: {out:?} -> {kinds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ellipsis_after_a_non_number_stays_glued() {
+        // `Args...` must not gain a space: only a pp-number absorbs the
+        // dots, and identifiers are by far the common case.
+        let out = preprocess_string(
+            "template <class... Args> void f(Args... a);\n",
+            Path::new("t.cpp"),
+            &PreprocessOptions::new(),
+        )
+        .output;
+        assert!(out.contains("Args..."), "{out}");
+        assert!(out.contains("class..."), "{out}");
+    }
+
+    #[test]
+    fn variadic_declaration_keeps_its_ellipsis() {
+        // Issue #28: the ellipsis came back out as `. . .`, which
+        // tree-sitter cannot parse, so every variadic declaration in the
+        // corpus produced an ERROR node.
+        let src = "int my_log(const char *fmt, ...) { return 0; }\n";
+        let result = preprocess_string(src, Path::new("t.c"), &PreprocessOptions::new());
+        assert!(
+            result.output.contains("..."),
+            "ellipsis must survive re-spelling: {}",
+            result.output
+        );
+        assert!(!result.output.contains(". ."), "{}", result.output);
     }
 
     #[test]

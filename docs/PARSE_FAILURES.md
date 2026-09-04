@@ -3,25 +3,49 @@
 Files that fail tree-sitter parsing during `trace analyze`. Regenerate TSV with:
 
 ```bash
+set -euo pipefail   # stop at the first failure, do not run on with stale inputs
+
+# One corpus base for every step: fetch_corpora.py, the analyze runs
+# below and this script all read $TRACE_CORPUS_BASE.
+export TRACE_CORPUS_BASE=/private/tmp/corpora
+
 python3 scripts/fetch_corpora.py   # corpora at the revisions pinned in scripts/eval_expected.json
-trace analyze <ROOT> -o /tmp/out.db --jobs 8
-cargo run -p trace-cli --release --example parse_failures -- <ROOT> --from-db /tmp/out.db > /tmp/parse_failures.tsv
+cargo build --release -p trace-cli && cargo build --release -p trace-cli --examples
+
+# One analyze + one TSV per corpus, read back by these exact names.
+# Each TSV is written to a .part file and renamed only if the
+# command succeeded, so a failed run leaves no final file at all
+# -- the generator treats a MISSING file as an error and an EMPTY
+# one as a corpus with zero parse failures. Clear stale files first.
+rm -f /tmp/parse_failures_{hdf,hiview,camera}.tsv{,.part}
+target/release/trace analyze "$TRACE_CORPUS_BASE/drivers_hdf_core" -o /tmp/hdf_parse_check.db --jobs 8
+target/release/examples/parse_failures "$TRACE_CORPUS_BASE/drivers_hdf_core" --from-db /tmp/hdf_parse_check.db > /tmp/parse_failures_hdf.tsv.part
+mv /tmp/parse_failures_hdf.tsv.part /tmp/parse_failures_hdf.tsv
+target/release/trace analyze "$TRACE_CORPUS_BASE/hiviewdfx_hiview" -o /tmp/hiview_parse_check.db --jobs 8
+target/release/examples/parse_failures "$TRACE_CORPUS_BASE/hiviewdfx_hiview" --from-db /tmp/hiview_parse_check.db > /tmp/parse_failures_hiview.tsv.part
+mv /tmp/parse_failures_hiview.tsv.part /tmp/parse_failures_hiview.tsv
+target/release/trace analyze "$TRACE_CORPUS_BASE/multimedia_camera_framework" -o /tmp/camera_parse_check.db --jobs 8
+target/release/examples/parse_failures "$TRACE_CORPUS_BASE/multimedia_camera_framework" --from-db /tmp/camera_parse_check.db > /tmp/parse_failures_camera.tsv.part
+mv /tmp/parse_failures_camera.tsv.part /tmp/parse_failures_camera.tsv
+
 python3 scripts/gen_parse_failures_report.py
 ```
+
+The `parse_failures` example re-preprocesses with whatever build runs it; the DB only selects the failing-file set. Build the binary *and* the examples (the `--examples` flag alone leaves `target/release/trace` stale).
 
 ## Overview
 
 | Corpus | Root | Failing files | Top category |
 |--------|------|--------------:|--------------|
-| `drivers_hdf_core` | `/private/tmp/corpora/drivers_hdf_core` | 176 | generic ERROR nodes (mixed C++ constructs) |
-| `hiviewdfx_hiview` | `/private/tmp/corpora/hiviewdfx_hiview` | 37 | generic ERROR nodes (mixed C++ constructs) |
-| `multimedia_camera_framework` | `/private/tmp/corpora/multimedia_camera_framework` | 73 | generic ERROR nodes (mixed C++ constructs) |
+| `drivers_hdf_core` | `/private/tmp/corpora/drivers_hdf_core` | 163 | generic ERROR nodes (mixed C++ constructs) |
+| `hiviewdfx_hiview` | `/private/tmp/corpora/hiviewdfx_hiview` | 32 | generic ERROR nodes (mixed C++ constructs) |
+| `multimedia_camera_framework` | `/private/tmp/corpora/multimedia_camera_framework` | 64 | generic ERROR nodes (mixed C++ constructs) |
 
 ## Cross-corpus category totals
 
 | Category | HDF | Hiview | Camera | Total |
 |----------|----:|-------:|-------:|------:|
-| generic ERROR nodes (mixed C++ constructs) | 173 | 24 | 51 | 248 |
+| generic ERROR nodes (mixed C++ constructs) | 160 | 19 | 42 | 221 |
 | gtest/HWTEST macros (`missing ;`) | 2 | 1 | 18 | 21 |
 | missing type identifiers (often macro-expanded types) | 1 | 7 | 2 | 10 |
 | other / mixed | 0 | 3 | 2 | 5 |
@@ -29,16 +53,16 @@ python3 scripts/gen_parse_failures_report.py
 
 ## drivers_hdf_core
 
-Generated from `trace analyze /private/tmp/corpora/drivers_hdf_core` (176 files with parse warnings).
+Generated from `trace analyze /private/tmp/corpora/drivers_hdf_core` (163 files with parse warnings).
 Each entry is a translation unit or header indexed as its own file; reasons come from tree-sitter ERROR sites in preprocessed source.
 
-**Total failing files:** 176
+**Total failing files:** 163
 
 ### Failure categories
 
 | Category | Files |
 |----------|------:|
-| generic ERROR nodes (mixed C++ constructs) | 173 |
+| generic ERROR nodes (mixed C++ constructs) | 160 |
 | gtest/HWTEST macros (`missing ;`) | 2 |
 | missing type identifiers (often macro-expanded types) | 1 |
 
@@ -56,172 +80,159 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 8 | `adapter/khdf/linux/model/usb/host/src/usb_pnp_notify.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
 | 9 | `adapter/khdf/linux/platform/adc/adc_iio_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
 | 10 | `adapter/khdf/linux/platform/clock/clock_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 11 | `adapter/khdf/linux/platform/fwk/platform_trace.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 12 | `adapter/khdf/linux/platform/gpio/gpio_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 13 | `adapter/khdf/linux/platform/i2c/i2c_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 14 | `adapter/khdf/linux/platform/mipi_csi/mipi_csi_dev.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 15 | `adapter/khdf/linux/platform/mipi_csi/mipi_v4l2_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 16 | `adapter/khdf/linux/platform/mipi_dsi/mipi_drm_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 17 | `adapter/khdf/linux/platform/mipi_dsi/mipi_tx_dev.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 18 | `adapter/khdf/linux/platform/mipi_dsi/mipi_tx_hi35xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 19 | `adapter/khdf/linux/platform/pwm/pwm_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 20 | `adapter/khdf/linux/platform/regulator/regulator_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 21 | `adapter/khdf/linux/platform/rtc/rtc_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 22 | `adapter/khdf/linux/platform/spi/spi_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 23 | `adapter/khdf/linux/platform/uart/uart_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 24 | `adapter/khdf/linux/platform/watchdog/watchdog_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 25 | `adapter/khdf/linux/test/platform/i2c/i2c_adapter_dummy.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 26 | `adapter/khdf/liteos/model/storage/src/mmc/mmc_block_lite.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 12 |
-| 27 | `adapter/khdf/liteos/model/storage/src/mtd/mtd_block_lite.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 9 |
-| 28 | `adapter/khdf/liteos/model/storage/src/mtd/mtd_char_lite.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 13 |
-| 29 | `adapter/khdf/liteos/model/usb/host/src/usb_pnp_manager.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 30 | `adapter/khdf/liteos/model/usb/host/src/usb_pnp_notify.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 31 | `adapter/khdf/liteos/model/usb/host/src/usb_test_pnp_notify.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 32 | `adapter/khdf/liteos/platform/src/platform_trace.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 33 | `adapter/khdf/liteos_m/test/sample_driver/src/sample_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 34 | `adapter/khdf/uniproton/test/sample_driver/src/platform_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 35 | `adapter/platform/can/can_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 36 | `adapter/platform/gpio/gpio_asr.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 37 | `adapter/platform/gpio/gpio_bes.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 38 | `adapter/platform/gpio/gpio_gr5xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 39 | `adapter/platform/gpio/gpio_stm32f4xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 40 | `adapter/platform/gpio/gpio_wm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 41 | `adapter/platform/i2c/i2c_bes.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 42 | `adapter/platform/i2c/i2c_stm32f4xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 43 | `adapter/platform/i2c/i2c_wm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 44 | `adapter/platform/mipi_dsi/mipi_drm_imx8mm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 45 | `adapter/platform/pwm/pwm_bes.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 46 | `adapter/platform/pwm/pwm_stm32f4xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 47 | `adapter/platform/pwm/pwm_wm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 48 | `adapter/platform/spi/spi_bes.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 49 | `adapter/platform/spi/spi_stm32f4xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 50 | `adapter/platform/spi/spi_wm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 51 | `adapter/platform/uart/uart_asr.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 52 | `adapter/platform/uart/uart_bes.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 53 | `adapter/platform/uart/uart_gr5xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 54 | `adapter/platform/uart/uart_stm32f4xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 55 | `adapter/platform/uart/uart_wm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 56 | `adapter/platform/watchdog/watchdog_bes.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 57 | `adapter/platform/watchdog/watchdog_stm32f4xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 58 | `adapter/platform/watchdog/watchdog_wm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 59 | `adapter/uhdf2/host/test/unittest/sample1_driver/sample1_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 60 | `adapter/uhdf2/host/test/unittest/sample_driver/sample_driver.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
-| 61 | `adapter/uhdf2/osal/test/unittest/common/sample_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 62 | `framework/core/manager/test/unittest/common/hdf_sbuf_test.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 63 | `framework/model/audio/core/src/audio_host.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 64 | `framework/model/audio/dispatch/src/audio_control_dispatch.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 65 | `framework/model/audio/dispatch/src/audio_stream_dispatch.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 66 | `framework/model/audio/hdmi/src/audio_hdmi_codec_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 67 | `framework/model/audio/usb/src/audio_usb_codec_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 68 | `framework/model/audio/usb/src/audio_usb_dma_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 69 | `framework/model/audio/usb/src/audio_usb_endpoints.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 70 | `framework/model/audio/usb/src/audio_usb_mixer.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 5 |
-| 71 | `framework/model/display/driver/adapter_soc/hi35xx_disp.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 72 | `framework/model/display/driver/backlight/hdf_bl.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 73 | `framework/model/display/driver/backlight/pwm_bl.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 74 | `framework/model/display/driver/hdf_disp.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 75 | `framework/model/display/driver/hdf_drm_panel.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 9 |
-| 76 | `framework/model/display/driver/lcdkit/lite_lcdkit.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 77 | `framework/model/display/driver/panel/ili9881_st_5p5.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 78 | `framework/model/display/driver/panel/ili9881c_boe.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 79 | `framework/model/display/driver/panel/mipi_icn9700.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 80 | `framework/model/display/driver/panel/ssp_st7789.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 81 | `framework/model/input/driver/hdf_encoder.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 82 | `framework/model/input/driver/hdf_encoder.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 83 | `framework/model/input/driver/hdf_hid_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 84 | `framework/model/input/driver/hdf_infrared.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 85 | `framework/model/input/driver/hdf_input_device_manager.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 86 | `framework/model/input/driver/hdf_key.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 87 | `framework/model/input/driver/hdf_touch.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 88 | `framework/model/input/driver/touchscreen/touch_ft5406.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 89 | `framework/model/input/driver/touchscreen/touch_ft5x06.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 90 | `framework/model/input/driver/touchscreen/touch_ft6336.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 91 | `framework/model/input/driver/touchscreen/touch_gt911.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 92 | `framework/model/misc/dsoftbus/src/hdf_dsoftbus_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 93 | `framework/model/misc/light/driver/src/light_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 94 | `framework/model/misc/vibrator/driver/src/vibrator_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 95 | `framework/model/network/ethernet/src/hdf_eth_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 96 | `framework/model/network/wifi/core/hdf_wifi_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 97 | `framework/model/sensor/driver/accel/sensor_accel_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 98 | `framework/model/sensor/driver/accel/sensor_gravity_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 99 | `framework/model/sensor/driver/als/sensor_als_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 100 | `framework/model/sensor/driver/barometer/sensor_barometer_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 101 | `framework/model/sensor/driver/common/src/sensor_device_manager.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 102 | `framework/model/sensor/driver/gas/sensor_gas_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 103 | `framework/model/sensor/driver/gyro/sensor_gyro_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 104 | `framework/model/sensor/driver/hall/sensor_hall_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 105 | `framework/model/sensor/driver/humidity/sensor_humidity_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 106 | `framework/model/sensor/driver/magnetic/sensor_magnetic_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 107 | `framework/model/sensor/driver/pedometer/sensor_pedometer_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 108 | `framework/model/sensor/driver/ppg/sensor_ppg_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 109 | `framework/model/sensor/driver/proximity/sensor_proximity_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 110 | `framework/model/sensor/driver/temperature/sensor_temperature_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 111 | `framework/sample/platform/uart/src/uart_sample.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 112 | `framework/support/platform/include/fwk/platform_device.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 113 | `framework/support/platform/include/fwk/platform_trace.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 114 | `framework/support/platform/src/adc/adc_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 115 | `framework/support/platform/src/clock/clock_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 116 | `framework/support/platform/src/dac/dac_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 117 | `framework/support/platform/src/fwk/platform_device.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 118 | `framework/support/platform/src/fwk/platform_trace_unopen.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 119 | `framework/support/platform/src/gpio/gpio_service.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 120 | `framework/support/platform/src/i2c/i2c_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 121 | `framework/support/platform/src/i3c/i3c_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 122 | `framework/support/platform/src/pin/pin_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 123 | `framework/support/platform/src/regulator/regulator_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 124 | `framework/support/platform/src/timer/timer_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 125 | `framework/test/unittest/common/hdf_main_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 126 | `framework/test/unittest/manager/sample_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 127 | `framework/test/unittest/platform/common/adc_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 128 | `framework/test/unittest/platform/common/clock_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 129 | `framework/test/unittest/platform/common/dac_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 130 | `framework/test/unittest/platform/common/emmc_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 131 | `framework/test/unittest/platform/common/gpio_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 132 | `framework/test/unittest/platform/common/hdmi_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 133 | `framework/test/unittest/platform/common/i2c_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 134 | `framework/test/unittest/platform/common/i2s_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 135 | `framework/test/unittest/platform/common/i3c_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 136 | `framework/test/unittest/platform/common/mipi_csi_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 137 | `framework/test/unittest/platform/common/mipi_dsi_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 138 | `framework/test/unittest/platform/common/pcie_bus_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 139 | `framework/test/unittest/platform/common/pcie_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 140 | `framework/test/unittest/platform/common/pin_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 141 | `framework/test/unittest/platform/common/platform_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 142 | `framework/test/unittest/platform/common/pwm_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 143 | `framework/test/unittest/platform/common/regulator_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 144 | `framework/test/unittest/platform/common/rtc_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 145 | `framework/test/unittest/platform/common/sdio_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 146 | `framework/test/unittest/platform/common/spi_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 147 | `framework/test/unittest/platform/common/timer_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 148 | `framework/test/unittest/platform/common/uart_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 149 | `framework/test/unittest/platform/common/watchdog_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 150 | `framework/test/unittest/platform/config/can_test_config.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 151 | `framework/test/unittest/platform/virtual/adc_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 152 | `framework/test/unittest/platform/virtual/clock_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 153 | `framework/test/unittest/platform/virtual/dac_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 154 | `framework/test/unittest/platform/virtual/i3c_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 155 | `framework/test/unittest/platform/virtual/pcie_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 156 | `framework/test/unittest/platform/virtual/pin_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 157 | `framework/test/unittest/platform/virtual/pwm_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 158 | `framework/test/unittest/platform/virtual/regulator_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 159 | `framework/test/unittest/platform/virtual/spi_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 160 | `framework/test/unittest/platform/virtual/watchdog_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 161 | `framework/test/unittest/pm/hdf_pm_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 162 | `framework/test/unittest/sensor/hdf_sensor_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 163 | `framework/test/unittest/uevent/devmgr_uevent_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 164 | `framework/test/unittest/utils/hcs_parser/unittest/hcs_macro_cases.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 5 |
-| 165 | `framework/tools/hdi-gen/ast/ast.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 53 |
-| 166 | `framework/tools/hdi-gen/lexer/lexer.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 31 |
-| 167 | `framework/tools/hdi-gen/lexer/token.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 10 |
-| 168 | `framework/tools/hdi-gen/parser/parser.h` | tree-sitter-cpp node `missing type_identifier` at 4 site(s) | 4 |
-| 169 | `framework/tools/hdi-gen/util/logger.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 170 | `framework/tools/hdi-gen/util/logger.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 171 | `framework/tools/hdi-gen/util/string_builder.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 172 | `framework/tools/hdi-gen/util/string_builder.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 173 | `framework/tools/hdi-gen/util/string_helper.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 174 | `framework/tools/hdi-gen/util/string_helper.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 175 | `interfaces/inner_api/hdi/iservstat_listener_hdi.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 176 | `interfaces/inner_api/utils/hdf_trace.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 11 | `adapter/khdf/linux/platform/gpio/gpio_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 12 | `adapter/khdf/linux/platform/i2c/i2c_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 13 | `adapter/khdf/linux/platform/mipi_csi/mipi_v4l2_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 14 | `adapter/khdf/linux/platform/mipi_dsi/mipi_drm_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 15 | `adapter/khdf/linux/platform/mipi_dsi/mipi_tx_dev.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 16 | `adapter/khdf/linux/platform/mipi_dsi/mipi_tx_hi35xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 17 | `adapter/khdf/linux/platform/pwm/pwm_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 18 | `adapter/khdf/linux/platform/regulator/regulator_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 19 | `adapter/khdf/linux/platform/rtc/rtc_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 20 | `adapter/khdf/linux/platform/spi/spi_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 21 | `adapter/khdf/linux/platform/uart/uart_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 22 | `adapter/khdf/linux/platform/watchdog/watchdog_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 23 | `adapter/khdf/linux/test/platform/i2c/i2c_adapter_dummy.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 24 | `adapter/khdf/liteos/model/storage/src/mmc/mmc_block_lite.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 12 |
+| 25 | `adapter/khdf/liteos/model/storage/src/mtd/mtd_block_lite.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 9 |
+| 26 | `adapter/khdf/liteos/model/storage/src/mtd/mtd_char_lite.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 13 |
+| 27 | `adapter/khdf/liteos/model/usb/host/src/usb_pnp_manager.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 28 | `adapter/khdf/liteos/model/usb/host/src/usb_pnp_notify.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 29 | `adapter/khdf/liteos/model/usb/host/src/usb_test_pnp_notify.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 30 | `adapter/khdf/liteos_m/test/sample_driver/src/sample_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 31 | `adapter/khdf/uniproton/test/sample_driver/src/platform_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 32 | `adapter/platform/can/can_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 33 | `adapter/platform/gpio/gpio_asr.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 34 | `adapter/platform/gpio/gpio_bes.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 35 | `adapter/platform/gpio/gpio_gr5xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 36 | `adapter/platform/gpio/gpio_stm32f4xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 37 | `adapter/platform/gpio/gpio_wm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 38 | `adapter/platform/i2c/i2c_bes.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 39 | `adapter/platform/i2c/i2c_stm32f4xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 40 | `adapter/platform/i2c/i2c_wm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 41 | `adapter/platform/mipi_dsi/mipi_drm_imx8mm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 42 | `adapter/platform/pwm/pwm_bes.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 43 | `adapter/platform/pwm/pwm_stm32f4xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 44 | `adapter/platform/pwm/pwm_wm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 45 | `adapter/platform/spi/spi_bes.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 46 | `adapter/platform/spi/spi_stm32f4xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 47 | `adapter/platform/spi/spi_wm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 48 | `adapter/platform/uart/uart_asr.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 49 | `adapter/platform/uart/uart_bes.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 50 | `adapter/platform/uart/uart_gr5xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 51 | `adapter/platform/uart/uart_stm32f4xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 52 | `adapter/platform/uart/uart_wm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 53 | `adapter/platform/watchdog/watchdog_bes.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 54 | `adapter/platform/watchdog/watchdog_stm32f4xx.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 55 | `adapter/platform/watchdog/watchdog_wm.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 56 | `adapter/uhdf2/host/test/unittest/sample1_driver/sample1_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 57 | `adapter/uhdf2/host/test/unittest/sample_driver/sample_driver.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
+| 58 | `adapter/uhdf2/osal/test/unittest/common/sample_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 59 | `framework/core/manager/test/unittest/common/hdf_sbuf_test.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 60 | `framework/model/audio/core/src/audio_host.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 61 | `framework/model/audio/dispatch/src/audio_control_dispatch.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 62 | `framework/model/audio/dispatch/src/audio_stream_dispatch.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 63 | `framework/model/audio/hdmi/src/audio_hdmi_codec_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 64 | `framework/model/audio/usb/src/audio_usb_codec_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 65 | `framework/model/audio/usb/src/audio_usb_dma_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 66 | `framework/model/audio/usb/src/audio_usb_endpoints.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 67 | `framework/model/audio/usb/src/audio_usb_mixer.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 5 |
+| 68 | `framework/model/display/driver/adapter_soc/hi35xx_disp.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 69 | `framework/model/display/driver/backlight/hdf_bl.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 70 | `framework/model/display/driver/backlight/pwm_bl.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 71 | `framework/model/display/driver/hdf_disp.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 72 | `framework/model/display/driver/hdf_drm_panel.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 9 |
+| 73 | `framework/model/display/driver/lcdkit/lite_lcdkit.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 74 | `framework/model/display/driver/panel/ili9881_st_5p5.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 75 | `framework/model/display/driver/panel/ili9881c_boe.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 76 | `framework/model/display/driver/panel/mipi_icn9700.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 77 | `framework/model/display/driver/panel/ssp_st7789.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 78 | `framework/model/input/driver/hdf_encoder.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 79 | `framework/model/input/driver/hdf_encoder.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 80 | `framework/model/input/driver/hdf_hid_adapter.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 81 | `framework/model/input/driver/hdf_infrared.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 82 | `framework/model/input/driver/hdf_input_device_manager.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 83 | `framework/model/input/driver/hdf_key.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 84 | `framework/model/input/driver/hdf_touch.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 85 | `framework/model/input/driver/touchscreen/touch_ft5406.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 86 | `framework/model/input/driver/touchscreen/touch_ft5x06.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 87 | `framework/model/input/driver/touchscreen/touch_ft6336.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 88 | `framework/model/input/driver/touchscreen/touch_gt911.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 89 | `framework/model/misc/dsoftbus/src/hdf_dsoftbus_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 90 | `framework/model/misc/light/driver/src/light_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 91 | `framework/model/misc/vibrator/driver/src/vibrator_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 92 | `framework/model/network/ethernet/src/hdf_eth_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 93 | `framework/model/network/wifi/core/hdf_wifi_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 94 | `framework/model/sensor/driver/accel/sensor_accel_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 95 | `framework/model/sensor/driver/accel/sensor_gravity_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 96 | `framework/model/sensor/driver/als/sensor_als_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 97 | `framework/model/sensor/driver/barometer/sensor_barometer_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 98 | `framework/model/sensor/driver/common/src/sensor_device_manager.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 99 | `framework/model/sensor/driver/gas/sensor_gas_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 100 | `framework/model/sensor/driver/gyro/sensor_gyro_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 101 | `framework/model/sensor/driver/hall/sensor_hall_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 102 | `framework/model/sensor/driver/humidity/sensor_humidity_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 103 | `framework/model/sensor/driver/magnetic/sensor_magnetic_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 104 | `framework/model/sensor/driver/pedometer/sensor_pedometer_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 105 | `framework/model/sensor/driver/ppg/sensor_ppg_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 106 | `framework/model/sensor/driver/proximity/sensor_proximity_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 107 | `framework/model/sensor/driver/temperature/sensor_temperature_driver.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 108 | `framework/sample/platform/uart/src/uart_sample.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 109 | `framework/support/platform/src/adc/adc_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 110 | `framework/support/platform/src/clock/clock_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 111 | `framework/support/platform/src/dac/dac_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 112 | `framework/support/platform/src/gpio/gpio_service.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 113 | `framework/support/platform/src/i2c/i2c_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 114 | `framework/support/platform/src/i3c/i3c_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 115 | `framework/support/platform/src/pin/pin_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 116 | `framework/support/platform/src/regulator/regulator_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 117 | `framework/support/platform/src/timer/timer_core.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 118 | `framework/test/unittest/common/hdf_main_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 119 | `framework/test/unittest/manager/sample_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 120 | `framework/test/unittest/platform/common/adc_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 121 | `framework/test/unittest/platform/common/clock_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 122 | `framework/test/unittest/platform/common/dac_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 123 | `framework/test/unittest/platform/common/emmc_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 124 | `framework/test/unittest/platform/common/gpio_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 125 | `framework/test/unittest/platform/common/hdmi_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 126 | `framework/test/unittest/platform/common/i2c_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 127 | `framework/test/unittest/platform/common/i2s_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 128 | `framework/test/unittest/platform/common/i3c_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 129 | `framework/test/unittest/platform/common/mipi_csi_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 130 | `framework/test/unittest/platform/common/mipi_dsi_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 131 | `framework/test/unittest/platform/common/pcie_bus_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 132 | `framework/test/unittest/platform/common/pcie_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 133 | `framework/test/unittest/platform/common/pin_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 134 | `framework/test/unittest/platform/common/platform_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 135 | `framework/test/unittest/platform/common/pwm_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 136 | `framework/test/unittest/platform/common/regulator_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 137 | `framework/test/unittest/platform/common/rtc_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 138 | `framework/test/unittest/platform/common/sdio_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 139 | `framework/test/unittest/platform/common/spi_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 140 | `framework/test/unittest/platform/common/timer_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 141 | `framework/test/unittest/platform/common/uart_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 142 | `framework/test/unittest/platform/common/watchdog_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 143 | `framework/test/unittest/platform/config/can_test_config.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 144 | `framework/test/unittest/platform/virtual/adc_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 145 | `framework/test/unittest/platform/virtual/clock_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 146 | `framework/test/unittest/platform/virtual/dac_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 147 | `framework/test/unittest/platform/virtual/i3c_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 148 | `framework/test/unittest/platform/virtual/pcie_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 149 | `framework/test/unittest/platform/virtual/pin_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 150 | `framework/test/unittest/platform/virtual/pwm_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 151 | `framework/test/unittest/platform/virtual/regulator_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 152 | `framework/test/unittest/platform/virtual/spi_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 153 | `framework/test/unittest/platform/virtual/watchdog_virtual.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 154 | `framework/test/unittest/pm/hdf_pm_driver_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 155 | `framework/test/unittest/sensor/hdf_sensor_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 156 | `framework/test/unittest/uevent/devmgr_uevent_test.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 157 | `framework/test/unittest/utils/hcs_parser/unittest/hcs_macro_cases.c` | generic tree-sitter ERROR node(s) in preprocessed C++ | 5 |
+| 158 | `framework/tools/hdi-gen/ast/ast.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 53 |
+| 159 | `framework/tools/hdi-gen/lexer/lexer.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 31 |
+| 160 | `framework/tools/hdi-gen/lexer/token.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 10 |
+| 161 | `framework/tools/hdi-gen/parser/parser.h` | tree-sitter-cpp node `missing type_identifier` at 4 site(s) | 4 |
+| 162 | `interfaces/inner_api/hdi/iservstat_listener_hdi.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 163 | `interfaces/inner_api/utils/hdf_trace.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
 
 ### Per-file details
 
@@ -321,14 +332,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 349 | 107 | `ERROR` | `=(` |
 | 349 | 143 | `ERROR` | `)` |
 
-#### `adapter/khdf/linux/platform/fwk/platform_trace.c`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 4 | 87 | `ERROR` | `, . . .` |
-
 #### `adapter/khdf/linux/platform/gpio/gpio_adapter.c`
 
 **Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
@@ -348,14 +351,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 172 | 65 | `missing ;` | `` |
 | 172 | 105 | `ERROR` | `=(` |
 | 172 | 139 | `ERROR` | `)` |
-
-#### `adapter/khdf/linux/platform/mipi_csi/mipi_csi_dev.c`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 22 | 54 | `ERROR` | `, . . .` |
 
 #### `adapter/khdf/linux/platform/mipi_csi/mipi_v4l2_adapter.c`
 
@@ -550,14 +545,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 59 | 67 | `missing ;` | `` |
 | 59 | 107 | `ERROR` | `=(` |
 | 59 | 143 | `ERROR` | `)` |
-
-#### `adapter/khdf/liteos/platform/src/platform_trace.c`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 26 | 87 | `ERROR` | `, . . .` |
 
 #### `adapter/khdf/liteos_m/test/sample_driver/src/sample_driver.c`
 
@@ -934,9 +921,9 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 |-----:|----:|-----------|---------|
 | 104 | 27 | `ERROR` | `, 256` |
 | 105 | 27 | `ERROR` | `, 256` |
-| 688 | 15 | `ERROR` | `. .0` |
-| 689 | 15 | `ERROR` | `. .0` |
-| 690 | 15 | `ERROR` | `. .0` |
+| 688 | 13 | `ERROR` | `...0x0307` |
+| 689 | 13 | `ERROR` | `...0x0607` |
+| 690 | 13 | `ERROR` | `...0x0713` |
 
 #### `framework/model/display/driver/adapter_soc/hi35xx_disp.c`
 
@@ -1352,22 +1339,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 22 | 107 | `ERROR` | `=(` |
 | 22 | 143 | `ERROR` | `)` |
 
-#### `framework/support/platform/include/fwk/platform_device.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 30 | 79 | `ERROR` | `, . . .` |
-
-#### `framework/support/platform/include/fwk/platform_trace.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 78 | 17 | `ERROR` | `, . . .` |
-
 #### `framework/support/platform/src/adc/adc_core.c`
 
 **Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
@@ -1397,22 +1368,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 505 | 61 | `missing ;` | `` |
 | 505 | 101 | `ERROR` | `=(` |
 | 505 | 131 | `ERROR` | `)` |
-
-#### `framework/support/platform/src/fwk/platform_device.c`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 39 | 79 | `ERROR` | `, . . .` |
-
-#### `framework/support/platform/src/fwk/platform_trace_unopen.c`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 45 | 87 | `ERROR` | `, . . .` |
 
 #### `framework/support/platform/src/gpio/gpio_service.c`
 
@@ -1960,58 +1915,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 114 | 50 | `missing type_identifier` | `` |
 | 121 | 49 | `missing type_identifier` | `` |
 
-#### `framework/tools/hdi-gen/util/logger.cpp`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 8 | 54 | `ERROR` | `, . . .` |
-| 20 | 54 | `ERROR` | `, . . .` |
-| 32 | 54 | `ERROR` | `, . . .` |
-
-#### `framework/tools/hdi-gen/util/logger.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 9 | 52 | `ERROR` | `, . . .` |
-| 11 | 52 | `ERROR` | `, . . .` |
-| 13 | 52 | `ERROR` | `, . . .` |
-
-#### `framework/tools/hdi-gen/util/string_builder.cpp`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 77 | 64 | `ERROR` | `, . . .` |
-
-#### `framework/tools/hdi-gen/util/string_builder.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 17 | 48 | `ERROR` | `, . . .` |
-
-#### `framework/tools/hdi-gen/util/string_helper.cpp`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 146 | 55 | `ERROR` | `, . . .` |
-
-#### `framework/tools/hdi-gen/util/string_helper.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 34 | 47 | `ERROR` | `, . . .` |
-
 #### `interfaces/inner_api/hdi/iservstat_listener_hdi.h`
 
 **Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
@@ -2034,16 +1937,16 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 ## hiviewdfx_hiview
 
-Generated from `trace analyze /private/tmp/corpora/hiviewdfx_hiview` (37 files with parse warnings).
+Generated from `trace analyze /private/tmp/corpora/hiviewdfx_hiview` (32 files with parse warnings).
 Each entry is a translation unit or header indexed as its own file; reasons come from tree-sitter ERROR sites in preprocessed source.
 
-**Total failing files:** 37
+**Total failing files:** 32
 
 ### Failure categories
 
 | Category | Files |
 |----------|------:|
-| generic ERROR nodes (mixed C++ constructs) | 24 |
+| generic ERROR nodes (mixed C++ constructs) | 19 |
 | missing type identifiers (often macro-expanded types) | 7 |
 | other / mixed | 3 |
 | extern template instantiations | 2 |
@@ -2076,20 +1979,15 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 21 | `interfaces/inner_api/unified_collection/client/trace_collector_client.h` | tree-sitter-cpp node `missing type_identifier` at 1 site(s) | 1 |
 | 22 | `interfaces/js/napi/src/napi_hiview_js.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
 | 23 | `plugins/eventlogger/log_catcher/summary_log_info_catcher.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 24 | `plugins/faultlogger/framework/native/extension/include/ets_faultlog_extension.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 25 | `plugins/faultlogger/framework/native/extension/src/ets_faultlog_extension.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 26 | `plugins/faultlogger/interfaces/cj/faultlogger_ffi.h` | tree-sitter-cpp node `missing ::` at 1 site(s) | 1 |
-| 27 | `plugins/faultlogger/interfaces/js/napi/napi_faultlogger.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 28 | `plugins/faultlogger/interfaces/js/test/unittest/cpp/faultlogger_test_napi.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 29 | `plugins/faultlogger/service/idl/include/ifaultlog_query_result.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 30 | `plugins/faultlogger/service/idl/include/ifaultlogger_service.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 31 | `plugins/performance/perfmonitor/common/event_builder/xperf_event_builder.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 32 | `plugins/performance/perfmonitor/common/perf_trace.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 33 | `plugins/performance/perfmonitor/common/perf_trace.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 34 | `plugins/performance/perfmonitor/interfaces/inner_api/include/perf_model.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 35 | `plugins/performance/xperf_service/common/src/perf_trace.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 36 | `plugins/performance/xperf_service/services/utils/time_util.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 5 |
-| 37 | `plugins/usage_event_report/fold/cache/include/fold_app_usage_db_helper.h` | tree-sitter-cpp node `missing type_identifier` at 1 site(s) | 1 |
+| 24 | `plugins/faultlogger/interfaces/cj/faultlogger_ffi.h` | tree-sitter-cpp node `missing ::` at 1 site(s) | 1 |
+| 25 | `plugins/faultlogger/interfaces/js/napi/napi_faultlogger.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 26 | `plugins/faultlogger/interfaces/js/test/unittest/cpp/faultlogger_test_napi.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 27 | `plugins/faultlogger/service/idl/include/ifaultlog_query_result.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 28 | `plugins/faultlogger/service/idl/include/ifaultlogger_service.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 29 | `plugins/performance/perfmonitor/common/event_builder/xperf_event_builder.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 30 | `plugins/performance/perfmonitor/interfaces/inner_api/include/perf_model.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 31 | `plugins/performance/xperf_service/services/utils/time_util.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 5 |
+| 32 | `plugins/usage_event_report/fold/cache/include/fold_app_usage_db_helper.h` | tree-sitter-cpp node `missing type_identifier` at 1 site(s) | 1 |
 
 ### Per-file details
 
@@ -2331,22 +2229,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 |-----:|----:|-----------|---------|
 | 58 | 45 | `ERROR` | `, int32_t` |
 
-#### `plugins/faultlogger/framework/native/extension/include/ets_faultlog_extension.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 31 | 64 | `ERROR` | `, . . .` |
-
-#### `plugins/faultlogger/framework/native/extension/src/ets_faultlog_extension.cpp`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 143 | 87 | `ERROR` | `, . . .` |
-
 #### `plugins/faultlogger/interfaces/cj/faultlogger_ffi.h`
 
 **Summary:** tree-sitter-cpp node `missing ::` at 1 site(s)
@@ -2397,24 +2279,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 |-----:|----:|-----------|---------|
 | 240 | 10 | `ERROR` | `*` |
 
-#### `plugins/performance/perfmonitor/common/perf_trace.cpp`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 6 | 38 | `ERROR` | `, . . .` |
-| 19 | 51 | `ERROR` | `, . . .` |
-
-#### `plugins/performance/perfmonitor/common/perf_trace.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 8 | 38 | `ERROR` | `, . . .` |
-| 9 | 51 | `ERROR` | `, . . .` |
-
 #### `plugins/performance/perfmonitor/interfaces/inner_api/include/perf_model.h`
 
 **Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
@@ -2424,15 +2288,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 244 | 31 | `ERROR` | `"OHOS.HiviewDFX.IFrameCallback"` |
 | 253 | 31 | `ERROR` | `"OHOS.HiviewDFX.IAnimatorCallback"` |
 | 262 | 31 | `ERROR` | `"OHOS.HiviewDFX.ISceneCallback"` |
-
-#### `plugins/performance/xperf_service/common/src/perf_trace.cpp`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 6 | 38 | `ERROR` | `, . . .` |
-| 19 | 51 | `ERROR` | `, . . .` |
 
 #### `plugins/performance/xperf_service/services/utils/time_util.h`
 
@@ -2458,16 +2313,16 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 ## multimedia_camera_framework
 
-Generated from `trace analyze /private/tmp/corpora/multimedia_camera_framework` (73 files with parse warnings).
+Generated from `trace analyze /private/tmp/corpora/multimedia_camera_framework` (64 files with parse warnings).
 Each entry is a translation unit or header indexed as its own file; reasons come from tree-sitter ERROR sites in preprocessed source.
 
-**Total failing files:** 73
+**Total failing files:** 64
 
 ### Failure categories
 
 | Category | Files |
 |----------|------:|
-| generic ERROR nodes (mixed C++ constructs) | 51 |
+| generic ERROR nodes (mixed C++ constructs) | 42 |
 | gtest/HWTEST macros (`missing ;`) | 18 |
 | other / mixed | 2 |
 | missing type identifiers (often macro-expanded types) | 2 |
@@ -2485,70 +2340,61 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 7 | `frameworks/cj/camera/include/camera_manager_impl.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
 | 8 | `frameworks/cj/camera/include/camera_output_impl.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
 | 9 | `frameworks/cj/camera/include/camera_session_impl.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 10 | `frameworks/cj/camera/include/listener_base.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 18 |
-| 11 | `frameworks/cj/camera/include/metadata_output_impl.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 12 | `frameworks/cj/camera/include/photo_output_impl.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 13 | `frameworks/cj/camera/include/preview_output_impl.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 14 | `frameworks/cj/camera/include/video_output_impl.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 15 | `frameworks/cj/camera/src/camera_ffi.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 42 |
-| 16 | `frameworks/cj/camera_picker/include/camera_picker_ffi.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 17 | `frameworks/native/camera/base/src/ability/camera_ability_builder.cpp` | tree-sitter-cpp node `missing field_identifier` at 1 site(s) | 1 |
-| 18 | `frameworks/native/camera/test/ndktest/camera_ndk_demo/entry/src/main/cpp/main.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 19 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_schedule_test/include/camera_deferred_video_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 17 |
-| 20 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_session_test/src/deferred_photo_session_unittest.cpp` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 21 | `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/include/hcamera_device_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 22 | `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/include/hcamera_service_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 11 |
-| 23 | `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/src/hcamera_device_manager_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 24 | `frameworks/native/camera/test/unittest/camera_service/hdi_stream_test/include/hstream_operator_unittest.h` | tree-sitter-cpp node `missing type_identifier` at 1 site(s) | 1 |
-| 25 | `frameworks/native/camera/test/unittest/camera_service/hdi_stream_test/src/hstream_capture_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 26 | `frameworks/native/camera/test/unittest/framework_native/output/src/photo_output_unittest.cpp` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 27 | `frameworks/native/camera/test/unittest/framework_native/session/src/capture_session_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 28 | `frameworks/native/ndk/impl/camera_manager_impl.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 8 |
-| 29 | `frameworks/native/ndk/impl/metadata_output_impl.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 30 | `frameworks/taihe/include/camera_event_emitter_taihe.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
-| 31 | `frameworks/taihe/include/listener_base_taihe.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 10 |
-| 32 | `frameworks/taihe/src/camera_constructor_taihe.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 33 | `frameworks/taihe/src/camera_picker_constructor_taihe.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 34 | `interfaces/inner_api/native/camera/include/ability/camera_ability_builder.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 35 | `interfaces/inner_api/native/camera/include/input/camera_manager.h` | tree-sitter-cpp node `missing type_identifier` at 1 site(s) | 1 |
-| 36 | `interfaces/inner_api/native/camera/include/input/i_standard_camera_listener.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 37 | `interfaces/inner_api/native/camera/include/output/photo_output.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 38 | `interfaces/kits/js/camera_napi/include/camera_napi_event_emitter.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
-| 39 | `interfaces/kits/js/camera_napi/include/camera_napi_object_types.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 40 | `interfaces/kits/js/camera_napi/include/camera_napi_param_parser.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 30 |
-| 41 | `interfaces/kits/js/camera_napi/include/session/camera_napi_adaptor.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 5 |
-| 42 | `mediastream/test/unittest/filter/src/audio_encoder_filter_unit_test.cpp` | tree-sitter-cpp node `missing ;` at 2 site(s) | 2 |
-| 43 | `moviefile/include/movie_file/plugin/movie_file_video_filter_plugin.h` | tree-sitter-cpp node `missing field_identifier` at 1 site(s) | 1 |
-| 44 | `moviefile/include/pipeline/thread/unified_pipeline_threadpool.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 8 |
-| 45 | `services/camera_service/binder/base/include/icamera_broker.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 46 | `services/camera_service/binder/base/include/icamera_multi_stream_output.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 47 | `services/camera_service/binder/base/include/istream_capture_photo_callback.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 48 | `services/camera_service/binder/base/include/istream_capture_thumbnail_callback.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 49 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_mock_session_manager_interface.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 50 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_scene_session_manager.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 51 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_window_manager_callback.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 52 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_window_session_manager_service.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 53 | `services/camera_service/include/camera_util.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 54 | `services/camera_service/include/param_update/camera_rotate_param_manager.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
-| 55 | `services/camera_service/src/camera_beauty_notification.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 56 | `services/camera_service/src/camera_util.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 57 | `services/camera_service/src/hcamera_device.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 58 | `services/camera_service/src/hcamera_service.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 59 | `services/deferred_processing_service/include/base/blocking_queue.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 57 |
-| 60 | `services/deferred_processing_service/include/base/dps.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 12 |
-| 61 | `services/deferred_processing_service/include/base/enable_shared_create.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 17 |
-| 62 | `services/deferred_processing_service/include/deferred_processing_service.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 63 | `services/deferred_processing_service/include/dfx/dps_video_report.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 64 | `services/deferred_processing_service/include/event_monitor/events_monitor.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 65 | `services/deferred_processing_service/include/schedule/video_processor/strategy/ivideo_strategy.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
-| 66 | `services/deferred_processing_service/include/schedule/video_processor/video_job_repository/ivideo_job_repository_listener.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 67 | `services/deferred_processing_service/include/utils/dp_power_manager.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 68 | `services/deferred_processing_service/include/utils/dp_safe_map.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 37 |
-| 69 | `services/deferred_processing_service/include/utils/dp_timer.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
-| 70 | `services/deferred_processing_service/include/utils/dp_utils.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 16 |
-| 71 | `test/fuzztest/audiodeferredprocess_fuzzer/audio_deferred_process_fuzzer.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 6 |
-| 72 | `test/fuzztest/cameraserviceproxy_fuzzer/camera_service_proxy_fuzzer.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 73 | `test/fuzztest/hcameraservice_fuzzer/hcamera_service_fuzzer.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 10 | `frameworks/cj/camera/include/metadata_output_impl.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 11 | `frameworks/cj/camera/include/photo_output_impl.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 12 | `frameworks/cj/camera/include/preview_output_impl.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 13 | `frameworks/cj/camera/include/video_output_impl.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 14 | `frameworks/cj/camera/src/camera_ffi.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 42 |
+| 15 | `frameworks/cj/camera_picker/include/camera_picker_ffi.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 16 | `frameworks/native/camera/base/src/ability/camera_ability_builder.cpp` | tree-sitter-cpp node `missing field_identifier` at 1 site(s) | 1 |
+| 17 | `frameworks/native/camera/test/ndktest/camera_ndk_demo/entry/src/main/cpp/main.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 18 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_schedule_test/include/camera_deferred_video_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 17 |
+| 19 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_session_test/src/deferred_photo_session_unittest.cpp` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 20 | `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/include/hcamera_device_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 21 | `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/include/hcamera_service_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 11 |
+| 22 | `frameworks/native/camera/test/unittest/camera_service/hdi_camera_test/src/hcamera_device_manager_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 23 | `frameworks/native/camera/test/unittest/camera_service/hdi_stream_test/include/hstream_operator_unittest.h` | tree-sitter-cpp node `missing type_identifier` at 1 site(s) | 1 |
+| 24 | `frameworks/native/camera/test/unittest/camera_service/hdi_stream_test/src/hstream_capture_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 25 | `frameworks/native/camera/test/unittest/framework_native/output/src/photo_output_unittest.cpp` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 26 | `frameworks/native/camera/test/unittest/framework_native/session/src/capture_session_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 27 | `frameworks/native/ndk/impl/camera_manager_impl.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 8 |
+| 28 | `frameworks/native/ndk/impl/metadata_output_impl.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 29 | `frameworks/taihe/include/camera_event_emitter_taihe.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
+| 30 | `frameworks/taihe/src/camera_constructor_taihe.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 31 | `frameworks/taihe/src/camera_picker_constructor_taihe.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 32 | `interfaces/inner_api/native/camera/include/ability/camera_ability_builder.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 33 | `interfaces/inner_api/native/camera/include/input/camera_manager.h` | tree-sitter-cpp node `missing type_identifier` at 1 site(s) | 1 |
+| 34 | `interfaces/inner_api/native/camera/include/input/i_standard_camera_listener.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 35 | `interfaces/inner_api/native/camera/include/output/photo_output.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 36 | `interfaces/kits/js/camera_napi/include/camera_napi_event_emitter.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
+| 37 | `interfaces/kits/js/camera_napi/include/session/camera_napi_adaptor.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 5 |
+| 38 | `mediastream/test/unittest/filter/src/audio_encoder_filter_unit_test.cpp` | tree-sitter-cpp node `missing ;` at 2 site(s) | 2 |
+| 39 | `moviefile/include/movie_file/plugin/movie_file_video_filter_plugin.h` | tree-sitter-cpp node `missing field_identifier` at 1 site(s) | 1 |
+| 40 | `services/camera_service/binder/base/include/icamera_broker.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 41 | `services/camera_service/binder/base/include/icamera_multi_stream_output.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 42 | `services/camera_service/binder/base/include/istream_capture_photo_callback.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 43 | `services/camera_service/binder/base/include/istream_capture_thumbnail_callback.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 44 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_mock_session_manager_interface.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 45 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_scene_session_manager.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 46 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_window_manager_callback.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 47 | `services/camera_service/binder/base/include/window_manager_service_utils/icamera_window_session_manager_service.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 48 | `services/camera_service/include/param_update/camera_rotate_param_manager.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
+| 49 | `services/camera_service/src/camera_beauty_notification.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 50 | `services/camera_service/src/hcamera_device.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 51 | `services/camera_service/src/hcamera_service.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 52 | `services/deferred_processing_service/include/base/blocking_queue.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 57 |
+| 53 | `services/deferred_processing_service/include/base/dps.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 54 | `services/deferred_processing_service/include/deferred_processing_service.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 55 | `services/deferred_processing_service/include/dfx/dps_video_report.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 56 | `services/deferred_processing_service/include/event_monitor/events_monitor.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 57 | `services/deferred_processing_service/include/schedule/video_processor/strategy/ivideo_strategy.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
+| 58 | `services/deferred_processing_service/include/schedule/video_processor/video_job_repository/ivideo_job_repository_listener.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
+| 59 | `services/deferred_processing_service/include/utils/dp_power_manager.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 60 | `services/deferred_processing_service/include/utils/dp_safe_map.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 37 |
+| 61 | `services/deferred_processing_service/include/utils/dp_timer.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
+| 62 | `test/fuzztest/audiodeferredprocess_fuzzer/audio_deferred_process_fuzzer.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 6 |
+| 63 | `test/fuzztest/cameraserviceproxy_fuzzer/camera_service_proxy_fuzzer.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
+| 64 | `test/fuzztest/hcameraservice_fuzzer/hcamera_service_fuzzer.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
 
 ### Per-file details
 
@@ -2656,31 +2502,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
 | 32 | 44 | `missing ;` | `` |
-
-#### `frameworks/cj/camera/include/listener_base.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 8 | 20 | `ERROR` | `. . .` |
-| 9 | 24 | `ERROR` | `. . .` |
-| 11 | 42 | `ERROR` | `. . .` |
-| 18 | 20 | `ERROR` | `. . .` |
-| 20 | 61 | `ERROR` | `. . .` |
-| 26 | 30 | `ERROR` | `. . .` |
-| 30 | 48 | `ERROR` | `. . .` |
-| 33 | 20 | `ERROR` | `. . .` |
-| 33 | 49 | `ERROR` | `. . .` |
-| 33 | 113 | `ERROR` | `. . .` |
-| 39 | 20 | `ERROR` | `. . .` |
-| 39 | 49 | `ERROR` | `. . .` |
-| 50 | 20 | `ERROR` | `. . .` |
-| 50 | 49 | `ERROR` | `. . .` |
-| 56 | 20 | `ERROR` | `. . .` |
-| 56 | 49 | `ERROR` | `. . .` |
-| 56 | 82 | `ERROR` | `. . .` |
-| 65 | 36 | `ERROR` | `. . .` |
 
 #### `frameworks/cj/camera/include/metadata_output_impl.h`
 
@@ -2901,23 +2722,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 25 | 11 | `ERROR` | `->` |
 | 40 | 11 | `ERROR` | `->` |
 
-#### `frameworks/taihe/include/listener_base_taihe.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 42 | 20 | `ERROR` | `. . .` |
-| 43 | 106 | `ERROR` | `. . .` |
-| 50 | 61 | `ERROR` | `. . .` |
-| 51 | 75 | `ERROR` | `. . .` |
-| 53 | 62 | `ERROR` | `. . .` |
-| 62 | 20 | `ERROR` | `. . .` |
-| 63 | 60 | `ERROR` | `. . .` |
-| 70 | 49 | `ERROR` | `. . .` |
-| 71 | 63 | `ERROR` | `. . .` |
-| 72 | 26 | `ERROR` | `. . .` |
-
 #### `frameworks/taihe/src/camera_constructor_taihe.cpp`
 
 **Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
@@ -2980,44 +2784,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 29 | 11 | `ERROR` | `->` |
 | 46 | 11 | `ERROR` | `->` |
 
-#### `interfaces/kits/js/camera_napi/include/camera_napi_object_types.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 16 | 33 | `ERROR` | `. . .` |
-| 17 | 16 | `ERROR` | `. . .` |
-| 19 | 76 | `ERROR` | `. . .` |
-
-#### `interfaces/kits/js/camera_napi/include/camera_napi_param_parser.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 116 | 33 | `ERROR` | `. . .` |
-| 117 | 102 | `ERROR` | `. . .` |
-| 118 | 45 | `ERROR` | `. . .(` |
-| 118 | 76 | `ERROR` | `, nullptr)` |
-| 120 | 24 | `missing }` | `` |
-| 123 | 14 | `ERROR` | `> 0` |
-| 124 | 11 | `ERROR` | `. . .` |
-| 128 | 9 | `ERROR` | `< typename T , typename . . .Args> explicit CameraNapiParamParser(napi_env env , napi_callback_info info , T*& nativeObj…` |
-| 130 | 43 | `missing ::` | `` |
-| 130 | 60 | `ERROR` | `Args& . . .args) :` |
-| 131 | 45 | `ERROR` | `. . .(` |
-| 133 | 1 | `ERROR` | `if(napiError!= napi_ok)` |
-| 137 | 11 | `ERROR` | `. . .` |
-| 141 | 20 | `ERROR` | `. . .` |
-| 142 | 92 | `ERROR` | `. . .` |
-| 143 | 33 | `ERROR` | `. . .(` |
-| 143 | 44 | `ERROR` | `)` |
-| 151 | 11 | `ERROR` | `. . .` |
-| 173 | 8 | `ERROR` | `: template` |
-| 175 | 1 | `ERROR` | `explicit CameraNapiParamParser(napi_env env , napi_callback_info info , size_t napiParamSize , T*& nativeObjPointer , st…` |
-| … | … | … | *(10 more)* |
-
 #### `interfaces/kits/js/camera_napi/include/session/camera_napi_adaptor.h`
 
 **Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
@@ -3046,21 +2812,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
 | 15 | 13 | `missing field_identifier` | `` |
-
-#### `moviefile/include/pipeline/thread/unified_pipeline_threadpool.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 18 | 33 | `ERROR` | `. . .` |
-| 19 | 28 | `ERROR` | `. . .` |
-| 19 | 96 | `ERROR` | `. . .` |
-| 45 | 33 | `ERROR` | `. . .` |
-| 46 | 56 | `ERROR` | `. . .` |
-| 47 | 59 | `ERROR` | `. . .` |
-| 49 | 35 | `ERROR` | `. . .` |
-| 51 | 117 | `ERROR` | `. . .` |
 
 #### `services/camera_service/binder/base/include/icamera_broker.h`
 
@@ -3129,14 +2880,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 |-----:|----:|-----------|---------|
 | 9 | 31 | `ERROR` | `"OHOS.ISessionManagerService"` |
 
-#### `services/camera_service/include/camera_util.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 154 | 82 | `ERROR` | `, . . .` |
-
 #### `services/camera_service/include/param_update/camera_rotate_param_manager.h`
 
 **Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
@@ -3153,14 +2896,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
 | 44 | 14 | `ERROR` | `.operator++` |
-
-#### `services/camera_service/src/camera_util.cpp`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 201 | 43 | `ERROR` | `, . . .` |
 
 #### `services/camera_service/src/hcamera_device.cpp`
 
@@ -3212,42 +2947,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 15 | 55 | `ERROR` | `. . .` |
-| 16 | 46 | `ERROR` | `. . .` |
-| 18 | 66 | `ERROR` | `. . .` |
 | 22 | 24 | `ERROR` | `*` |
-| 30 | 39 | `ERROR` | `. . .` |
-| 31 | 32 | `ERROR` | `. . .` |
-| 31 | 42 | `missing ;` | `` |
-| 33 | 93 | `ERROR` | `. . .` |
-| 37 | 39 | `ERROR` | `. . .` |
-| 38 | 38 | `ERROR` | `. . .` |
-| 38 | 48 | `missing ;` | `` |
-| 40 | 99 | `ERROR` | `. . .` |
-
-#### `services/deferred_processing_service/include/base/enable_shared_create.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 13 | 20 | `ERROR` | `. . .` |
-| 14 | 47 | `ERROR` | `. . .` |
-| 17 | 34 | `ERROR` | `. . .` |
-| 17 | 79 | `ERROR` | `. . .` |
-| 20 | 101 | `ERROR` | `. . .` |
-| 21 | 78 | `ERROR` | `.` |
-| 25 | 25 | `missing ::` | `` |
-| 48 | 16 | `missing }` | `` |
-| 51 | 8 | `ERROR` | `: template` |
-| 53 | 1 | `ERROR` | `friend void` |
-| 69 | 20 | `ERROR` | `. . .` |
-| 70 | 47 | `ERROR` | `. . .` |
-| 72 | 80 | `ERROR` | `. . .` |
-| 73 | 25 | `ERROR` | `->` |
-| 73 | 40 | `ERROR` | `!= 0` |
-| 79 | 9 | `ERROR` | `int32_t` |
-| 81 | 1 | `ERROR` | `} } }` |
 
 #### `services/deferred_processing_service/include/deferred_processing_service.h`
 
@@ -3319,13 +3019,13 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 25 | 9 | `missing identifier` | `` |
 | 26 | 4 | `ERROR` | `:: lock_guard< std:` |
 | 27 | 1 | `ERROR` | `map_= std::` |
-| 32 | 22 | `ERROR` | `. .` |
+| 32 | 19 | `ERROR` | `...Args` |
 | 33 | 5 | `missing ;` | `` |
 | 33 | 13 | `ERROR` | `(const K` |
-| 33 | 36 | `ERROR` | `. . .` |
+| 33 | 35 | `ERROR` | `...` |
 | 35 | 4 | `ERROR` | `:: lock_guard< std:` |
 | 36 | 21 | `ERROR` | `std::` |
-| 36 | 48 | `ERROR` | `. . .` |
+| 36 | 47 | `ERROR` | `...` |
 | 39 | 26 | `ERROR` | `&` |
 | 39 | 41 | `ERROR` | `&` |
 | … | … | … | *(17 more)* |
@@ -3337,29 +3037,6 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
 | 9 | 28 | `missing ;` | `` |
-
-#### `services/deferred_processing_service/include/utils/dp_utils.h`
-
-**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
-
-| Line | Col | Node kind | Snippet |
-|-----:|----:|-----------|---------|
-| 71 | 33 | `ERROR` | `. . .` |
-| 73 | 34 | `ERROR` | `. . .` |
-| 73 | 75 | `ERROR` | `. . .` |
-| 78 | 33 | `ERROR` | `. . .` |
-| 79 | 42 | `ERROR` | `. . .` |
-| 79 | 52 | `missing ;` | `` |
-| 81 | 53 | `ERROR` | `&& . . .` |
-| 81 | 91 | `ERROR` | `. . .` |
-| 84 | 33 | `ERROR` | `. . .` |
-| 86 | 34 | `ERROR` | `. . .` |
-| 86 | 75 | `ERROR` | `. . .` |
-| 91 | 33 | `ERROR` | `. . .` |
-| 92 | 42 | `ERROR` | `. . .` |
-| 92 | 52 | `missing ;` | `` |
-| 94 | 53 | `ERROR` | `&& . . .` |
-| 94 | 91 | `ERROR` | `. . .` |
 
 #### `test/fuzztest/audiodeferredprocess_fuzzer/audio_deferred_process_fuzzer.cpp`
 

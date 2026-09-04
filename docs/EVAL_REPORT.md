@@ -6,8 +6,120 @@
 - **Machine (timings):** Linux, 16 logical CPUs, `--jobs 8`, minimal SQLite
   export — the per-corpus timing tables below were measured there. The
   2026-09-04 metric re-capture was run on macOS (Darwin), 8 logical CPUs,
-  with the same `--jobs 8` and solver budget; the counts are
-  machine-independent, the timings are not.
+  with the same `--jobs 8` and solver budget. The timings are not portable.
+  Neither are the bulk totals *exactly*: the parallel index drifts a little
+  run to run, which is why `eval_expected.json` gives function and edge counts
+  a tolerance band. What is machine-independent is the set of exact metrics —
+  `diagnostics`, `edges_indirect`, `dlsym_edges` and the dispatch target sets —
+  and those are the numbers to compare when attributing a change. The
+  C++-slice probes are *not* in that set: they are `min` and `band` thresholds,
+  sized to catch a collapse rather than to pin a value.
+
+**Re-verified 2026-09-04 (`...` punctuator, #28):** all three pinned corpora
+were re-analyzed with the current release binary and with a binary built from
+`master` (2af1eb1), so every delta below is attributed rather than assumed.
+The lexer had no `...` punctuator: an ellipsis lexed as three `.` tokens and
+the token re-speller wrote them back as `. . .`, which tree-sitter cannot
+parse, so every variadic declaration produced an ERROR node. `...` is now one
+`Punct` token.
+
+Parse failures drop from **286 to 259 files** (HDF 176 → 163, Hiview 37 → 32,
+Camera 73 → 64) with no file newly failing. That is exactly the `parse`-stage
+diagnostics delta — HDF **182 → 169**, Hiview **37 → 32**, Camera **73 → 64**,
+so the totals move **1,777 → 1,764**, **2,964 → 2,959** and **4,776 → 4,767**;
+`preprocess`-stage diagnostics are unchanged at 1,595 / 2,927 / 4,703. The 111
+ERROR sites whose snippet was `. . .` are gone from
+`docs/PARSE_FAILURES.md`, and the "generic ERROR nodes" category falls
+**248 → 221 files**.
+
+One spelling needs a space the others do not. A preprocessing number absorbs
+`.` and alphanumerics (C11 6.4.8), so an ellipsis emitted straight after one
+re-lexes *into* it: the GNU case range `case 0x0300 ... 0x0307:` written back
+as `case 0x0300...0x0307:` returns as the single number `0x0300...0x0307`. The
+re-speller therefore keeps a space before `...` when the output already ends in
+a pp-number, and only then — `Args...` after an identifier is unaffected and
+stays glued. This does not clear those files: tree-sitter-c has no GNU
+case-range rule at all, so `case 1 ... 10:` is an ERROR site even in pristine
+source (checked directly). The three sites in
+`framework/model/audio/usb/src/audio_usb_mixer.c` stay failures; what changes
+is that their token stream is no longer corrupt, which the report shows as the
+snippet moving from `..0x0307` to `...0x0307`.
+
+HDF and Hiview bulk totals are unchanged; every moved number is Camera's, and
+it comes from the headers that now parse — chiefly
+`interfaces/kits/js/camera_napi/include/camera_napi_param_parser.h`, plus
+`dps.h`, `enable_shared_create.h` and `dp_utils.h` under
+`services/deferred_processing_service/`.
+
+The direct/external swing is a **resolution flip, not a re-resolution**, and it
+is worth stating precisely because the raw edge counts hide it. In `master`,
+`camera_napi_param_parser.h` sat inside an ERROR node, so tree-sitter recovery
+lowered `CameraNapiParamParser::AssertStatus`'s *definition* at line 186 as an
+unqualified free function `AssertStatus` (`is_defined=1`). Unqualified-name
+matching bound **232** call sites to that phantom as **direct** edges, while
+the **38** sites that do spell the qualified member found only a declaration
+and stayed **external**. With the header parsing, the definition is the real
+`OHOS::CameraStandard::CameraNapiParamParser::AssertStatus`, so those 38 turn
+**direct** — and the 232 fall back to a bare call-site stub
+(`camera_napi_template_utils.h:83`, `is_defined=0`) and turn **external**. The
+same 270 edges exist on both sides; only their classification moves.
+
+Across all callees the pattern is uniform: five phantom unqualified names lose
+**266** direct edges (`AssertStatus` 232, `IsStatusOk` 15, `weak_from_this` 12,
+`Next` 5, `GetThisVar` 2) and fifteen qualified members gain **190**, net
+**−76**. Two of the gains are genuinely new edges rather than requalified ones
+— `DeferredProcessing::DPS_SendCommand` (27) and `CreateShared` (17) have no
+rows at all in the `master` DB — and they account for most of the +84 in
+`edges_total`. `weak_from_this` (12) is a pure requalification
+(`DeferredProcessing::weak_from_this` →
+`DeferredProcessing::EnableSharedCreate::weak_from_this`), same count on both
+sides.
+
+Net for Camera: functions **25,885 → 25,892** (defined 18,964 → 18,973,
+external 6,921 → 6,919), call edges **73,053 → 73,137**, direct
+**19,503 → 19,427**, external **53,441 → 53,601**, arg-flow
+**17,334 → 17,245**. Indirect edges (**109**) and dlsym edges (0) are
+unchanged, every checked dispatch target set is unchanged, and the C++
+overload-group count rises 272 → 273. `scripts/eval_check.py` passes all 67
+checks against the re-captured expectations.
+
+### Reproducing the exact numbers above
+
+`eval_check.py` guards bands and minimums, so the per-name counts in this
+section are not among its 67 checks. They come from the two corpus DBs (one
+built with this tree, one with a `master` worktree binary — see "Attributing a
+change: baseline vs. branch" in the Appendix) and are reproducible with:
+
+```sql
+-- 232 / 38 and their resolutions, on each DB
+SELECT f.name, e.resolution, COUNT(*) FROM call_edges e
+  JOIN functions f ON f.id = e.callee_fn_id
+ WHERE f.name LIKE '%AssertStatus' GROUP BY 1, 2 ORDER BY 1, 2;
+
+-- which record carries the definition (is_defined flips between the DBs)
+SELECT f.name, fi.path, f.line_start, f.is_defined FROM functions f
+  JOIN files fi ON fi.id = f.file_id WHERE f.name LIKE '%AssertStatus';
+
+-- per-callee direct-edge counts; diff the two DBs' output for the -266/+190
+SELECT f.name, COUNT(*) FROM call_edges e
+  JOIN functions f ON f.id = e.callee_fn_id
+ WHERE e.resolution = 'direct' GROUP BY 1;
+
+-- 272 -> 273 (same SQL as the eval_check probe, which only asserts >= 240)
+SELECT COUNT(*) FROM (
+  SELECT name FROM functions WHERE is_defined = 1 GROUP BY name HAVING COUNT(*) > 1);
+
+-- 27 files stop failing: diff these two lists. `stage = 'parse'` alone is
+-- broader than parse failures (lower.rs raises other parse-stage
+-- diagnostics), so filter the message the way examples/parse_failures.rs
+-- does.
+SELECT DISTINCT message FROM diagnostics
+ WHERE stage = 'parse' AND message LIKE 'parse errors in %' ORDER BY 1;
+```
+
+`scripts/eval_expected.json` and `docs/PARSE_FAILURES.md` were re-captured
+from this run; a lexer regression pins `...` as one token (and `..` as two),
+and a preprocessor regression pins the round-trip of a variadic declaration.
 
 **Re-verified 2026-09-04 (gMock fallback macros, #15):** the pinned Camera
 corpus was re-analyzed with the current release binary and with a binary built
@@ -264,7 +376,7 @@ C++ fixture coverage (`cpp_basic`, `cpp_dispatch`, `cpp_callable`, `cpp_flow`, �
 | Call edges | 72,170 |
 | Direct / indirect / external | 37,427 / **4,643** / 30,100 |
 | Arg-flow edges | 63,471 |
-| Parse warnings | 182 |
+| Parse warnings | 169 |
 | Preprocess diagnostics | 1,595 |
 | `dlsym` PAG edges | 4 |
 
@@ -1744,11 +1856,11 @@ Same 13 drivers as case 48, `Set*Disable` stores. Complete vs source.
 | Call edges | 28,287 |
 | Direct / indirect / external | 7,791 / **24** / 20,472 |
 | Arg-flow edges | 9,243 |
-| Parse warnings | 37 |
+| Parse warnings | 32 |
 | Preprocess diagnostics | 2,927 |
 | `dlsym` PAG edges | 1 |
 
-The tree previously aborted with a preprocessor stack overflow on `PRIVATE_MESSAGE_TYPE`. Hide-set painting is what makes it finish. The **24** indirect edges include `$lambda` / JSON accessors and C++ overload record splits; production dispatch is recovered as **direct** CHA edges. On this corpus the phantom-bare-stub count fell ~500 records (~3,959 → ~3,740 external), **direct** free-function edges rose ~1,900, arg-flow edges rose with them, and garbage `externalLogJson` indirect sites disappeared — dispatch-site correctness invariants are unchanged. The edge totals above also carry the expansion-site attribution fix shipped with #13 (+147 call edges, +70 arg-flow): macro-generated call sites are keyed by their invocation, so sites that used to collide on shared `#define` coordinates now survive merge dedup. Function counts, the **24** indirect edges and the diagnostics are unaffected by it. The raw-string lexer fix (#14) then moved the parse warnings **57 → 37** and, through the 20 files that now parse, +212 call edges, +136 arg-flow edges and +45 defined functions (see the `#14` block at the top).
+The tree previously aborted with a preprocessor stack overflow on `PRIVATE_MESSAGE_TYPE`. Hide-set painting is what makes it finish. The **24** indirect edges include `$lambda` / JSON accessors and C++ overload record splits; production dispatch is recovered as **direct** CHA edges. On this corpus the phantom-bare-stub count fell ~500 records (~3,959 → ~3,740 external), **direct** free-function edges rose ~1,900, arg-flow edges rose with them, and garbage `externalLogJson` indirect sites disappeared — dispatch-site correctness invariants are unchanged. The edge totals above also carry the expansion-site attribution fix shipped with #13 (+147 call edges, +70 arg-flow): macro-generated call sites are keyed by their invocation, so sites that used to collide on shared `#define` coordinates now survive merge dedup. Function counts, the **24** indirect edges and the diagnostics are unaffected by it. The raw-string lexer fix (#14) then moved the parse warnings **57 → 37** and, through the 20 files that now parse, +212 call edges, +136 arg-flow edges and +45 defined functions (see the `#14` block at the top). The `...` punctuator fix (#28) took them **37 → 32** without moving any other number on this corpus.
 
 **Indirect edge changes vs. master** (exact-match metric, both sides):
 - **Lost 3** phantom `externalLogJson` targets in `CopyExternalLogsToSandBox` (these were bare-stub false positives that the qualified-prototype merge now resolves correctly as direct calls).
@@ -2152,14 +2264,14 @@ Hang / stack-overflow checks, not dispatch-hub evals. PCH-style header IR is wha
 | Metric | Value |
 |--------|------:|
 | Files | 1,593 |
-| Functions | 25,885 (18,964 defined / 6,921 external) |
-| Call edges | 73,053 |
-| Direct / indirect / external | 19,503 / **109** / 53,441 |
-| Arg-flow edges | 17,334 |
-| Parse warnings | 73 |
+| Functions | 25,892 (18,973 defined / 6,919 external) |
+| Call edges | 73,137 |
+| Direct / indirect / external | 19,427 / **109** / 53,601 |
+| Arg-flow edges | 17,245 |
+| Parse warnings | 64 |
 | Preprocess diagnostics | 4,703 |
 
-Completes. The **109** indirect edges are almost all fuzzer `FuzzedDataProvider` calls; production dispatch is recovered as **direct** CHA. The rise in direct / arg-flow edges vs the previous snapshot is the same C++ name-lookup improvement — namespace-qualified header prototypes; ADL / `using` resolution for unqualified calls — not a resolution loss — every case target above is unchanged. The **external** total additionally reflects the expansion-site attribution fix shipped with #13 (+8,416 external edges): macro-generated call sites are keyed by their invocation instead of their `#define`, so sites that previously collided are no longer merged away. Function counts, the **109** indirect edges and the diagnostics are unaffected by it; the raw-string lexer fix (#14) later took the parse warnings **93 → 91** without moving anything else here. The gMock fallbacks (#15) then took them **91 → 73** and added the 114 recovered mock member prototypes to the external functions; the ten direct edges they moved to **external** are `ON_CALL` arguments that now resolve to the mock's own declared member instead of an unrelated global of the same name.
+Completes. The **109** indirect edges are almost all fuzzer `FuzzedDataProvider` calls; production dispatch is recovered as **direct** CHA. The rise in direct / arg-flow edges vs the previous snapshot is the same C++ name-lookup improvement — namespace-qualified header prototypes; ADL / `using` resolution for unqualified calls — not a resolution loss — every case target above is unchanged. The **external** total additionally reflects the expansion-site attribution fix shipped with #13 (+8,416 external edges): macro-generated call sites are keyed by their invocation instead of their `#define`, so sites that previously collided are no longer merged away. Function counts, the **109** indirect edges and the diagnostics are unaffected by it; the raw-string lexer fix (#14) later took the parse warnings **93 → 91** without moving anything else here. The gMock fallbacks (#15) then took them **91 → 73** and added the 114 recovered mock member prototypes to the external functions; the ten direct edges they moved to **external** are `ON_CALL` arguments that now resolve to the mock's own declared member instead of an unrelated global of the same name. The `...` punctuator fix (#28) then took the parse warnings **73 → 64**; the direct/external swing it caused is `camera_napi_param_parser.h` finally parsing, so its members carry qualified names instead of the unqualified free functions the ERROR node left behind (see the `#28` block at the top).
 
 **Indirect edge changes vs. master** (exact-match metric, both sides):
 - **Lost 16** phantom variable targets (`depthProfile`, `depthProfileRet1..4` in `CreateDepthDataOutput`, `infoDumper` in `DumpCameraSummary`): these were bare-stub false positives that the qualified-prototype merge now resolves correctly.
@@ -2300,9 +2412,9 @@ All 17 `CFilter` subclasses that define `DoPrepare` plus the base. Complete vs `
 | Line | ~243 |
 | Function | `OHOS::CameraStandard::Pipeline::LinkFilters` |
 | Dispatch site | `LinkNext` |
-| Resolved targets | **18** |
+| Resolved targets | **23** |
 
-Same 17 filter subclasses plus `CFilter::LinkNext`. Complete vs `::LinkNext(` in `mediastream/src/filter/`.
+The 17 filter subclasses plus `CFilter::LinkNext`, plus the five mock overrides the gMock fallbacks (#15) made indexable — `FilterMock`, `MockFilter`, `MockNextFilter`, `MockPrevFilter`, `TestFilter`. Complete vs `::LinkNext(` in `mediastream/src/filter/` and the mocks in the test tree.
 
 **Resolved targets:**
 
@@ -2314,14 +2426,19 @@ Same 17 filter subclasses plus `CFilter::LinkNext`. Complete vs `::LinkNext(` in
 - `OHOS::CameraStandard::CFilter::LinkNext`
 - `OHOS::CameraStandard::CinematicVideoCacheFilter::LinkNext`
 - `OHOS::CameraStandard::DemuxerFilter::LinkNext`
+- `OHOS::CameraStandard::FilterMock::LinkNext`
 - `OHOS::CameraStandard::ImageEffectFilter::LinkNext`
 - `OHOS::CameraStandard::MetaCacheFilter::LinkNext`
 - `OHOS::CameraStandard::MetaDataFilter::LinkNext`
+- `OHOS::CameraStandard::MockFilter::LinkNext`
+- `OHOS::CameraStandard::MockNextFilter::LinkNext`
+- `OHOS::CameraStandard::MockPrevFilter::LinkNext`
 - `OHOS::CameraStandard::MovingPhotoAudioEncoderFilter::LinkNext`
 - `OHOS::CameraStandard::MovingPhotoMuxerFilter::LinkNext`
 - `OHOS::CameraStandard::MovingPhotoVideoEncoderFilter::LinkNext`
 - `OHOS::CameraStandard::MuxerFilter::LinkNext`
 - `OHOS::CameraStandard::SinkFilter::LinkNext`
+- `OHOS::CameraStandard::TestFilter::LinkNext`
 - `OHOS::CameraStandard::VideoCacheFilter::LinkNext`
 - `OHOS::CameraStandard::VideoEncoderFilter::LinkNext`
 
@@ -2333,9 +2450,10 @@ Same 17 filter subclasses plus `CFilter::LinkNext`. Complete vs `::LinkNext(` in
 | Line | ~1272 |
 | Function | `OHOS::CameraStandard::CaptureSession::AddOutput` |
 | Dispatch site | `CanAddOutput` |
-| Resolved targets | **18** |
+| Resolved `CanAddOutput` targets | **18** |
+| Distinct callee names on the line (what `eval_check` asserts) | **19** |
 
-Base `CaptureSession::CanAddOutput` plus every session subclass that overrides it in `frameworks/native/camera/`. `CaptureSessionForSys` has no override (stitching calls it through inheritance). Complete vs `::CanAddOutput(` definitions.
+The two differ, and only the first is a dispatch result. The dispatch resolves **18**: base `CaptureSession::CanAddOutput` plus every session subclass that overrides it in `frameworks/native/camera/`. `CaptureSessionForSys` has no override (stitching calls it through inheritance). Complete vs `::CanAddOutput(` definitions, and it is the list below. The 19th name is `__builtin_expect`, a *second* call site on the same source line — `CHECK_RETURN_RET_ELOG(isVerifyOutput && !CanAddOutput(output), …)` expands to both — and `eval_check.py` counts distinct callee names per (caller, line), not per call site. It is a coarseness of the check, not a target of this dispatch.
 
 **Resolved targets:**
 
@@ -2401,7 +2519,7 @@ re-analyzes the three corpora fresh and asserts:
    (`DeviceNodeExtDispatch` 74 … `WorkEntry` 20, linux `osal_workqueue.c`), the 7
    hiview CHA/fn-ptr sites (`Plugin::OnEventProxy`→23 … `GetHandlerInfo`→2 at line 62),
    and the 5 camera cases (`Command::Do` 31/30, `CFilter::PrepareDone` 18,
-   `Pipeline::LinkFilters` 18, `CaptureSession::AddOutput` 18). These are the
+   `Pipeline::LinkFilters` 23, `CaptureSession::AddOutput` 19). These are the
    eval-report correctness numbers, guarded against silent drift.
 3. **C++-slice production probes** — defined overload groups split by scalar type
    (hiview ≥120, camera ≥240), template member call sites that carry resolution
@@ -2415,7 +2533,109 @@ python3 scripts/eval_check.py                 # all three corpora, 800k pops, --
 python3 scripts/eval_check.py hdf camera      # subset (--corpus-base DIR if not under ~)
 ```
 
-Exit 0 = all checks pass (current: **67 checks, 0 failures** — the three extra checks are
-the revision pins). The expectation values were re-captured on 2026-09-02 from the current
-tree (after `Improve cpp name lookup`) at the pinned revisions, and the metric tables in the
-corpus sections above show those same values.
+## Attributing a change: baseline vs. branch
+
+`eval_check.py` says whether the numbers still hold, not which change moved
+them. Every "vs. master" delta in this report — including the per-name counts
+in the `#28` section — comes from running the corpora **twice**, once with a
+binary built from `master` and once with the branch, and diffing the two
+databases. Do not attribute a delta without the baseline side: the committed
+report can itself be stale relative to `master`'s own binary, which has
+produced false attributions before (the `u"…"` column shift blamed on #15 was
+really #14's literal lexing).
+
+```bash
+set -euo pipefail
+
+# Pin the baseline to a REVISION, not the moving `master` branch: once master
+# advances, a recipe that says `master` stops reproducing these numbers. This
+# is the commit the #28 section was captured against.
+BASELINE=${BASELINE:-2af1eb1}
+export TRACE_CORPUS_BASE=/private/tmp/corpora
+WORK=$(mktemp -d)
+WT="$WORK/baseline-wt"
+trap 'git worktree remove --force "$WT" 2>/dev/null || true' EXIT
+
+# Baseline binary from a detached worktree (~35s to build).
+git worktree add --detach "$WT" "$BASELINE"
+( cd "$WT"
+  cargo build --release -p trace-cli
+  cargo build --release -p trace-cli --examples )
+cp "$WT/target/release/trace" "$WORK/trace_base"
+
+# Branch binary. Build the bin AND the examples: `--examples` alone leaves
+# target/release/trace stale, which silently compares the baseline to itself.
+cargo build --release -p trace-cli
+cargo build --release -p trace-cli --examples
+cp target/release/trace "$WORK/trace_new"
+if cmp -s "$WORK/trace_base" "$WORK/trace_new"; then
+    echo "baseline and branch binaries are identical -- one side did not rebuild" >&2
+    exit 1
+fi
+
+# One corpus set per binary (~4 min each). eval_check's exit codes:
+#   0  everything matched
+#   1  some expectation missed
+#   2  the run is not usable at all -- corpus missing / at the wrong
+#      revision / dirty, binary not found, or `trace analyze` failed
+# Exit 2 is fatal on BOTH sides. Exit 1 is expected on the baseline (the
+# committed expectations describe the branch, so the baseline necessarily
+# misses them -- that is the delta being measured) but is a regression on
+# the branch side, so it is only tolerated for `base`.
+for side in base new; do
+  mkdir -p "$WORK/$side"
+  rc=0
+  python3 scripts/eval_check.py --bin "$WORK/trace_$side" \
+      --corpus-base "$TRACE_CORPUS_BASE" --outdir "$WORK/$side" \
+      > "$WORK/$side.log" 2>&1 || rc=$?
+  if [ "$rc" -ge 2 ] || { [ "$side" = new ] && [ "$rc" -ne 0 ]; }; then
+      echo "eval_check failed on the $side side (exit $rc):" >&2
+      cat "$WORK/$side.log" >&2
+      exit "$rc"
+  fi
+  tail -1 "$WORK/$side.log"
+done
+
+# Do not diff on the strength of the exit codes alone. eval_check turns its
+# own crashes into exit 2, but a run killed from outside (OOM, SIGKILL)
+# cannot report anything, and would leave a truncated log plus databases
+# from the corpora it did finish. So require each side to have reached its
+# summary line, and both sides to have run the same number of checks --
+# a short count means one side stopped early.
+for side in base new; do
+  tail -1 "$WORK/$side.log" | grep -qE '(PASS|FAIL): [0-9]+ checks' ||
+    { echo "$side run did not reach its summary -- log truncated" >&2; exit 1; }
+  for c in hdf hiview camera; do
+    [ -s "$WORK/$side/eval_check_$c.db" ] ||
+      { echo "missing database: $WORK/$side/eval_check_$c.db" >&2; exit 1; }
+  done
+done
+checks() { sed -nE 's/.*: ([0-9]+) checks.*/\1/p' "$1" | tail -1; }
+[ "$(checks "$WORK/base.log")" = "$(checks "$WORK/new.log")" ] ||
+  { echo "sides ran different check counts -- one stopped early" >&2; exit 1; }
+
+# Metric diff: check lines only, so the outdir paths in the progress lines
+# do not show up as differences. A non-zero diff is the point here, so it
+# must not end the script.
+metrics() { grep -E '^(  ok|FAIL)' "$1" | sed 's/(expected.*//'; }
+diff <(metrics "$WORK/base.log") <(metrics "$WORK/new.log") || true
+
+# Then run any of the SQL in the sections above against the two DBs:
+echo "databases: $WORK/{base,new}/eval_check_{hdf,hiview,camera}.db"
+```
+
+Compare the **exact** metrics (`diagnostics`, `edges_indirect`, `dlsym_edges`,
+dispatch target sets) rather than bulk totals — the parallel index drifts run
+to run, so a small function/edge difference between two runs of the *same*
+binary is noise, not a finding. The probes are `min`/`band` thresholds, so they
+confirm nothing collapsed; they do not pin a number to diff against.
+
+Exit codes: **0** all checks pass (current: **67 checks, 0 failures** — the three extra
+checks are the revision pins), **1** some expectation was missed, **2** the run is not
+usable at all and its numbers must not be read — a corpus missing, at the wrong revision
+or dirty (unless `--skip-rev-check` / `--allow-dirty` downgrade it), or `trace analyze`
+itself failing. The 1-vs-2 split is what lets the baseline comparison above tolerate a
+baseline that misses the current expectations without also swallowing a broken run. The expectation values were last re-captured on 2026-09-04 on top of
+2af1eb1 for the `...` punctuator fix (#28), at the pinned revisions; earlier captures were
+2026-09-04 on 168e643 (#15, camera only) and 2026-09-02 after `Improve cpp name lookup`.
+The metric tables in the corpus sections above show those same values.

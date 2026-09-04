@@ -32,11 +32,19 @@ import json
 import os
 import sqlite3
 import subprocess
+import traceback
 import sys
 from pathlib import Path
 
 FAILS = 0
 CHECKS = 0
+# Expectation mismatches (FAILS) and setup/execution errors are different
+# outcomes and get different exit codes: 0 clean, 1 some expectation missed,
+# 2 the run could not be trusted at all (corpus missing / at the wrong
+# revision / dirty, or `trace analyze` failed). A baseline binary is *meant*
+# to miss the current expectations, so tooling that compares two binaries
+# tolerates 1 on that side but must still abort on 2.
+SETUP_ERRORS = 0
 
 
 def log(level, text):
@@ -49,7 +57,10 @@ def run(cmd, cwd, env):
         cmd, cwd=str(cwd), env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=1800)
     if proc.returncode != 0:
-        log("fail", f"command failed rc={proc.returncode}: {' '.join(cmd)}\n{proc.stdout[-2000:]}")
+        # cmd[0] is a resolved Path; joining it raw raised TypeError and
+        # replaced the diagnostic with a traceback.
+        printable = " ".join(str(part) for part in cmd)
+        log("fail", f"command failed rc={proc.returncode}: {printable}\n{proc.stdout[-2000:]}")
     return proc
 
 
@@ -69,11 +80,11 @@ def checkout_matches(root, spec, skip_rev_check=False, allow_dirty=False):
     untracked sources change the counts as much as a different revision).
     Returns whether the corpus should be analyzed; a problem counts as a
     failure unless the matching override downgrades it to a warning."""
-    global FAILS, CHECKS
+    global FAILS, CHECKS, SETUP_ERRORS
     CHECKS += 1
     if not root.is_dir():
         log("fail", f"{spec['name']}: {root} is missing (run scripts/fetch_corpora.py)")
-        FAILS += 1
+        SETUP_ERRORS += 1
         return False
     problems = []
     head = git_output(["rev-parse", "HEAD"], root)
@@ -91,7 +102,7 @@ def checkout_matches(root, spec, skip_rev_check=False, allow_dirty=False):
         return True
     proceed = all(overridden for overridden, _ in problems)
     if not proceed:
-        FAILS += 1
+        SETUP_ERRORS += 1
     for overridden, text in problems:
         log("warn" if overridden else "fail", f"{spec['name']}: {root} {text}"
             + (" — analyzing anyway" if overridden else ""))
@@ -105,7 +116,9 @@ def analyze(trace_bin, corpus, expected, root, outdir, env):
         [trace_bin, "analyze", str(root), "-o", str(db), "--jobs", str(expected.get("jobs", 8))],
         root, env)
     if proc.returncode != 0 or not db.exists():
+        global SETUP_ERRORS
         log("fail", f"{corpus}: analyze produced no DB")
+        SETUP_ERRORS += 1
         return None
     return db
 
@@ -267,9 +280,25 @@ def main():
             check_probe(db, probe)
 
     log("info", "")
+    if SETUP_ERRORS:
+        log("info", f"ERROR: {CHECKS} checks, {FAILS} failures, "
+                    f"{SETUP_ERRORS} setup/execution errors — results are not usable")
+        sys.exit(2)
     log("info", f"{'PASS' if FAILS == 0 else 'FAIL'}: {CHECKS} checks, {FAILS} failures")
     sys.exit(1 if FAILS else 0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Anything unexpected -- a `trace analyze` timeout, a SQLite error
+        # reading a generated DB, malformed expectation JSON -- would
+        # otherwise leave Python's default exit 1, which is the code that
+        # means "an expectation was missed" and that a baseline comparison
+        # deliberately tolerates. A crash is never a usable result, so it
+        # exits 2 like the other unusable-run cases. `sys.exit` raises
+        # SystemExit (not an Exception), so the real exit codes pass through.
+        traceback.print_exc()
+        log("fail", "unexpected error; the run produced no usable result")
+        sys.exit(2)
