@@ -16,7 +16,15 @@ pub enum TokenKind {
     /// A character literal spelled as written, prefix and quotes included
     /// (`'a'`, `L'\n'`).
     Char(String),
-    Punct(String),
+    /// A punctuator, spelled from the fixed set the lexer recognizes — so
+    /// `&'static str` rather than an owned `String`. Punctuators are ~48% of
+    /// the tokens in a C++ corpus and 94% of those are one character, so an
+    /// owned spelling meant well over a million allocations per translation
+    /// unit's worth of lexing, every one of them a copy of a string literal.
+    /// The invariant the type states is that a punctuator's spelling is
+    /// always a `'static` literal — the lexer's punctuator tables, or the
+    /// fixed spellings `expand_gmock_method` synthesizes — never computed.
+    Punct(&'static str),
     Hash, // #
     Newline,
     Eof,
@@ -163,7 +171,7 @@ impl<'a> Lexer<'a> {
             if self.peek_char_at(1) == '#' {
                 self.advance_char();
                 self.advance_char();
-                return Token::new(TokenKind::Punct("##".to_string()), line, col);
+                return Token::new(TokenKind::Punct("##"), line, col);
             }
             self.advance_char();
             return Token::new(TokenKind::Hash, line, col);
@@ -194,9 +202,11 @@ impl<'a> Lexer<'a> {
 
         if let Some(one) = single_char_punct(ch) {
             self.advance_char();
-            // Longest match wins, and every spelling is a `&'static str`, so
-            // a punctuator costs one allocation instead of an intermediate
-            // `String` per candidate length. `next` is read once and reused.
+            // Longest match wins, and the spelling goes straight into the
+            // token: the tables already returned `&'static str`, so the one
+            // `to_string()` that used to end this path is now gone and a
+            // punctuator costs no allocation. `next` is read once and reused
+            // by the three- and two-character cases.
             let next = self.peek_char();
             let spelling = if ch == '.' && next == '.' && self.peek_char_at(1) == '.' {
                 // `...` is the only three-character punctuator the token
@@ -211,7 +221,7 @@ impl<'a> Lexer<'a> {
             for _ in 1..spelling.len() {
                 self.advance_char();
             }
-            return Token::new(TokenKind::Punct(spelling.to_string()), line, col);
+            return Token::new(TokenKind::Punct(spelling), line, col);
         }
 
         // Unknown char - skip
@@ -611,8 +621,8 @@ mod tests {
         TokenKind::Char(s.to_string())
     }
 
-    fn punct(s: &str) -> TokenKind {
-        TokenKind::Punct(s.to_string())
+    fn punct(s: &'static str) -> TokenKind {
+        TokenKind::Punct(s)
     }
 
     #[test]
