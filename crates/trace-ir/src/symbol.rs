@@ -649,7 +649,7 @@ mod tests {
         let param = Variable {
             id: proto.params[0],
             name: "$arg0".into(),
-            type_id: TypeId(2),
+            type_id: TypeId(4),
             storage: StorageClass::Param,
             fn_id: Some(proto.id),
             param_index: Some(0),
@@ -696,7 +696,7 @@ mod tests {
         let var_int = Variable {
             id: fint.params[0],
             name: "a".into(),
-            type_id: TypeId(2),
+            type_id: TypeId(4),
             storage: StorageClass::Param,
             fn_id: Some(fint.id),
             param_index: Some(0),
@@ -719,7 +719,7 @@ mod tests {
         let var_double = Variable {
             id: fdouble.params[0],
             name: "b".into(),
-            type_id: TypeId(3),
+            type_id: TypeId(8),
             storage: StorageClass::Param,
             fn_id: Some(fdouble.id),
             param_index: Some(0),

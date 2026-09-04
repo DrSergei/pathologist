@@ -128,7 +128,11 @@ impl LowerContext {
     /// prototypes so header-parsed declarations register the same qualified
     /// name a later out-of-line definition does.
     fn qualify_decl(&self, raw_name: &str) -> String {
-        let normalized_raw = normalize_qualified(raw_name);
+        canonicalize_conversion_target(&self.qualify_decl_spelling(raw_name))
+    }
+
+    fn qualify_decl_spelling(&self, raw_name: &str) -> String {
+        let normalized_raw = normalize_declared_name(raw_name);
         // A leading `::` (explicit global qualification such as
         // `::qualified_global`) means global scope: the enclosing namespace
         // prefix must NOT be prepended.  We strip the `::` to keep one
@@ -140,13 +144,17 @@ impl LowerContext {
         if is_global_qualified {
             return normalized_raw.to_string();
         }
+        // Only a `::` *before* the name proper is a scope: a conversion
+        // operator's target type carries its own (`operator ns::S`,
+        // `operator std::string`) and qualifies nothing.
+        let is_scope_qualified = scope_part(normalized_raw).contains("::");
         if let Some(cls) = &self.class_ctx {
-            if normalized_raw.contains("::") {
+            if is_scope_qualified {
                 normalized_raw.to_string()
             } else {
                 format!("{}::{}", cls.qual_name, normalized_raw)
             }
-        } else if normalized_raw.contains("::") {
+        } else if is_scope_qualified {
             let first_seg = normalized_raw.split("::").next().unwrap_or("");
             let already_qualified =
                 self.ns_stack.iter().flatten().any(|ns| ns == first_seg) || !self.is_cpp;
@@ -793,11 +801,17 @@ fn is_plain_ident(name: &str) -> bool {
 /// expressions. Arrow text (`p->method`) stays indirect so fn-ptr and
 /// callable-field sites can still be resolved by the solver.
 fn is_synthesizable_extern(name: &str) -> bool {
+    // The space rejected here is the one a field/arrow spelling or a stray
+    // declarator fragment carries. An operator name has one of its own
+    // (`operator new`, `operator ns::S`) and is a perfectly good callee, so
+    // it is exempt — without this, `::operator new(n)` stopped synthesizing
+    // its external and lost the call edge to it.
+    let spurious_space = name.contains(' ') && scope_part(name).len() == name.len();
     is_plain_ident(name)
         || (name.contains("::")
             && !name.contains("->")
             && !name.contains('.')
-            && !name.contains(' ')
+            && !spurious_space
             && !name.contains('('))
 }
 
@@ -1481,6 +1495,16 @@ fn member_decl_is_function(node: Node) -> bool {
             // Type position, not declarator position — see member_short_name.
             "decltype" => return false,
             "destructor_name" => return true,
+            // `operator T()` — a conversion operator, whose declarator names
+            // the converted-to type instead of an identifier (#46).
+            "operator_cast" => return true,
+            // `MACRO operator unsigned long() const;` — a multi-word
+            // primitive target is recovered as loose keywords inside the
+            // `ERROR` (`operator`, `unsigned`, `long`), leaving no declarator
+            // anywhere for the test below to find, so the member was read as a
+            // data field and dropped from the index. An `ERROR` the keyword
+            // opens is a conversion operator whatever it holds.
+            "ERROR" if n.child(0).is_some_and(|k| k.kind() == "operator") => return true,
             "function_declarator" => {
                 if let Some(inner) = n.child_by_field_name("declarator") {
                     return matches!(
@@ -1489,6 +1513,11 @@ fn member_decl_is_function(node: Node) -> bool {
                             | "identifier"
                             | "qualified_identifier"
                             | "operator_name"
+                            // `MACRO operator Vec<int>() const;` — recovery
+                            // leaves the target's argument list attached to
+                            // the declarator, which is then a template
+                            // method. Missing it dropped the member outright.
+                            | "template_method"
                     ) || walk(inner);
                 }
                 return false;
@@ -1697,7 +1726,10 @@ fn lower_class_members(
         }
         // A ctor written `Cls(int);` inside the class parses as a plain
         // declaration wrapping a function_declarator.
-        if m.kind() == "declaration" && member_decl_is_function(*m) {
+        if m.kind() == "declaration"
+            && member_decl_is_function(*m)
+            && !continues_previous_member(*m)
+        {
             register_member_prototype(program, ctx, source, *m, cls_qual);
         }
     }
@@ -1749,8 +1781,44 @@ fn member_short_name(source: &str, node: Node) -> Option<String> {
             // `decltype(*p_) Deref() const;` was indexed as `p_` and `Deref`
             // was lost — silently, since the file parses cleanly (#29).
             "decltype" => return None,
+            // An `ERROR` node holds whichever half of the declaration
+            // tree-sitter could not place, and which half that is depends on
+            // where the unknown attribute macro sat:
+            //
+            // - `FFI_EXPORT CArr Get(long);` — the macro took the `type`
+            //   field, so the leftover return type is the ERROR and the real
+            //   declarator its sibling. Walking in takes `CArr` as the name
+            //   and loses `Get`, the way a `decltype` operand used to;
+            // - `int j() const NOEXCEPT_MACRO;` — the macro trails the
+            //   declarator, so the ERROR *is* the declarator and the macro is
+            //   a sibling `field_identifier`. Skipping it names every such
+            //   member after its macro, collapsing a class that annotates all
+            //   of them alike into one symbol.
+            //
+            // A declarator of its own tells the two apart — and when the
+            // member carries both macros at once
+            // (`EXPORT_API int Get(long) GUARDED_BY(mu_);`) the ERROR holds
+            // both halves, so only its declarators may be read: the leftover
+            // type sits beside them and comes first, which named the member
+            // `C::int` and collapsed every member sharing a return type.
+            "ERROR" => {
+                return n
+                    .children(&mut n.walk())
+                    .filter(|c| c.kind().ends_with("_declarator"))
+                    .find_map(|c| walk(source, c));
+            }
+            // A C++11 attribute (`[[nodiscard]]`, `[[gnu::pure]]`) or a GNU
+            // one sits in front of the declaration, holds an identifier of
+            // its own, and declares nothing — the walk used to name the
+            // member after it, collapsing every annotated member of a class
+            // into one symbol.
+            "attribute_declaration"
+            | "attribute_specifier"
+            | "ms_declspec_modifier"
+            | "ms_call_modifier" => return None,
             "destructor_name" => return Some(normalize_qualified(node_text(source, &n))),
             "operator_name" => return Some(normalize_qualified(node_text(source, &n))),
+            "operator_cast" => return Some(conversion_operator_name(source, n)),
             "function_declarator" => {
                 if let Some(inner) = n.child_by_field_name("declarator") {
                     return walk(source, inner);
@@ -1762,6 +1830,111 @@ fn member_short_name(source: &str, node: Node) -> Option<String> {
             }
             _ => {}
         }
+        // `MACRO ~D();` stalls on the tilde the same way, leaving `~` alone
+        // in an `ERROR` and `D` standing as the declarator — so the
+        // destructor read as the constructor `D`, and `delete p` then
+        // expanded over an override set missing it.
+        if let Some(err) = n
+            .children(&mut n.walk())
+            .find(|c| c.kind() == "ERROR" && node_text(source, c).trim_end() == "~")
+        {
+            let rest = n
+                .children(&mut n.walk())
+                .filter(|c| c.start_byte() >= err.end_byte())
+                .find_map(|c| walk(source, c))?;
+            return Some(format!("~{}", rest.trim_start()));
+        }
+        // An unknown attribute macro in front of a conversion operator leaves
+        // the `operator` keyword stranded in an `ERROR` and the target type
+        // standing where the member name belongs, so the walk below would
+        // name `MACRO operator ns::S() const;` after its target — `S`, a name
+        // that collides with the class of that name and matches no
+        // declaration of the real member. The name is whatever the rest of
+        // the declaration resolves to, under the keyword.
+        //
+        // How much of the rest the `ERROR` swallowed varies: the keyword
+        // alone (`ERROR [operator]`), the keyword and the target's own scope
+        // (`ERROR [operator ns::]`), the target as well when a second macro
+        // trails the member (`ERROR [operator int() const]`, `GUARDED_BY(m)`
+        // outside it), or the target and its parameter list with no structure
+        // left inside at all (`ERROR [operator unsigned long() const]`). Where
+        // to look for the target follows from which of these it is; how to
+        // read it does not.
+        if let Some(err) = conversion_keyword_error(n) {
+            let keyword_end = err.child(0).map_or(err.end_byte(), |k| k.end_byte());
+            // The target is *spelled*, not walked. Walking a declarator picks
+            // the single identifier it is named by, which for a target is only
+            // its last segment: that dropped every other part of the spelling
+            // — `ns::` from `operator ns::S`, `<int>` from
+            // `operator Vec<int>`, `(*)` from `operator int (*)` — leaving
+            // names (`C::operator S`, `C::operator Vec`, `C::operator int`)
+            // that no unannotated spelling of the same member produces, and
+            // that collide with the class of that name or with a sibling
+            // conversion in the same class.
+            //
+            // The spelling runs from the keyword to where the operator's
+            // *own* parameter list begins, and that list is the one hanging
+            // off the declarator, so the target ends where the declarator's
+            // own `declarator` field does: in `[operator ns::S() const]`,
+            // `function_declarator [S() const]` is named by `S`, and the text
+            // up to the end of `S` is `ns::S` — scope and all, since the
+            // scope is contiguous with it in the source however the `ERROR`
+            // split the two. Cutting at the declarator's start would keep the
+            // scope but lose the segment; cutting at the `ERROR`'s end would
+            // swallow `() const`.
+            //
+            // Which side of the `ERROR`'s end the declarator sits on only
+            // decides where to look for it, not how to read it. Whether the
+            // `ERROR` reaches the operator's own `(` says which side to look:
+            // reaching it means the target is in there and any declarator
+            // beside it belongs to the trailing macro, which named the member
+            // `C::operator unsigned long()const GUARDED_BY`.
+            let tail = &source[keyword_end..err.end_byte()];
+            let own_declarator = err
+                .children(&mut err.walk())
+                .filter(|c| c.kind().ends_with("_declarator"))
+                .last()
+                .or_else(|| {
+                    if tail.contains('(') {
+                        return None;
+                    }
+                    n.children(&mut n.walk()).find(|c| {
+                        c.start_byte() >= err.end_byte() && c.kind().ends_with("_declarator")
+                    })
+                });
+            if let Some(decl) = own_declarator {
+                let end = decl
+                    .child_by_field_name("declarator")
+                    .map_or_else(|| decl.start_byte(), |d| d.end_byte());
+                let target = normalize_spacing(&source[keyword_end..end]);
+                return Some(format!("operator {}", target.trim_start()));
+            }
+            // The `ERROR` reached the `(` but gave the target no declarator of
+            // its own: a multi-word primitive target is recovered as loose
+            // keywords (`ERROR [operator unsigned long() const]`, children
+            // `operator`, `unsigned`, `long`). The spelling still ends where
+            // the parameter list starts, so cut there. Without this the member
+            // was named after the trailing macro, or dropped outright when
+            // there was none for the walk to fall through to.
+            if let Some(paren) = tail.find('(') {
+                let target = normalize_spacing(&tail[..paren]);
+                if !target.is_empty() {
+                    return Some(format!("operator {}", target.trim_start()));
+                }
+            }
+            // No declarator on either side: the `ERROR` swallowed the keyword
+            // and whatever scope the target carried (`ERROR [operator ns::]`),
+            // and the rest of the target is a bare name beside it. Reading
+            // only that name dropped the scope, so a macro-annotated
+            // declaration was spelled `D::operator S` where every other path
+            // spells the same member `D::operator ns::S`.
+            let carried_scope = normalize_spacing(tail);
+            let rest = n
+                .children(&mut n.walk())
+                .filter(|c| c.start_byte() >= err.end_byte())
+                .find_map(|c| walk(source, c))?;
+            return Some(format!("operator {carried_scope}{}", rest.trim_start()));
+        }
         for i in 0..n.child_count() {
             if let Some(c) = n.child(i) {
                 if let Some(found) = walk(source, c) {
@@ -1772,6 +1945,34 @@ fn member_short_name(source: &str, node: Node) -> Option<String> {
         None
     }
     walk(source, node)
+}
+
+/// Whether a class-body `declaration` is only the tail of the member before
+/// it, split off by error recovery rather than declared in its own right.
+///
+/// A member ending in a *missing* `;` is one the author wrote no `;` after,
+/// so whatever tree-sitter parked after it is the rest of that same
+/// declaration. An unknown attribute macro trailing a conversion operator to
+/// a pointer or reference is recovered exactly so:
+/// `EXPORT_API operator Payload *() const GUARDED_BY(m);` leaves the operator
+/// in a `field_declaration` closed by a missing `;` and `GUARDED_BY(m);`
+/// standing as a `declaration` of its own. Registering that named a phantom
+/// `C::GUARDED_BY` — undefined, and the member every call site annotated
+/// alike resolves to instead of the real one.
+///
+/// The caller tests only `declaration` members, which is what keeps this
+/// narrow: a genuinely separate member after a missing `;` (`void f()` then
+/// `void g();`) recovers as a `field_declaration` and never reaches here. The
+/// one thing it does swallow is a ctor declaration after a member whose `;` the
+/// author really did forget, and that spelling is not valid C++ either way.
+fn continues_previous_member(node: Node) -> bool {
+    let Some(prev) = node.prev_named_sibling() else {
+        return false;
+    };
+    prev.child_count()
+        .checked_sub(1)
+        .and_then(|last| prev.child(last))
+        .is_some_and(|c| c.is_missing() && c.kind() == ";")
 }
 
 fn register_member_prototype(
@@ -1787,7 +1988,7 @@ fn register_member_prototype(
     if short.is_empty() || short == "operator" {
         return;
     }
-    let full_name = format!("{}::{}", cls_qual, short);
+    let full_name = canonicalize_conversion_target(&format!("{}::{}", cls_qual, short));
     let flags = virtual_flags(source, node);
     let provisional_id = program.symbols.alloc_fn_id();
     // Prototypes carry no parameter variables; they merge into their
@@ -1817,13 +2018,24 @@ fn register_member_prototype(
 }
 
 fn lower_function(program: &mut Program, ctx: &mut LowerContext, source: &str, node: Node) {
-    let Some(decl) = node
-        .child_by_field_name("declarator")
+    let Some(decl) = error_parked_declarator(node)
+        .or_else(|| node.child_by_field_name("declarator"))
         .or_else(|| find_function_declarator(node))
     else {
         return;
     };
-    let (raw_name, _) = parse_declarator_name(source, decl);
+    // An in-class conversion operator behind a leading macro keeps a
+    // declarator, but that declarator names the type it converts *to*; only
+    // the member walk knows to read the keyword stranded beside it. Without
+    // this the definition landed on `C::S` — defined, colliding with the
+    // class `S` itself — while its declaration stayed undefined.
+    let raw_name = match conversion_keyword_error(node) {
+        Some(_) => match member_short_name(source, node) {
+            Some(n) => n,
+            None => return,
+        },
+        None => parse_declarator_name(source, decl).0,
+    };
     if raw_name.is_empty() {
         return;
     }
@@ -1835,10 +2047,17 @@ fn lower_function(program: &mut Program, ctx: &mut LowerContext, source: &str, n
         Some(c) => Some(c.qual_name.clone()),
         None => derive_owner_class(program, &name),
     };
-    let ret_type = node
-        .child_by_field_name("type")
-        .map(|t| parse_type_node(program, ctx, source, t))
-        .unwrap_or_else(|| program.types.int());
+    let ret_type = match node.child_by_field_name("type") {
+        Some(t) => parse_type_node(program, ctx, source, t),
+        // A conversion operator has no `type` field: what it returns is the
+        // type it converts to, which lives inside its `operator_cast`.
+        None => match declarator_operator_cast(decl)
+            .and_then(|op| conversion_target_type(program, ctx, source, op))
+        {
+            Some(t) => t,
+            None => program.types.int(),
+        },
+    };
     let provisional_id = program.symbols.alloc_fn_id();
     let mut params = Vec::new();
     // Implicit `this` for member functions, ctors and dtors.
@@ -4682,6 +4901,54 @@ fn is_addr_of_member(source: &str, node: Node) -> bool {
     matches!(inner.kind(), "field_expression" | "subscript_expression")
 }
 
+/// The real declarator of a definition whose `declarator` field is nothing
+/// but an unknown attribute macro trailing it (`void C::M() OVERRIDE {}`,
+/// `void M() ACQUIRE(mu_) {}`).
+///
+/// Only a definition taking *no* arguments recovers this way: with a
+/// parameter list to anchor it the declarator parses, and the macro is left
+/// over as an `ERROR` after it. Without one, `C::M()` is as good a call as it
+/// is a declarator, so tree-sitter takes it for one — an `init_declarator`
+/// called with `()` at file scope, a plain `function_declarator` in a class
+/// body — parks it in an `ERROR`, and hands the `declarator` field to the
+/// macro. The definition then lands on the macro's name: a *defined* function
+/// called `OVERRIDE`, one per class that annotates a nullary member, while
+/// the real member stays undefined and its body unreachable.
+///
+/// The `ERROR` has to come before the field it displaced; one after it is the
+/// ordinary trailing-macro leftover of a declaration that parsed fine.
+fn error_parked_declarator(node: Node) -> Option<Node> {
+    fn parked_at(n: Node) -> Option<Node> {
+        let decl_start = n.child_by_field_name("declarator")?.start_byte();
+        let err = n
+            .children(&mut n.walk())
+            .find(|c| c.kind() == "ERROR" && c.end_byte() <= decl_start)?;
+        err.children(&mut err.walk()).find_map(|c| match c.kind() {
+            "function_declarator" => Some(c),
+            // `C::M()` read as a call: the name is the callee, and the empty
+            // argument list is the parameter list it stands in for.
+            "init_declarator" => c.child_by_field_name("declarator"),
+            _ => None,
+        })
+    }
+    // A pointer- or reference-returning member wraps its declarator, and the
+    // repair is parked one level down per layer: `void *C::P() OVERRIDE {}`
+    // hangs the `ERROR` off the `pointer_declarator`, not off the
+    // definition, so a scan of the definition's own children saw nothing and
+    // the body stayed under the macro's name.
+    let mut level = node;
+    loop {
+        if let Some(found) = parked_at(level) {
+            return Some(found);
+        }
+        let next = level.child_by_field_name("declarator")?;
+        if !matches!(next.kind(), "pointer_declarator" | "reference_declarator") {
+            return None;
+        }
+        level = next;
+    }
+}
+
 fn find_function_declarator(node: Node) -> Option<Node> {
     if node.kind() == "function_declarator" {
         return Some(node);
@@ -5407,6 +5674,297 @@ fn extract_tag_name(source: &str, node: &Node, keyword: &str) -> String {
     }
 }
 
+/// The part of a declared name that can name a scope: everything before the
+/// `operator` keyword, or the whole name when there is none. A conversion
+/// operator's target type is part of the name, not a qualification, so
+/// `operator ns::S` names no scope while `Cls::operator ns::S` names `Cls`.
+fn scope_part(name: &str) -> &str {
+    let mut from = 0;
+    while let Some(rel) = name[from..].find("operator") {
+        let at = from + rel;
+        from = at + "operator".len();
+        // `operators::f` merely starts with the keyword; `operator ns::S`,
+        // `operator=` and `operator new` are the real thing.
+        let continues_identifier = name[from..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if (at == 0 || name[..at].ends_with("::")) && !continues_identifier {
+            return &name[..at];
+        }
+    }
+    name
+}
+
+/// The name a conversion operator declares, taken from its `operator_cast`
+/// declarator: `operator const char *() const` → `operator const char*`.
+/// The name runs up to the declarator's own parameter list; everything from
+/// there on — the `()` and the cv-qualifiers — is declarator, and everything
+/// before it spells the target type, pointer and reference layers included.
+fn conversion_operator_name(source: &str, node: Node) -> String {
+    /// The `(...)` that makes the declarator a function. Stopping at the
+    /// enclosing `abstract_function_declarator` instead would cut away the
+    /// `(*)` of a conversion to a function pointer, which sits *inside* it:
+    /// `operator void (*)() const` would name the member `operator void`,
+    /// colliding with a real conversion to `void`.
+    fn own_parameters(node: Node) -> Option<Node> {
+        let mut cur = node.child_by_field_name("declarator")?;
+        while cur.kind() != "abstract_function_declarator" {
+            cur = cur
+                .child_by_field_name("declarator")
+                .or_else(|| cur.named_child(0))?;
+        }
+        cur.child_by_field_name("parameters").or(Some(cur))
+    }
+    let end = own_parameters(node).map_or_else(|| node.end_byte(), |p| p.start_byte());
+    // `normalize_spacing`, not `normalize_qualified`: the target's template
+    // arguments are part of what distinguishes one conversion from another.
+    let spelled = normalize_spacing(&source[node.start_byte()..end]);
+    // That collapse drops the space before punctuation, which is right
+    // everywhere but here: a globally-qualified target (`operator ::ns::S`)
+    // would come out `operator::ns::S`, and every later step keys on the
+    // keyword being a word of its own. An `operator_cast` is always a
+    // conversion, so what follows is a type, never a `<` or `=` to glue on.
+    match spelled.strip_prefix("operator") {
+        Some(target) => format!("operator {}", target.trim_start()),
+        None => spelled,
+    }
+}
+
+/// `normalize_qualified` for a declared name, except that a conversion
+/// operator's target keeps its template arguments — they are part of what
+/// tells one conversion in a class from another, and this function runs over
+/// names the declarator walk has already normalized once, so stripping here
+/// undid that: the out-of-class `H::operator ns::Vec<int>` came back as
+/// `H::operator Vec` and no longer met the `operator Vec<int>` its own class
+/// declared.
+fn normalize_declared_name(raw_name: &str) -> String {
+    let scope = scope_part(raw_name);
+    match raw_name[scope.len()..].strip_prefix("operator ") {
+        Some(target) => format!(
+            "{}operator {}",
+            normalize_qualified(scope),
+            normalize_spacing(target)
+        ),
+        None => normalize_qualified(raw_name),
+    }
+}
+
+/// A conversion operator's target with the scopes its own member already sits
+/// in dropped from it, so that how far the author had to spell the target out
+/// stops deciding which member it is: `ns::Handle::operator ns::S` and the
+/// in-class `operator S` (written inside `namespace ns`) both come out
+/// `ns::Handle::operator S`.
+///
+/// Only the member's *own* scopes are dropped. Dropping every scope — which
+/// is what this replaced — also merged targets that genuinely differ,
+/// `operator a::S` with `operator b::S`, putting two members and two bodies
+/// under one symbol. A scope the member does not sit in cannot have been
+/// elided by the author at either spelling, so keeping it costs no merge.
+///
+/// Applied to the assembled name rather than the declarator, because only
+/// there are both halves known: an in-class declaration learns its class from
+/// `register_member_prototype`, an out-of-class definition carries it in the
+/// spelling itself.
+fn canonicalize_conversion_target(name: &str) -> String {
+    let scope = scope_part(name);
+    let Some(target) = name[scope.len()..].strip_prefix("operator ") else {
+        return name.to_string();
+    };
+    // Every qualification the author could have elided, longest first. From
+    // inside `a::b::H` a type `a::b::H::T` may be written `T`, `H::T`,
+    // `b::H::T`, `a::b::H::T` — any *contiguous run* of the enclosing
+    // segments, not just the runs that start at the outermost one. Building
+    // only the leading prefixes missed the class-relative spellings, so
+    // `H::T` never met the `T` its own class declares.
+    let segments: Vec<&str> = scope.trim_end_matches("::").split("::").collect();
+    let mut prefixes: Vec<String> = Vec::new();
+    if !scope.is_empty() {
+        for start in 0..segments.len() {
+            for end in start..segments.len() {
+                prefixes.push(format!("{}::", segments[start..=end].join("::")));
+            }
+        }
+    }
+    prefixes.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    // The scopes come off wherever they appear — head and template arguments
+    // alike, each position taking the longest prefix that applies to it, and
+    // each deciding its own leading `::` by the same rule.
+    let target = strip_own_scopes(target, &prefixes);
+    format!("{scope}operator {target}")
+}
+
+/// Drop, from every qualified name inside `text`, the longest of `prefixes`
+/// that name begins with — the target's head and each template argument
+/// decided on its own.
+///
+/// Per position, because the prefixes nest: for a member of `a::b`, the
+/// argument of `a::Vec<a::b::T>` starts with `a::b::` while the head starts
+/// only with `a::`. Choosing one prefix for the whole spelling let the
+/// argument's longer match preempt the head's shorter one, leaving
+/// `a::Vec<T>` where the in-class spelling says `Vec<T>`.
+///
+/// Matching only where a qualified name can begin, and only once there,
+/// keeps `N::N::S` — a `S` in an inner `N` — from being consumed twice down
+/// to the outer `N::S`.
+fn strip_own_scopes(text: &str, prefixes: &[String]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut at_name_start = true;
+    while !rest.is_empty() {
+        if at_name_start {
+            // A leading `::` is consumed *with* the scope it re-spells, and
+            // only then: it is redundant exactly when what follows names a
+            // scope the member sits in. Left alone otherwise, because it is
+            // all that separates a global type from one an enclosing
+            // namespace shadows. The same rule at every position, so an
+            // argument written `V<::a::b::T>` reduces like `V<T>`.
+            let probe = rest.strip_prefix("::").unwrap_or(rest);
+            if let Some(hit) = prefixes.iter().find(|p| probe.starts_with(p.as_str())) {
+                rest = &probe[hit.len()..];
+                at_name_start = false;
+                continue;
+            }
+        }
+        let ch = rest.chars().next().unwrap_or_default();
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
+        at_name_start = matches!(ch, '<' | ',' | ' ' | '(' | '*' | '&');
+    }
+    out
+}
+
+/// Where the real name starts inside a `qualified_identifier` error recovery
+/// invented, or `None` for an honest one. An unknown attribute macro in front
+/// of a return type (`FFI_EXPORT T f(...)`, where no `#define` for
+/// `FFI_EXPORT` was in the include path) leaves tree-sitter taking the macro
+/// as the type and no rule left for the real one; it recovers by qualifying
+/// the name with that type, in one of two shapes:
+///
+/// - `FFI_EXPORT T f()` — nothing follows the name, so the `::` joining the
+///   two is MISSING and the name is the `name` field alone;
+/// - `FFI_EXPORT T C::M()` — the definition's own `::` is real, and the class
+///   it qualifies is parked in an `ERROR` node just after the leftover type.
+///   Neither field is the whole name: `C` sits in that `ERROR`, and `M` (or
+///   `B::M`, for a deeper scope) in `name`.
+///
+/// Read whole the member is spelled `T f` or `T C::M`, which no call site
+/// matches, so the definition hides behind a phantom external of the real
+/// name.
+fn fabricated_qualified_name(node: Node) -> Option<usize> {
+    fn repaired_at(n: Node) -> Option<usize> {
+        if n.children(&mut n.walk())
+            .any(|c| c.kind() == "::" && c.is_missing())
+        {
+            return n.child_by_field_name("name").map(|x| x.start_byte());
+        }
+        // Only an `ERROR` standing where the recovery puts it: between the
+        // leftover type and the `::` that joins them, which is the one thing
+        // that separates a fabricated qualification from an honest one. An
+        // `ERROR` *after* the `::` is a different repair on a real scope —
+        // `EXPORT C::operator int()` parks the `operator` keyword there (see
+        // `conversion_keyword_error`), and taking it would cut the class off
+        // the front of the name and send the definition to global scope.
+        let scope_end = n.child_by_field_name("scope")?.end_byte();
+        let sep = n
+            .children(&mut n.walk())
+            .find(|c| c.kind() == "::")?
+            .start_byte();
+        n.children(&mut n.walk())
+            .find(|c| c.kind() == "ERROR" && c.start_byte() >= scope_end && c.start_byte() < sep)
+            .map(|c| c.start_byte())
+    }
+    qualified_identifier_chain(node).find_map(repaired_at)
+}
+
+/// A `qualified_identifier` together with every one nested in its `name`
+/// field. A qualified name nests one level per scope it carries, and recovery
+/// leaves its mark at whichever level the fabricated segment landed on — so
+/// every scope either half of the name spells pushes that mark one level
+/// deeper, out of reach of a scan over direct children.
+/// `FFI_EXPORT n::q::S A::B::M()` parks its `A` three levels down, and
+/// `EXPORT ns::C::operator ns::S()` its stranded keyword two.
+fn qualified_identifier_chain<'a>(node: Node<'a>) -> impl Iterator<Item = Node<'a>> {
+    std::iter::successors(Some(node), |n| {
+        n.child_by_field_name("name")
+            .filter(|c| c.kind() == "qualified_identifier")
+    })
+}
+
+/// The `operator` keyword parked alone in an `ERROR`, which is what recovery
+/// leaves behind when an unknown attribute macro takes the `type` field of a
+/// *conversion* operator: with no rule left for the keyword, the target type
+/// is left standing where the declared name belongs, so
+/// `MACRO operator ns::S() const;` reads as a member named `S` and
+/// `EXPORT C::operator int() {}` as one named `int`. Any scope the target
+/// carried trails the keyword inside the same node (`ERROR [operator ns::]`),
+/// which is why the target is read from the node's end rather than from it.
+///
+/// A pointer target needs none of this: `MACRO operator int *() const;` keeps
+/// a real `operator_name` and only nests an `ERROR` inside it.
+fn conversion_keyword_error(node: Node) -> Option<Node> {
+    node.children(&mut node.walk())
+        .find(|c| c.kind() == "ERROR" && c.child(0).is_some_and(|k| k.kind() == "operator"))
+}
+
+/// The `operator_cast` a declarator is, or ends in: `operator T` for an
+/// in-class definition, `A::B::operator T` for an out-of-class one.
+fn declarator_operator_cast(node: Node) -> Option<Node> {
+    let mut cur = node;
+    while cur.kind() == "qualified_identifier" {
+        cur = cur.child_by_field_name("name")?;
+    }
+    (cur.kind() == "operator_cast").then_some(cur)
+}
+
+/// The type a conversion operator converts to — its `operator_cast`'s `type`
+/// field, wrapped in one `Ptr` per pointer or reference layer of the abstract
+/// declarator, so `operator T *()` returns `T *` and not `T`. References
+/// lower as pointers here as they do everywhere else.
+fn conversion_target_type(
+    program: &mut Program,
+    ctx: &LowerContext,
+    source: &str,
+    op: Node,
+) -> Option<trace_ir::TypeId> {
+    let mut desc = type_desc_from_node(program, ctx, source, op.child_by_field_name("type")?);
+    let mut cur = op.child_by_field_name("declarator");
+    while let Some(n) = cur {
+        cur = match n.kind() {
+            "abstract_pointer_declarator" | "abstract_reference_declarator" => {
+                desc = TypeDesc::Ptr(Box::new(desc));
+                n.child_by_field_name("declarator")
+                    .or_else(|| n.named_child(0))
+            }
+            "abstract_parenthesized_declarator" => n.named_child(0),
+            "abstract_function_declarator" => match n.child_by_field_name("declarator") {
+                // `operator void (*)()` — a declarator nested inside this
+                // one means the `(...)` belongs to the *target*, which is
+                // therefore a function type; the `(*)` that makes it
+                // nameable sits in there and adds its `Ptr` on the way down.
+                // Recording a bare `Ptr(Void)` here left the target
+                // indistinguishable from a pointer to `void`, so nothing
+                // downstream could see it as callable. Parameters stay empty
+                // to match every other `FnPtr` this lowering builds, which is
+                // what makes this agree with the `typedef void (*FP)();`
+                // spelling of the same type.
+                Some(inner) => {
+                    desc = TypeDesc::FnPtr {
+                        ret: Box::new(desc),
+                        params: Vec::new(),
+                    };
+                    Some(inner)
+                }
+                // `operator T *()` — nothing nested, so this is the member's
+                // own parameter list and the target ends here.
+                None => break,
+            },
+            _ => break,
+        };
+    }
+    Some(program.types.intern(desc))
+}
+
 fn parse_declarator_name(source: &str, node: Node) -> (String, bool) {
     match node.kind() {
         "identifier" => (node_text(source, &node).to_string(), false),
@@ -5436,11 +5994,40 @@ fn parse_declarator_name(source: &str, node: Node) -> (String, bool) {
                 (String::new(), true)
             }
         }
-        "qualified_identifier" => (normalize_qualified(node_text(source, &node)), false),
+        // An out-of-class conversion operator (`Cls::operator T() const`)
+        // hangs its `operator_cast` off the `name` field; the whole-node text
+        // would glue the declarator's `()` and cv-qualifiers onto the name.
+        "qualified_identifier" => {
+            // An unknown attribute macro in front of an out-of-class
+            // conversion operator costs it its `operator_cast`: the keyword
+            // is stranded in an `ERROR` and the target type takes the `name`
+            // field. Spell the member the way every other path spells it, or
+            // the definition and its declaration are two members. The scope
+            // and the target are read by byte offset around the keyword, so
+            // it makes no difference how deep the chain parked it.
+            if let Some(err) = qualified_identifier_chain(node).find_map(conversion_keyword_error) {
+                let scope = normalize_qualified(&source[node.start_byte()..err.start_byte()]);
+                let target = normalize_spacing(&source[err.end_byte()..node.end_byte()]);
+                return (format!("{scope}operator {}", target.trim_start()), false);
+            }
+            // Error recovery invents qualifications of its own, and the name
+            // then starts past the return type they carry — see
+            // `fabricated_qualified_name`.
+            let start = fabricated_qualified_name(node).unwrap_or_else(|| node.start_byte());
+            match declarator_operator_cast(node) {
+                Some(op) => {
+                    let scope = normalize_qualified(&source[start..op.start_byte()]);
+                    let name = format!("{scope}{}", conversion_operator_name(source, op));
+                    (name, false)
+                }
+                None => (normalize_qualified(&source[start..node.end_byte()]), false),
+            }
+        }
         // `~Name` spans two preprocessor tokens joined by whitespace in
         // expansion output; collapse it so protos and defs share one name.
         "destructor_name" => (normalize_qualified(node_text(source, &node)), false),
         "operator_name" => (normalize_qualified(node_text(source, &node)), false),
+        "operator_cast" => (conversion_operator_name(source, node), false),
         "function_declarator" => {
             if let Some(inner) = node.child_by_field_name("declarator") {
                 parse_declarator_name(source, inner)
@@ -5470,9 +6057,32 @@ fn parse_declarator_name(source: &str, node: Node) -> (String, bool) {
 /// strip balanced `<...>` argument spans per segment:
 /// `outer :: inner :: Box < int >` → `outer::inner::Box`,
 /// `clampT < double >` → `clampT`.
+///
+/// Whitespace is dropped only where it separates a word from punctuation —
+/// exactly the gaps a macro expansion introduces (`~ Cls`, `A :: b`). Between
+/// two words it is significant and collapses to a single space, so multi-word
+/// names keep their shape: `operator new`, `operator const char*`.
 fn normalize_qualified(text: &str) -> String {
+    fn is_word(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+    /// Is the segment being built an operator name? `operator<`, `<=`, `<<`
+    /// and `<=>` spell the operator; they open no argument list. Without
+    /// this the whole family truncated to the bare keyword `operator`.
+    ///
+    /// Only what directly follows the keyword counts: in a conversion
+    /// operator the `<` opens an ordinary argument list of the target type
+    /// (`operator Vec<int>`), which is kept — see `normalize_spacing`, the
+    /// half of this function a conversion target is normalized with.
+    fn in_operator_name(out: &str) -> bool {
+        let segment = out.rsplit("::").next().unwrap_or(out);
+        segment
+            .strip_prefix("operator")
+            .is_some_and(|rest| rest.chars().all(|c| matches!(c, '<' | '=' | '>')))
+    }
     let mut out = String::with_capacity(text.len());
     let mut angle_depth = 0i32;
+    let mut pending_space = false;
     for ch in text.chars() {
         if angle_depth > 0 {
             match ch {
@@ -5482,11 +6092,48 @@ fn normalize_qualified(text: &str) -> String {
             }
             continue;
         }
+        if ch.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if std::mem::take(&mut pending_space) && is_word(ch) && out.ends_with(is_word) {
+            out.push(' ');
+        }
         match ch {
-            '<' => angle_depth += 1,
-            c if c.is_whitespace() => {}
+            '<' if !in_operator_name(&out) => angle_depth += 1,
             _ => out.push(ch),
         }
+    }
+    out
+}
+
+/// The whitespace half of `normalize_qualified`, without the argument
+/// stripping: `Vec < int >` → `Vec<int>`, `A :: b` → `A::b`,
+/// `operator  new` → `operator new`.
+///
+/// A conversion operator's target is normalized with this rather than the
+/// whole function, because the target type is the *only* thing telling one
+/// conversion in a class from another: dropping its arguments made
+/// `operator Vec<int>` and `operator Vec<double>` one member, merging two
+/// bodies under one symbol. Keeping them costs nothing that stripping bought
+/// — the spellings a declaration and its out-of-class definition use differ
+/// in *scope*, not in arguments, so `operator ns::Vec<int>` and
+/// `operator Vec<int>` still meet once the scope is dropped.
+fn normalize_spacing(text: &str) -> String {
+    fn is_word(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if std::mem::take(&mut pending_space) && is_word(ch) && out.ends_with(is_word) {
+            out.push(' ');
+        }
+        out.push(ch);
     }
     out
 }
@@ -5665,6 +6312,157 @@ fn node_end_line(program: &Program, ctx: &LowerContext, node: Node, span: Span) 
                 // End originates in another file (or is unmappable): a body
                 // has no meaningful single-file range, so report the start.
                 span.line
+            }
+        }
+    }
+}
+
+/// Exhaustive check of `canonicalize_conversion_target` over a generated
+/// world of scopes and spellings.
+///
+/// Four defects were found in that function one at a time, each hidden by the
+/// fix before it, because its pieces interact: a leading `::`, nested
+/// enclosing scopes, template arguments, and repeated segments. Rather than
+/// add a case per bug, this enumerates every legal C++ spelling of every type
+/// in a small world and asserts the two properties the naming exists to have.
+#[cfg(test)]
+mod conversion_target_properties {
+    use super::canonicalize_conversion_target;
+
+    /// The scopes enclosing a member, innermost first.
+    fn enclosing(member_scope: &str) -> Vec<String> {
+        let segs: Vec<&str> = member_scope.split("::").collect();
+        (1..=segs.len())
+            .rev()
+            .map(|n| segs[..n].join("::"))
+            .collect()
+    }
+
+    /// Every way an author could legally spell `fqn` from inside
+    /// `member_scope`, in a world where no two types share a short name — so
+    /// eliding a scope can never change which type is found.
+    fn spellings(fqn: &str, member_scope: &str) -> Vec<String> {
+        let mut out = vec![fqn.to_string(), format!("::{fqn}")];
+        for scope in enclosing(member_scope) {
+            if let Some(rest) = fqn.strip_prefix(&format!("{scope}::")) {
+                out.push(rest.to_string());
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Is `fqn` reachable by eliding a scope the member sits in? Only those
+    /// have *every* spelling agree: for a type outside the member's scopes (a
+    /// global `G`, a sibling `x::X`) the bare `G` and the defensive `::G` are
+    /// indistinguishable from a shadowed pair without real name lookup, and
+    /// are deliberately kept apart.
+    fn in_own_scope(fqn: &str, member_scope: &str) -> bool {
+        enclosing(member_scope)
+            .iter()
+            .any(|scope| fqn.starts_with(&format!("{scope}::")))
+    }
+
+    /// Distinct types, none sharing a short name.
+    fn world(member_scope: &str) -> Vec<String> {
+        let mut types = vec!["G".to_string(), "x::X".to_string()];
+        for (i, scope) in enclosing(member_scope).iter().enumerate() {
+            types.push(format!("{scope}::T{i}"));
+            types.push(format!("{scope}::V{i}"));
+        }
+        types
+    }
+
+    /// Plain types plus every `Head<Arg>` pairing, so an argument's scopes
+    /// are exercised independently of the head's.
+    fn targets(member_scope: &str) -> Vec<(String, Vec<String>)> {
+        let types = world(member_scope);
+        let mut out: Vec<(String, Vec<String>)> = types
+            .iter()
+            .map(|t| (t.clone(), spellings(t, member_scope)))
+            .collect();
+        for head in &types {
+            for arg in &types {
+                let mut forms = Vec::new();
+                for h in spellings(head, member_scope) {
+                    for a in spellings(arg, member_scope) {
+                        forms.push(format!("{h}<{a}>"));
+                    }
+                }
+                out.push((format!("{head}<{arg}>"), forms));
+            }
+        }
+        out
+    }
+
+    /// Every part of a target that has to be reachable for its spellings to
+    /// agree: the head, and the argument when there is one.
+    fn parts(fqn: &str) -> Vec<&str> {
+        match fqn.split_once('<') {
+            Some((head, arg)) => vec![head, arg.trim_end_matches('>')],
+            None => vec![fqn],
+        }
+    }
+
+    fn canonical(member_scope: &str, target: &str) -> String {
+        canonicalize_conversion_target(&format!("{member_scope}::operator {target}"))
+    }
+
+    const MEMBER_SCOPES: [&str; 4] = ["C", "n::H", "a::b::H", "a::b::c::H"];
+
+    #[test]
+    fn every_spelling_of_one_type_names_one_member() {
+        for member_scope in MEMBER_SCOPES {
+            for (fqn, forms) in targets(member_scope) {
+                if !parts(&fqn).iter().all(|p| in_own_scope(p, member_scope)) {
+                    continue;
+                }
+                let mut names: Vec<String> =
+                    forms.iter().map(|f| canonical(member_scope, f)).collect();
+                names.sort();
+                names.dedup();
+                assert_eq!(
+                    names.len(),
+                    1,
+                    "in {member_scope}, the spellings {forms:?} of `{fqn}` named \
+                     {names:?} instead of one member"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_two_types_are_named_the_same_member() {
+        for member_scope in MEMBER_SCOPES {
+            let mut owner: std::collections::HashMap<String, (String, String)> =
+                std::collections::HashMap::new();
+            for (fqn, forms) in targets(member_scope) {
+                for form in forms {
+                    let name = canonical(member_scope, &form);
+                    let entry = owner
+                        .entry(name.clone())
+                        .or_insert_with(|| (fqn.clone(), form.clone()));
+                    assert_eq!(
+                        entry.0, fqn,
+                        "in {member_scope}, `{form}` ({fqn}) and `{}` ({}) both name \
+                         `{name}`",
+                        entry.1, entry.0
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canonicalizing_a_canonical_name_changes_nothing() {
+        for member_scope in MEMBER_SCOPES {
+            for (_, forms) in targets(member_scope) {
+                for form in forms {
+                    let once = canonical(member_scope, &form);
+                    let twice = canonicalize_conversion_target(&once);
+                    assert_eq!(once, twice, "unstable for `{form}` in {member_scope}");
+                }
             }
         }
     }

@@ -484,6 +484,88 @@ C++-aware only where it must be — everything else reuses the C machinery.
 - **Methods**: out-of-class definitions (`Ret Cls::m()`) merge with their
   in-class prototypes. An implicit `this` parameter (`Ptr(Struct{Cls})`,
   param index 0) is prepended. `virtual` flags survive merges.
+- **Conversion operators**: `operator T()` is a member named
+  `Cls::operator T`, spelled from its `operator_cast` declarator: the name
+  runs to the declarator's own parameter list, so the target type keeps its
+  pointer and reference layers (`operator const char*`, `operator T*`,
+  `operator void(*)`) and its template arguments (`operator Vec<int>`) while
+  the `()` and cv-qualifiers are dropped. Of the target's own scopes, only
+  those the *member itself* sits in are dropped — any contiguous run of the
+  enclosing segments, so `T`, `H::T`, `b::H::T` and `a::b::H::T` are one
+  member for a class `a::b::H`, and each qualified name in the target takes
+  the longest run that applies to it, a template argument's differing from
+  the head's: `ns::Handle::operator ns::S`
+  and the in-class `operator S` written inside `namespace ns` are one member,
+  since how far the author had to qualify the type is an accident of where
+  the declaration sits — but a scope the member does not sit in could not
+  have been elided at either spelling, so it is kept and
+  `C::operator a::S` stays distinct from `C::operator b::S`. A leading `::`
+  follows the same rule: dropped when what follows re-spells a scope the
+  member sits in (`operator ::ns::S` for a member of `ns`), kept otherwise,
+  since it is all that separates a global type from one the member's own
+  namespace shadows (`operator ::S` beside `operator S` inside a
+  `namespace n` that declares its own `S`). That question is settled by the
+  top-level target alone — a template argument shedding its own scope says
+  nothing about whether the `::` in front was redundant. A `::` in the
+  target therefore never qualifies the member out of its class either.
+  Declaration, in-class definition and out-of-class definition
+  (`Cls::operator T()`) all merge, and a definition returns the type it
+  converts to — a function-pointer target lowering to `Ptr(FnPtr{..})`, the
+  same descriptor the `typedef`ed spelling of it produces — though see the
+  prototype note below for when that survives the merge. One limit follows
+  from naming the member after the *spelling* of its target type: two
+  spellings of one type are two members (`operator const char*` from the
+  declaration and `operator char const*` from an out-of-class definition do
+  not merge). The recorded *type* is the coarser of the two in one place: a
+  function-pointer target's `FnPtr` carries no parameters, so
+  `operator int(*)(char)` and `operator int(*)(long)` — neither valid C++
+  without a typedef — are two members by name, since the name runs to the
+  *member's* own parameter list and so keeps the target's, but both record
+  `Ptr(FnPtr{Int, params: []})`. A conversion to a reference to an
+  array (`operator int (&())[3]`) is the one target the name cannot spell: it
+  is the only one whose declarator wraps *around* the parameter list rather
+  than ending at it, so the name is cut mid-spelling as
+  `operator int(&`. Self-consistent, so declaration and definition still
+  merge, but not a spelling anyone would recognise.
+- **Attribute macros around a conversion operator**: an unknown macro
+  (no `#define` in the include path) takes the `type` field and leaves the
+  `operator` keyword stranded in an `ERROR`, so the target type stands where
+  the declared name belongs. Both shapes are read back to the ordinary
+  spelling: in a class body `MACRO operator ns::S() const;` is
+  `Cls::operator ns::S`, not the member `Cls::S` it used to be; out of one,
+  `EXPORT Cls::operator int() {}` keeps its `Cls::` instead of losing it to
+  the fabricated-qualification repair below and escaping to global scope.
+  The target is read from the *source text*, not by walking the declarator
+  the `ERROR` parks it in: a declarator yields the one identifier it is named
+  by, which is a target's last segment only, and every other part of the
+  spelling — `ns::`, `<int>`, `(*)` — decides which member it is. The
+  spelling runs from the keyword to the end of the declarator the member's
+  own parameter list hangs off, which is contiguous with whatever scope the
+  `ERROR` swallowed however it split the two. So `MACRO operator Vec<int>()
+  const GUARDED_BY(m);` is `Cls::operator Vec<int>` and
+  `MACRO operator int (*)() const;` is `Cls::operator int(*)`, each meeting
+  the unannotated declaration and the out-of-class definition of the same
+  member; every target kind spells the same under a leading macro, a trailing
+  one, or both.
+  A pointer or reference target recovers differently from the rest — the
+  operator keeps a whole `function_declarator`, the member's `;` goes
+  *missing*, and a trailing macro is parked after it as a `declaration` of its
+  own. A class-body `declaration` following a member closed by a missing `;`
+  is the tail of that member (the author wrote no `;` between them), so it
+  declares nothing; registering it gave the class an undefined
+  `Cls::GUARDED_BY` that call sites on any annotated member resolved to. A
+  genuinely separate member after a missing `;` recovers as a
+  `field_declaration`, not a `declaration`, so the rule does not reach it; the
+  one shape it does swallow is a *ctor* declaration after a member whose `;` the
+  author actually forgot (`void f()` then `C(int);`), which is not valid C++
+  either way.
+  What tells the two repairs apart is where the `ERROR` sits relative to the
+  `::`: before it for a fabricated qualification (the leftover type is the
+  scope), after it for a real one. Both are looked for at every level of the
+  `qualified_identifier` chain, not just the top: a qualified name nests one
+  level per scope it carries, so each scope either half spells pushes the
+  recovery's mark one level deeper (`FFI_EXPORT n::q::S A::B::M()` parks its
+  `A` three levels down).
 - **Ctors / dtors**: emitted for `new Cls(...)`, destructor calls on
   `delete p`, explicit qualified dtor calls, constructor-declarations with
   an argument list, ctor-initializer lists (base + member targets).
@@ -499,6 +581,59 @@ Known C++ imprecision (in addition to the general list below):
 - `std::bind` / generic functors without a visible `operator()` stay
   unresolved-indirect unless a function address flows into them.
 - Default construction without parens (`Cls o;`) emits no ctor site.
+- **No call site resolves to a conversion operator**: `Cls::operator T` is
+  indexed, but neither the compiler-inserted call of an implicit conversion
+  nor an explicit `h.operator T()` reaches it — the explicit spelling parses
+  as a field access whose `operator` keyword lands in an `ERROR` node, so it
+  interns a phantom `Cls::T` instead. Conversion operators therefore have no
+  incoming edges.
+- **A prototype's return type wins the merge**: a member declared in a class
+  and defined out of line records the prototype's placeholder `void`, not the
+  definition's real type. This is general to all member functions (`int
+  Cls::f()` defined out of line records `void` too), so a conversion
+  operator's target type survives as its return type only when the class has
+  no separate declaration.
+- **A data member annotated by a macro that takes arguments is indexed as a
+  function**: `int a_ GUARDED_BY(mu_);` parses as a member named `a_` in an
+  `ERROR` beside a `function_declarator` spelling `GUARDED_BY(mu_)`, and only
+  the latter looks like a declarator, so the class gains one undefined
+  `Cls::GUARDED_BY` and the fields themselves are not indexed. A class that
+  annotates several fields alike contributes one such phantom, not one per
+  field, and a real method of that name would merge into it. Not separable
+  from a *function* behind a leading macro (`MACRO int Plain() const;`), which
+  is the same shape — type field, `ERROR`, `function_declarator` — with the
+  halves meaning the opposite things; suppressing one drops the other, and
+  dropping real methods is the worse trade.
+- **A globally-qualified conversion target behind a leading macro escapes the
+  repair**: `MACRO operator ::ns::S() const;` is the one shape whose `ERROR`
+  lands at *class-body* level rather than inside the member — the macro and the
+  `operator` keyword go into it together and the target becomes a
+  `declaration` beside it — so the member walk, which runs per member, never
+  sees the keyword. The declaration is indexed as `C::S`, and with a trailing
+  macro as well the `ERROR` swallows the whole operator and the macro is left
+  as the only `declaration`, giving the phantom `C::GUARDED_BY`. Every other
+  target kind spells the same under a leading macro, a trailing one, both, or
+  none; this one needs a repair at the class-body level, where nothing today
+  reads recovery marks. Pinned as the one exclusion in
+  `every_conversion_target_kind_spells_one_member_under_any_macro`.
+- **A target type shadowed by an inner scope collapses onto the outer one**:
+  the target drops the scopes the member sits in, which is right until two
+  types of that name exist at different depths of those scopes. `operator S`
+  and `operator N::S` in a class in `N` that also contains an inner `N::N::S`,
+  or `operator ns::S` beside `operator ns::Handle::S`, come out one member.
+  Telling them apart needs real name lookup, not a spelling rule.
+- **A pointer-returning member behind a leading macro is still named after
+  its return type**: `MACRO int (*Get(long))(int);` leaves a declarator-shaped
+  leftover type in the `ERROR`, so the rule that reads only the `ERROR`'s
+  declarators picks it rather than `Get`. The plain
+  `MACRO int Get(long);` shape is handled.
+- **A definition wearing a macro on both sides is lost**:
+  `EXPORT void C::M() GUARDED_BY(m) { }` splits at the top level into a
+  `declaration` holding `C::M` and a *separate* `function_definition` whose
+  declarator is the trailing macro and which owns the body. `C::M` is
+  therefore indexed undefined and its body attributed to a defined global
+  `GUARDED_BY`. Either macro alone is handled; only the pair defeats it,
+  because the repair the two need lives in different nodes.
 - Objects at namespace scope emit no ctor/dtor sites (no enclosing function).
 - Anonymous-namespace overload ties degrade to first-wins.
 - **ADL namespace derivation is spelling-based**: only arguments whose

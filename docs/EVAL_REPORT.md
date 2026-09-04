@@ -15,6 +15,227 @@
   C++-slice probes are *not* in that set: they are `min` and `band` thresholds,
   sized to catch a collapse rather than to pin a value.
 
+**Re-verified 2026-09-05 (review follow-ups on #46):** five further review
+passes over the branch found eleven more shapes, and all three corpora were
+re-analyzed before and after fixing each. Ten of the eleven do not occur in
+the pinned corpora and move nothing — every global metric, dispatch check and
+probe byte-identical across those runs — so, as with the three shapes the first
+pass found the same way, they are covered by unit tests only.
+
+The eleventh is the largest single correctness gain on this branch, and it needs
+no error recovery at all to happen. A standard or GNU attribute
+(`[[deprecated]]`, `__attribute__((pure))`) parses perfectly well, but it holds
+an identifier of its own in front of the declaration and the member walk took
+it — so **every annotated member of a class collapsed into one symbol**.
+Conversion operators are what made it reachable: their declarations had never
+registered before this branch, so the walk had never been asked to name one.
+In camera, `interfaces/inner_api/native/camera/include/input/camera_input.h`
+annotates most of `CameraInput` with a bare `[[deprecated]]`, and the whole
+class came down to a single `CameraInput::deprecated`. Fixing it removes
+**7** such phantoms (`CameraDevice`, `CameraInput`, `CameraManager`,
+`HCameraService`, `PhotoOutput` under `deprecated`; `SteadyClock`,
+`TaskManager` under a GNU `visibility`) and restores **26** real members — 25
+of `CameraInput` and `CameraManager::GetCameraInfo`. Net **+19** functions, all
+external (they are prototypes; none of the 26 has a definition in this tree),
+so camera moves to **25,904** total / **6,930** external with `functions_defined`
+unchanged at 18,974, and edges, arg-flow and diagnostics unchanged. hdf and
+hiview hold no attribute-named member either before or after and do not move.
+The bands are ±120, far too wide to have caught 19, so `eval_expected.json`
+gains an exact probe per corpus pinning attribute-named members at zero, plus
+one pinning `CameraInput::LockForControl` under its own name.
+
+Three were error-recovery shapes the first pass's rules read the wrong way
+round. An unknown attribute macro in front of a *conversion* operator strands
+the `operator` keyword in an `ERROR` and leaves the target type in declarator
+position, which in a class body named the member after its target
+(`MACRO operator ns::S() const;` → `C::S`) and out of one looked exactly like
+the fabricated qualification of `FFI_EXPORT void C::M()` — so `EXPORT
+C::operator int() {}` had its real class cut off the front and escaped to
+global scope, stranding the declaration it should have merged with. The two
+repairs are told apart by where the `ERROR` sits relative to the `::`: before
+it the scope is a leftover type, after it the scope is real. The third:
+a nullary declarator with a *trailing* macro (`void C::M() OVERRIDE {}`)
+parses as a call, so tree-sitter parks the real declarator in an `ERROR` and
+hands the `declarator` field to the macro — the definition landed on a
+*defined* function named `OVERRIDE` (one per class annotating a nullary
+member, all merging into one symbol) while `C::M` stayed undefined and its
+body unreachable. A declarator with parameters parses fine and was never
+affected, which is why the corpora show nothing: their annotated members take
+arguments.
+
+Two more were the same blind spot in both of those repairs: each was looked for
+only among a `qualified_identifier`'s *direct* children, but a qualified name
+nests one level per scope it carries and recovery marks the level the
+fabricated segment landed on — so every scope either half of the name spells
+pushes that mark further from the top. `FFI_EXPORT n::S C::M() {}` was still
+indexed as `n::S C::M`, and `EXPORT ns::C::operator ns::S() {}` split into a
+defined `ns::C::operator ns::S` beside the undefined `ns::C::operator S` it
+should have merged with. Both are now searched down the whole chain, which
+costs nothing: the scope and the target are read by byte offset around the
+mark, so its depth never mattered to anything but finding it.
+
+Two were failures of the rule that tells the leading attribute-macro repair
+from the trailing one. Wearing both at once
+(`EXPORT_API int Get(long) GUARDED_BY(mu_);`) puts the leftover return type and
+the real declarator in the *same* `ERROR`, so "does this `ERROR` hold a
+declarator?" answered yes and the walk read the whole node, taking the type
+first — `C::int` and `C::void`, one per return type in the class, with the real
+members surviving only as call-site externals. Reading only the `ERROR`'s
+declarators fixes it, and a conversion operator wearing both macros needed the
+converse: its target is swallowed by that same `ERROR` while the trailing macro
+sits outside, so reading the first thing *after* the `ERROR` named it
+`C::operator GUARDED_BY`. (The other is the attribute collapse described
+above.)
+
+Two more concerned the conversion target's own spelling, and both were
+verified to leave every corpus symbol byte-identical. Dropping *every* scope
+from the target made `operator a::S` and `operator b::S` one member, two
+bodies under one symbol; dropping only the scopes the member itself sits in
+keeps the merge that motivated the stripping (`ns::Handle::operator ns::S`
+still meets the in-class `operator S`) while a scope the member does not sit
+in — which no spelling could have elided — is kept. Template arguments are
+kept for the same reason, so `operator Vec<int>` and `operator Vec<double>`
+stop colliding; the declaration and its out-of-class definition differ in
+scope rather than in arguments, so nothing that used to merge stops. Neither
+of the corpora's two conversion operators has a qualified or template target,
+which is why nothing moves. Separately, `operator void (*)()` recorded a bare
+`Ptr(Void)` — indistinguishable from a conversion to `void *`, so nothing
+downstream could see the target as callable; it now lowers to `Ptr(FnPtr{..})`,
+the descriptor the `typedef`ed spelling of that same type already produced.
+
+Canonicalizing that target took five corrections in review, each hidden by
+the fix before it, because its pieces interact: a leading `::`, nested
+enclosing scopes, template arguments, repeated segments, and class-relative
+spellings. Rather than a case per defect, `lower.rs` now carries a property
+test that enumerates every legal C++ spelling of every type in a generated
+world of scopes and asserts the two things the naming exists to do — all
+spellings of one type name one member, and no two types name the same one.
+It found the fifth defect (`H::T` from inside `n::H`) on its first run.
+
+Two shapes were deliberately left alone, both recorded in `docs/ANALYSIS.md`.
+An annotated *data* member (`int a_ GUARDED_BY(mu_);`) still contributes one
+phantom `Cls::GUARDED_BY`: it parses as type field, `ERROR`,
+`function_declarator` — the identical shape to a *function* behind a leading
+macro (`MACRO int Plain() const;`), with the two halves meaning opposite
+things, so suppressing the phantom drops real methods instead. That was tried
+and reverted; it broke the `FFI_EXPORT CArr Get(long);` recovery this branch
+adds. And a definition wearing a macro on *both* sides
+(`EXPORT void C::M() GUARDED_BY(m) {}`) splits across two top-level nodes —
+`C::M` in a `declaration`, the body under a `function_definition` named for the
+macro — so the repair would have to span nodes rather than fix one.
+
+The last is the `TypeTable::int()` bug's twin, one screen away in the same
+file: `resolve_type_id` fell back to a raw `TypeId(5)`, which the prelude had
+grown past — it names `Long`, where the function means `Unknown`. Both are
+non-pointer scalars so no points-to result changes, and the new
+`unknown()` accessor is pinned by the same test as `void()` and `int()`.
+
+One measurement note, unrelated to these fixes and present before them: on this
+machine hiview reports **11,456** functions (defined **7,776**, external
+**3,680**) rather than the pinned 11,465 / 7,774 / 3,691. It is inside the ±120
+band and reproduces exactly across job counts 1, 4, 8 and 16 and across both
+runs, while `files` and every correctness number match the pin exactly — so it
+is machine-to-machine variance of the kind the bands exist for, not drift and
+not a regression. The pins were left alone rather than re-captured to a second
+machine's numbers.
+
+**Re-verified 2026-09-04 (conversion operators, #46):** all three corpora were
+re-analyzed with the current release binary and with one built from `master`
+(9979676), so every delta below is attributed rather than assumed.
+
+tree-sitter-cpp spells `operator T()` as an `operator_cast` declarator, not as
+the `operator_name` that `operator=` gets, and neither declarator-kind list in
+the lowering knew that kind. A conversion operator therefore went one of two
+ways: a declaration failed the member test and was never registered, while a
+definition reached the generic declarator walk and came out named after the
+fragment the walk happened to land on. Corpus-wide that is two symbols —
+`MappedMemory::()const` in camera (`photo_process_result.h:72`) and
+`AutoPtr::operatorT*()const` in hdf (`hdi-gen/util/autoptr.h:156`) — now
+`…::MappedMemory::operator bool` and `OHOS::HDI::AutoPtr::operator T*`.
+Neither had an incoming edge before or after: an
+implicit conversion is not a call site this indexer recovers, so the cost was
+one junk symbol apiece rather than a resolution failure. The counts do not
+move for either.
+
+Spelling the member `operator T` needs a space, and `normalize_qualified`
+deleted **all** whitespace. Deleting is right where whitespace separates a
+word from punctuation — `~ Cls`, `A :: b`, the macro-expansion gaps the
+function exists for — and wrong between two words, where it is the only thing
+keeping the tokens apart. Collapsing to a single space there instead is what
+surfaced the second finding.
+
+`FFI_EXPORT CArrFloat32 FfiCameraZoomGetZoomRatioRange(...)` has no `#define`
+anywhere in the include path, so the macro survives preprocessing. tree-sitter
+takes it as the return type, has no rule left for the real one, and recovers by
+pairing the type with the name under a **MISSING `::`** — a `qualified_identifier`
+that is not a qualified name. Read whole, it spelled the function
+`CArrFloat32FfiCameraZoomGetZoomRatioRange`, a name no call site can match.
+Reading only the `name` half fixes it.
+
+Ten declarations across two corpora hit this, and they split in two:
+
+- **Eight glued prototypes** — seven in camera's
+  `frameworks/cj/camera/include/camera_ffi.h`, one in hiview's
+  `plugins/faultlogger/interfaces/cj/faultlogger_ffi.h`. Each was a junk
+  *undefined* duplicate of a definition already interned under the correct
+  name, so they simply disappear.
+- **Two glued definitions**, both in
+  `frameworks/cj/camera/src/camera_ffi.cpp`. These had no correctly-named
+  counterpart at all: `FfiCameraAutoExposureGetExposureBiasRange` and
+  `FfiCameraZoomGetZoomRatioRange` were absent from the index entirely, and now
+  appear, defined.
+
+That is the whole of the count movement — hiview functions **11,464 → 11,463**
+(external **3,692 → 3,691**) and camera **25,891 → 25,884** (external
+**6,918 → 6,911**): ten junk symbols out across the two corpora, two real ones
+in, so the *defined* counts do not move either. Call edges do not move because nothing in these
+corpora calls an FFI entry point — they are called from the CJ runtime — but a
+caller in the same tree would have resolved to nothing. Arg-flow edges and
+diagnostics are unchanged in all three corpora, and hdf does not move at all.
+
+Review then found that the same `<...>` stripping truncates **every operator
+name containing `<`**. `operator<`, `operator<=`, `operator<<` and
+`operator<=>` all came out as the bare keyword `operator`, so a class's
+comparison operators collapsed into one symbol — and a *declaration* spelled
+that way was dropped outright by `register_member_prototype`'s
+`short == "operator"` guard. This is older than the conversion-operator work
+and much more common than `operator new`: **14 rows** across the three corpora
+(hdf 7, hiview 5, camera 2) carried the bare keyword. `<` no longer opens an
+argument span once the segment being built is an operator name, and those 14
+become correctly-spelled members —
+`OHOS::HDI::AutoPtr::operator<` and `operator<=` (one symbol before),
+`OHOS::Hardware::Logger::operator<<`, five in hiview, two in camera. hiview
+functions move to **11,465** (defined **7,774**) and camera to **25,885**
+(defined **18,974**); hdf's totals do not move, because there the collapse
+renamed rather than merged. A third exact probe per corpus pins the bare
+keyword at zero.
+
+Three further shapes were found by review rather than by the corpora, and fixed
+with no corpus movement at all: a target type that is itself qualified
+(`operator std::string`) put the in-class *definition* at global scope, because
+`qualify_decl` read the target's `::` as a scope and left the name alone —
+splitting it from the declaration it should have merged with; a target type
+that is a function pointer lost it, since the `(*)` sits inside the
+`abstract_function_declarator` the name used to be cut at (the recorded type
+now descends the same chain, so name and type agree); and inside a *class body*
+the unknown attribute macro above recovers as an `ERROR` node holding the real
+return type rather than as a fabricated qualified name, so the member walk took
+`CArr` from `FFI_EXPORT CArr Get(long);` and lost `Get` — an `ERROR` node holds
+no declarator, exactly as a `decltype` operand does not (#29). None of these
+three shapes occurs in the pinned corpora, so all are covered by unit tests
+only.
+
+The bands are ±120 on those totals, far too wide to have caught ten symbols, so
+`eval_expected.json` gains eleven exact probes: declarator-fragment names pinned
+at zero in each of the three corpora (`operator()` is a real name and is
+excluded), the two conversion operators pinned by name, the glued FFI spellings
+pinned at zero in camera and hiview, and `FfiCameraZoomGetZoomRatioRange` pinned
+as defined under its own name, and the bare keyword `operator` pinned at zero in
+each of the three. Six camera symbols keep a space in their name for
+an unrelated reason — `ParseAndCheckNumber< uint8_t>` and its five siblings are
+explicit template specializations whose spelling comes from another path — and
+are unchanged by this fix.
+
 **Re-verified 2026-09-04 (`->*` punctuator, #37):** the lexer had no `->*`
 token, and unlike the other multi-character punctuators it lacks, the output
 spacing rule pulls its halves apart — the space before `*` after `>` is what
@@ -125,13 +346,61 @@ external 6,921 → 6,919), call edges **73,053 → 73,137**, direct
 **19,503 → 19,427**, external **53,441 → 53,601**, arg-flow
 **17,334 → 17,245**. Indirect edges (**109**) and dlsym edges (0) are
 unchanged, every checked dispatch target set is unchanged, and the C++
-overload-group count rises 272 → 273. `scripts/eval_check.py` passes all 67
+overload-group count rises 272 → 273. `scripts/eval_check.py` passes all 83
 checks against the re-captured expectations.
+
+**Re-verified 2026-09-05 (review of #46):** review found that the
+macro-annotated conversion-operator repair above was verified against
+primitive targets only, and that the other four target kinds each came out
+wrong: the declarator the `ERROR` parks the target in was *walked*, which
+yields the target's last segment alone, so a qualified target lost its scope
+(`C::operator S` beside the `C::operator ns::S` every other spelling
+produces), a template target lost its arguments (`C::operator Vec`), and a
+function-pointer target lost its `(*)` and merged with the class's conversion
+to the same head type (`C::operator int`). A pointer or reference target
+recovers a whole `function_declarator` instead and pays elsewhere: the
+member's `;` goes missing and the trailing macro is parked after it as its own
+class-body `declaration`, which registered an undefined `Cls::GUARDED_BY` — the
+same phantom this branch claims to have removed, in an untested corner. The
+target is now read from the source text rather than walked, and a
+`declaration` following a member closed by a missing `;` declares nothing.
+
+Verifying that against the *other* target kinds turned up two more, neither
+raised in review and both present on `master`: a multi-word primitive target
+(`MACRO operator unsigned long() const;`) is recovered as loose keywords with
+no declarator anywhere, so the member-vs-data test read it as a data field and
+dropped it, and with a trailing macro to fall through to it was named
+`C::operator unsigned long()const GUARDED_BY`. Both are fixed. A *globally*
+qualified target behind a leading macro (`MACRO operator ::ns::S() const;`) is
+not: it is the one recovery that parks its `ERROR` at class-body level rather
+than inside the member, out of the member walk's reach, and repairing it means
+reading recovery marks at a level that reads none today. It is recorded in
+`docs/ANALYSIS.md` and pinned as the single exclusion of the new invariant
+test, which asserts that all four macro spellings of fourteen target kinds name
+one member and no phantom — the shape of test that would have caught the four
+defects review found by hand.
+
+Both fixes are corpus-neutral: `scripts/eval_check.py` passes **83 checks, 0
+failures** against the pinned expectations, with `files`, `diagnostics`,
+`edges_indirect` and `dlsym_edges` matching exactly on all three corpora and
+every function/edge total inside its band. None of the corpora spells a
+conversion operator with a macro on either side, which is why nothing moves —
+the same reason the target-canonicalization fixes above moved nothing, and the
+reason review had to reach for a scratch integration test rather than the
+corpora to find these.
+
+Review also corrected a claim in `docs/ANALYSIS.md`: `operator int(*)(char)`
+and `operator int(*)(long)` were said to collide under one name because the
+name keeps the `(*)` but not what follows it. The name runs to the *member's*
+own parameter list, so it keeps the target's — the two are distinct members.
+What collapses is the recorded *type*: `conversion_target_type` builds every
+`FnPtr` with empty parameters, so both are `Ptr(FnPtr{Int, params: []})`. The
+limit is real, the stated reason was not.
 
 ### Reproducing the exact numbers above
 
 `eval_check.py` guards bands and minimums, so the per-name counts in this
-section are not among its 68 checks. They come from the two corpus DBs (one
+section are not among its 83 checks. They come from the two corpus DBs (one
 built with this tree, one with a `master` worktree binary — see "Attributing a
 change: baseline vs. branch" in the Appendix) and are reproducible with:
 
@@ -2679,7 +2948,7 @@ to run, so a small function/edge difference between two runs of the *same*
 binary is noise, not a finding. The probes are `min`/`band` thresholds, so they
 confirm nothing collapsed; they do not pin a number to diff against.
 
-Exit codes: **0** all checks pass (current: **68 checks, 0 failures** — the three extra
+Exit codes: **0** all checks pass (current: **83 checks, 0 failures** — the three extra
 checks are the revision pins), **1** some expectation was missed, **2** the run is not
 usable at all and its numbers must not be read — a corpus missing, at the wrong revision
 or dirty (unless `--skip-rev-check` / `--allow-dirty` downgrade it), or `trace analyze`
