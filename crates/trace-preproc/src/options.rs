@@ -6,7 +6,8 @@ use std::sync::{Arc, RwLock};
 /// across the two: C++11 raw string literals (`R"(…)"`) and user-defined
 /// literal suffixes (`"x"_s`, `'c'_w`) are single tokens in C++ but two
 /// tokens in C, where `R` and the suffix are identifiers that may well be
-/// macros (`#define R …` / `'a'C`).
+/// macros (`#define R …` / `'a'C`); and `->*` is one token in C++ but
+/// `->` + `*` in C (#37).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
     C,
@@ -34,9 +35,9 @@ impl Language {
 /// Key of the include-expansion cache: a header's canonical path and the
 /// [`Language`] it was lexed as. A header has no language of its own — it
 /// is lexed as the translation unit including it — and the two lexers
-/// disagree on raw strings and ud-suffixes, so a header reached from both
-/// C and C++ units gets one entry per language rather than the first
-/// unit's tokenization replayed into the other.
+/// disagree on raw strings, ud-suffixes and `->*`, so a header reached
+/// from both C and C++ units gets one entry per language rather than the
+/// first unit's tokenization replayed into the other.
 pub type ExpansionKey = (PathBuf, Language);
 
 /// Cached preprocessed body for a `#include`d file (shared across translation units).

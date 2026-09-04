@@ -111,7 +111,9 @@ pub struct Lexer<'a> {
     /// Decides the C++-only token shapes: raw string literals and
     /// user-defined-literal suffixes are one token in C++ and identifier +
     /// literal (or literal + identifier) in C, where the identifier can be
-    /// a macro that must still expand.
+    /// a macro that must still expand; and `->*` is one token in C++ but
+    /// `->` + `*` in C (#37). `MacroDef::relexed` reconciles exactly these
+    /// shapes when a header is reachable from units of both languages.
     language: Language,
 }
 
@@ -198,14 +200,16 @@ impl<'a> Lexer<'a> {
             // a punctuator costs one allocation instead of an intermediate
             // `String` per candidate length. `next` is read once and reused.
             let next = self.peek_char();
-            let spelling = if ch == '.' && next == '.' && self.peek_char_at(1) == '.' {
-                // `...` is the only three-character punctuator the token
-                // stream needs; the others in the C++ set are still one token
-                // per character (issue #28, docs/PREPROCESSOR.md).
-                "..."
+            // Only `.` and `-` open an entry in `three_char_punct` — not
+            // the wider C++ set, whose `<<=` / `>>=` / `<=>` are still one
+            // token per character here — so every other punctuator skips
+            // the second lookahead.
+            let three = if matches!(ch, '.' | '-') {
+                three_char_punct(ch, next, self.peek_char_at(1), self.is_cpp())
             } else {
-                two_char_punct(ch, next).unwrap_or(one)
+                None
             };
+            let spelling = three.or_else(|| two_char_punct(ch, next)).unwrap_or(one);
             // `ch` is consumed; take the rest. Punctuators are all ASCII, so
             // the byte length is the character count.
             for _ in 1..spelling.len() {
@@ -500,6 +504,28 @@ fn single_char_punct(ch: char) -> Option<&'static str> {
         '}' => "}",
         '?' => "?",
         '\\' => "\\",
+        _ => return None,
+    })
+}
+
+/// The three-character punctuator `a`+`b`+`c`, or `None`. These are the two
+/// the token stream needs as single tokens: `...`, which the re-speller
+/// otherwise wrote back as `. . .` (#28), and `->*`, which it wrote back as
+/// `-> *` because the spacing rule puts a space before `*` after `>` (#37).
+/// The rest of the C++ set — `::`, `.*`, `<<=`, `>>=`, `<=>` — is still one
+/// token per character; see docs/PREPROCESSOR.md for why, and for what a
+/// general longest-match table would have to migrate first.
+///
+/// `->*` is a **C++ punctuator only**: gcc and clang tokenize `a->*b` in C
+/// as `->` then `*` (and then reject it, since `->` wants a member name).
+/// Lexing is language-aware here for the same reason it is for raw strings
+/// and ud-suffixes — a header reachable from both a C and a C++ unit is
+/// warmed once per language, and each replay has to be the tokenization
+/// that language's lexer would produce. `...` is in both languages.
+fn three_char_punct(a: char, b: char, c: char, cpp: bool) -> Option<&'static str> {
+    Some(match (a, b, c) {
+        ('.', '.', '.') => "...",
+        ('-', '>', '*') if cpp => "->*",
         _ => return None,
     })
 }
@@ -895,6 +921,80 @@ mod tests {
             kinds("template <class... T> void f(T... a);")[3],
             punct("...")
         );
+    }
+
+    #[test]
+    fn pointer_to_member_arrow_is_one_punctuator() {
+        // #37; the why is on `three_char_punct`.
+        assert_eq!(
+            kinds("int v = c->*m;"),
+            vec![
+                id("int"),
+                id("v"),
+                punct("="),
+                id("c"),
+                punct("->*"),
+                id("m"),
+                punct(";"),
+            ]
+        );
+        // The call form the corpus actually uses.
+        assert_eq!(
+            kinds("(c->*fp)();"),
+            vec![
+                punct("("),
+                id("c"),
+                punct("->*"),
+                id("fp"),
+                punct(")"),
+                punct("("),
+                punct(")"),
+                punct(";"),
+            ]
+        );
+    }
+
+    #[test]
+    fn pointer_to_member_arrow_is_cpp_only() {
+        // `->*` is C++-only; see `three_char_punct`.
+        assert_eq!(
+            kinds_c("int v = c->*m;"),
+            vec![
+                id("int"),
+                id("v"),
+                punct("="),
+                id("c"),
+                punct("->"),
+                punct("*"),
+                id("m"),
+                punct(";"),
+            ]
+        );
+        // `...` is a punctuator in both languages and stays one token.
+        assert_eq!(kinds_c("void f(int a, ...);")[6], punct("..."));
+    }
+
+    #[test]
+    fn arrow_without_a_star_stays_two_characters() {
+        // Maximal munch: `->` alone is unchanged and never over-munched.
+        assert_eq!(
+            kinds("a->b;"),
+            vec![id("a"), punct("->"), id("b"), punct(";")]
+        );
+        assert_eq!(
+            kinds("a->*b->c;"),
+            vec![
+                id("a"),
+                punct("->*"),
+                id("b"),
+                punct("->"),
+                id("c"),
+                punct(";")
+            ]
+        );
+        // `-` and `->` at end of input must not read past it.
+        assert_eq!(kinds("a-"), vec![id("a"), punct("-")]);
+        assert_eq!(kinds("a->"), vec![id("a"), punct("->")]);
     }
 
     #[test]

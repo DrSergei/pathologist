@@ -4786,6 +4786,16 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         );
     }
 
+    /// Token kinds the C++ lexer reads back out of preprocessed output.
+    fn relex_cpp(output: &str) -> Vec<TokenKind> {
+        crate::lexer::Lexer::new(output, crate::Language::Cpp)
+            .tokenize()
+            .into_iter()
+            .map(|t| t.kind)
+            .filter(|k| !matches!(k, TokenKind::Newline | TokenKind::Eof))
+            .collect()
+    }
+
     /// Token kinds the C lexer reads back out of preprocessed output.
     fn relex(output: &str) -> Vec<TokenKind> {
         crate::lexer::Lexer::new(output, crate::Language::C)
@@ -4843,6 +4853,41 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         .output;
         assert!(out.contains("Args..."), "{out}");
         assert!(out.contains("class..."), "{out}");
+    }
+
+    #[test]
+    fn pointer_to_member_call_survives_the_round_trip() {
+        // #37: `-> *` made tree-sitter recover `*func` as the callee,
+        // interning a function named after the operand — in the camera
+        // corpus, after a template parameter.
+        let src = "int g(C *c, int (C::*fp)()) { return (c->*fp)(); }\n";
+        let out = preprocess_string(src, Path::new("t.cpp"), &PreprocessOptions::new()).output;
+        assert!(out.contains("->*"), "{out}");
+        assert!(!out.contains("-> *"), "{out}");
+        let kinds = relex_cpp(&out);
+        assert!(
+            kinds
+                .iter()
+                // `&**s` reads the spelling whichever way `Punct` holds it
+                // (owned `String` today, `&'static str` under #42), so this
+                // assertion does not have to change when that lands.
+                .any(|k| matches!(k, TokenKind::Punct(s) if &**s == "->*")),
+            "{out:?} -> {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn plain_arrow_is_unaffected_by_the_pointer_to_member_token() {
+        // A real `*` after a template `>` must keep its space (`>&` would
+        // not parse as a reference parameter).
+        let out = preprocess_string(
+            "int k(std::shared_ptr<T> &p, T *q) { return p->x + *q; }\n",
+            Path::new("t.cpp"),
+            &PreprocessOptions::new(),
+        )
+        .output;
+        assert!(out.contains("p-> x"), "{out}");
+        assert!(!out.contains("->*"), "{out}");
     }
 
     #[test]

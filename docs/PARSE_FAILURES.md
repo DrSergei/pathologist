@@ -45,10 +45,10 @@ The `parse_failures` example re-preprocesses with whatever build runs it; the DB
 
 | Category | HDF | Hiview | Camera | Total |
 |----------|----:|-------:|-------:|------:|
-| generic ERROR nodes (mixed C++ constructs) | 160 | 19 | 42 | 221 |
+| generic ERROR nodes (mixed C++ constructs) | 160 | 19 | 43 | 222 |
 | gtest/HWTEST macros (`missing ;`) | 2 | 1 | 18 | 21 |
 | missing type identifiers (often macro-expanded types) | 1 | 7 | 2 | 10 |
-| other / mixed | 0 | 3 | 2 | 5 |
+| other / mixed | 0 | 3 | 1 | 4 |
 | extern template instantiations | 0 | 2 | 0 | 2 |
 
 ## drivers_hdf_core
@@ -2322,10 +2322,10 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Category | Files |
 |----------|------:|
-| generic ERROR nodes (mixed C++ constructs) | 42 |
+| generic ERROR nodes (mixed C++ constructs) | 43 |
 | gtest/HWTEST macros (`missing ;`) | 18 |
-| other / mixed | 2 |
 | missing type identifiers (often macro-expanded types) | 2 |
+| other / mixed | 1 |
 
 ### File list
 
@@ -2346,7 +2346,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 13 | `frameworks/cj/camera/include/video_output_impl.h` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
 | 14 | `frameworks/cj/camera/src/camera_ffi.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 42 |
 | 15 | `frameworks/cj/camera_picker/include/camera_picker_ffi.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 16 | `frameworks/native/camera/base/src/ability/camera_ability_builder.cpp` | tree-sitter-cpp node `missing field_identifier` at 1 site(s) | 1 |
+| 16 | `frameworks/native/camera/base/src/ability/camera_ability_builder.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
 | 17 | `frameworks/native/camera/test/ndktest/camera_ndk_demo/entry/src/main/cpp/main.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
 | 18 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_schedule_test/include/camera_deferred_video_unittest.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 17 |
 | 19 | `frameworks/native/camera/test/unittest/camera_deferred_unittest/camera_deferred_session_test/src/deferred_photo_session_unittest.cpp` | tree-sitter-cpp node `missing ;` at 1 site(s) | 1 |
@@ -2359,14 +2359,14 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 | 26 | `frameworks/native/camera/test/unittest/framework_native/session/src/capture_session_unittest.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
 | 27 | `frameworks/native/ndk/impl/camera_manager_impl.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 8 |
 | 28 | `frameworks/native/ndk/impl/metadata_output_impl.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
-| 29 | `frameworks/taihe/include/camera_event_emitter_taihe.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
+| 29 | `frameworks/taihe/include/camera_event_emitter_taihe.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 8 |
 | 30 | `frameworks/taihe/src/camera_constructor_taihe.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
 | 31 | `frameworks/taihe/src/camera_picker_constructor_taihe.cpp` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
 | 32 | `interfaces/inner_api/native/camera/include/ability/camera_ability_builder.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 1 |
 | 33 | `interfaces/inner_api/native/camera/include/input/camera_manager.h` | tree-sitter-cpp node `missing type_identifier` at 1 site(s) | 1 |
 | 34 | `interfaces/inner_api/native/camera/include/input/i_standard_camera_listener.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 2 |
 | 35 | `interfaces/inner_api/native/camera/include/output/photo_output.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 3 |
-| 36 | `interfaces/kits/js/camera_napi/include/camera_napi_event_emitter.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 4 |
+| 36 | `interfaces/kits/js/camera_napi/include/camera_napi_event_emitter.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 8 |
 | 37 | `interfaces/kits/js/camera_napi/include/session/camera_napi_adaptor.h` | generic tree-sitter ERROR node(s) in preprocessed C++ | 5 |
 | 38 | `mediastream/test/unittest/filter/src/audio_encoder_filter_unit_test.cpp` | tree-sitter-cpp node `missing ;` at 2 site(s) | 2 |
 | 39 | `moviefile/include/movie_file/plugin/movie_file_video_filter_plugin.h` | tree-sitter-cpp node `missing field_identifier` at 1 site(s) | 1 |
@@ -2573,11 +2573,13 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 #### `frameworks/native/camera/base/src/ability/camera_ability_builder.cpp`
 
-**Summary:** tree-sitter-cpp node `missing field_identifier` at 1 site(s)
+**Summary:** generic tree-sitter ERROR node(s) in preprocessed C++
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 193 | 8 | `missing field_identifier` | `` |
+| 193 | 2 | `ERROR` | `this->*((` |
+| 193 | 35 | `ERROR` | `))(dataArray` |
+| 193 | 57 | `ERROR` | `)` |
 
 #### `frameworks/native/camera/test/ndktest/camera_ndk_demo/entry/src/main/cpp/main.cpp`
 
@@ -2719,8 +2721,12 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 |-----:|----:|-----------|---------|
 | 11 | 14 | `ERROR` | `T::` |
 | 12 | 14 | `ERROR` | `T::` |
-| 25 | 11 | `ERROR` | `->` |
-| 40 | 11 | `ERROR` | `->` |
+| 25 | 2 | `ERROR` | `(T*) this->*((` |
+| 25 | 48 | `ERROR` | `))(callbackName` |
+| 25 | 79 | `ERROR` | `)` |
+| 40 | 2 | `ERROR` | `(T*) this->*((` |
+| 40 | 51 | `ERROR` | `))(callbackName` |
+| 40 | 73 | `ERROR` | `)` |
 
 #### `frameworks/taihe/src/camera_constructor_taihe.cpp`
 
@@ -2781,8 +2787,12 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 |-----:|----:|-----------|---------|
 | 11 | 14 | `ERROR` | `T::` |
 | 13 | 14 | `ERROR` | `T::` |
-| 29 | 11 | `ERROR` | `->` |
-| 46 | 11 | `ERROR` | `->` |
+| 29 | 2 | `ERROR` | `(T*) this->*((` |
+| 29 | 47 | `ERROR` | `))( callbackName` |
+| 30 | 106 | `ERROR` | `)` |
+| 46 | 2 | `ERROR` | `(T*) this->*((` |
+| 46 | 50 | `ERROR` | `))( callbackName` |
+| 47 | 87 | `ERROR` | `)` |
 
 #### `interfaces/kits/js/camera_napi/include/session/camera_napi_adaptor.h`
 
@@ -2790,11 +2800,11 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 77 | 30 | `ERROR` | `*` |
-| 100 | 30 | `ERROR` | `*` |
-| 131 | 34 | `ERROR` | `*` |
-| 152 | 27 | `ERROR` | `*` |
-| 175 | 27 | `ERROR` | `*` |
+| 77 | 27 | `ERROR` | `->* setFunc` |
+| 100 | 27 | `ERROR` | `->* setFunc` |
+| 131 | 31 | `ERROR` | `->* getFunc` |
+| 152 | 24 | `ERROR` | `->* setCbFunc` |
+| 175 | 24 | `ERROR` | `->* unSetCbFunc` |
 
 #### `mediastream/test/unittest/filter/src/audio_encoder_filter_unit_test.cpp`
 
@@ -2947,7 +2957,7 @@ Each entry is a translation unit or header indexed as its own file; reasons come
 
 | Line | Col | Node kind | Snippet |
 |-----:|----:|-----------|---------|
-| 22 | 24 | `ERROR` | `*` |
+| 22 | 21 | `ERROR` | `->* func` |
 
 #### `services/deferred_processing_service/include/deferred_processing_service.h`
 

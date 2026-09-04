@@ -30,10 +30,11 @@ pub enum MacroDef {
 
 impl MacroDef {
     /// This definition re-lexed as `language`. A replacement list is a
-    /// token sequence, and the C and C++ lexers disagree on raw strings and
-    /// ud-suffixes — `R"(x)"` is one C++ token but `R` + `"(x)"` in C,
-    /// `'a'C` one C++ token but `'a'` + `C` in C — so a definition lexed
-    /// for one language must not reach a unit of the other as is. The
+    /// token sequence, and the C and C++ lexers disagree on raw strings,
+    /// ud-suffixes and the `->*` punctuator — `R"(x)"` is one C++ token but
+    /// `R` + `"(x)"` in C, `'a'C` one C++ token but `'a'` + `C` in C, and
+    /// `->*` one C++ token but `->` + `*` in C — so a definition lexed for
+    /// one language must not reach a unit of the other as is. The
     /// tokens are spelled back with their adjacency intact, which is all
     /// the two lexers disagree about, and lexed again.
     pub fn relexed(&self, language: Language) -> MacroDef {
@@ -121,6 +122,35 @@ mod tests {
         MacroDef::Object {
             replacement: lex_macro_body(src, language),
         }
+    }
+
+    #[test]
+    fn relexed_splits_and_rejoins_the_cpp_only_pointer_to_member_token() {
+        // `->*` is a C++ punctuator only (#37), so it joins raw strings and
+        // ud-suffixes as a shape the two lexers disagree about — which is
+        // precisely what `relexed` exists to reconcile when a header is
+        // reachable from both a C and a C++ unit.
+        let cpp = object("p->*m", Language::Cpp);
+        assert_eq!(
+            kinds(&cpp),
+            vec![
+                TokenKind::Identifier("p".to_string()),
+                TokenKind::Punct("->*".into()),
+                TokenKind::Identifier("m".to_string()),
+            ]
+        );
+        let as_c = cpp.relexed(Language::C);
+        assert_eq!(
+            kinds(&as_c),
+            vec![
+                TokenKind::Identifier("p".to_string()),
+                TokenKind::Punct("->".into()),
+                TokenKind::Punct("*".into()),
+                TokenKind::Identifier("m".to_string()),
+            ]
+        );
+        // And back: the round trip re-joins them, so neither direction is lossy.
+        assert_eq!(kinds(&as_c.relexed(Language::Cpp)), kinds(&cpp));
     }
 
     #[test]

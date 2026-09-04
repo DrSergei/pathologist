@@ -15,6 +15,51 @@
   C++-slice probes are *not* in that set: they are `min` and `band` thresholds,
   sized to catch a collapse rather than to pin a value.
 
+**Re-verified 2026-09-04 (`->*` punctuator, #37):** the lexer had no `->*`
+token, and unlike the other multi-character punctuators it lacks, the output
+spacing rule pulls its halves apart — the space before `*` after `>` is what
+keeps `shared_ptr<T> &p` from gluing into `>&`. So `c->*m` was written back as
+`c-> * m`, which is not C++: maximal munch makes `->*` one token, and `->` may
+not be followed by `*`. It is now the second three-character punctuator.
+
+**This does not make the construct parse.** tree-sitter-cpp knows `->*` only
+as an overloadable operator name and as a fold operator — both
+`struct S { int operator->*(int); };` and `(a ->* ...)` parse — and has no
+rule for it as a binary operator in an ordinary expression. So pristine
+`c->*m` is an ERROR site with or without the space, while `c.*m` parses.
+Checked against the bundled grammar (`->*` appears in `operator_name`,
+`_fold_operator` and `_binary_fold_operator`, and nowhere in the expression
+rules) and confirmed by parsing all four shapes. The five camera files using
+`(x->*f)(...)` failed before and fail after, and the file count is unchanged
+at **259**.
+
+The token is C++-only: gcc and clang tokenize `a->*b` in C as `->` then `*`,
+so the lexer gates it on the language the way it already gates raw strings
+and ud-suffixes — a header reachable from both a C and a C++ unit is warmed
+once per language, and each replay has to be that language's tokenization.
+
+What the fix buys is index precision. With `-> *` split, tree-sitter recovered
+the operand as a callee, so `services/deferred_processing_service/include/base/dps.h:40`
+
+```c++
+return (server.get()->*func)(cmd);
+```
+
+interned an **external function named `func`** — the name of the enclosing
+template's parameter, not a function at all — and a call edge to it. Both are
+gone, and `eval_check` now pins that exactly (the bulk totals below sit inside
+±120/±420 bands, so they could not have caught a regression on their own): camera functions **25,892 -> 25,891** (external **6,919 -> 6,918**,
+defined unchanged at 18,973), call edges **73,137 -> 73,136**, external edges
+**53,601 -> 53,600**. Nothing else in any corpus moves.
+
+The cost is cosmetic and worth stating: catalogued ERROR sites rise
+**1,129 -> 1,139**, all of it in three of the five files, because recovery
+around an unknown operator fragments into more ERROR nodes than recovery
+around a field access did (`camera_ability_builder.cpp` reclassifies from
+`missing field_identifier` to a generic ERROR). Those ten extra sites cost
+nothing measurable: the only index deltas corpus-wide are the one symbol and
+one edge above.
+
 **Re-verified 2026-09-04 (`...` punctuator, #28):** all three pinned corpora
 were re-analyzed with the current release binary and with a binary built from
 `master` (2af1eb1), so every delta below is attributed rather than assumed.
@@ -86,7 +131,7 @@ checks against the re-captured expectations.
 ### Reproducing the exact numbers above
 
 `eval_check.py` guards bands and minimums, so the per-name counts in this
-section are not among its 67 checks. They come from the two corpus DBs (one
+section are not among its 68 checks. They come from the two corpus DBs (one
 built with this tree, one with a `master` worktree binary — see "Attributing a
 change: baseline vs. branch" in the Appendix) and are reproducible with:
 
@@ -155,7 +200,7 @@ external edge. That is a precision gain, not a lost edge.
 the five now-indexed mock overrides (`FilterMock`, `MockFilter`,
 `MockNextFilter`, `MockPrevFilter`, `TestFilter`); this is the intended sound
 may-analysis result. All other checked dispatch target sets are unchanged, and
-`scripts/eval_check.py` passes all 67 checks. Regenerating
+`scripts/eval_check.py` passes all 68 checks. Regenerating
 `docs/PARSE_FAILURES.md` also corrected stale error columns in the HDF and
 Hiview sections (col 32 → 31 on `u"…"` literals); the `master` binary reports
 the same columns, so those predate this change and come from the C++11
@@ -2264,9 +2309,9 @@ Hang / stack-overflow checks, not dispatch-hub evals. PCH-style header IR is wha
 | Metric | Value |
 |--------|------:|
 | Files | 1,593 |
-| Functions | 25,892 (18,973 defined / 6,919 external) |
-| Call edges | 73,137 |
-| Direct / indirect / external | 19,427 / **109** / 53,601 |
+| Functions | 25,891 (18,973 defined / 6,918 external) |
+| Call edges | 73,136 |
+| Direct / indirect / external | 19,427 / **109** / 53,600 |
 | Arg-flow edges | 17,245 |
 | Parse warnings | 64 |
 | Preprocess diagnostics | 4,703 |
@@ -2525,7 +2570,11 @@ re-analyzes the three corpora fresh and asserts:
    (hiview ≥120, camera ≥240), template member call sites that carry resolution
    records (camera ≥15 distinct `…<…>` callee texts), and a **calibration probe**:
    external-class template sites (`MetaHdr` `Set<Tag>`/`Get<Tag>`) must stay
-   unresolved (~1,243) instead of degrading into noise edges.
+   unresolved (~1,243) instead of degrading into noise edges. Plus an exact
+   **phantom-symbol probe** (camera, must be 0): no function named `func` in
+   `dps.h`, the template parameter the split `-> *` used to intern as a
+   symbol (#37). Bulk totals carry ±120/±420 bands and so cannot pin a
+   single fabricated symbol; probes like this one are where that belongs.
 
 ```bash
 python3 scripts/fetch_corpora.py              # once; --base DIR to keep the checkouts elsewhere
@@ -2630,7 +2679,7 @@ to run, so a small function/edge difference between two runs of the *same*
 binary is noise, not a finding. The probes are `min`/`band` thresholds, so they
 confirm nothing collapsed; they do not pin a number to diff against.
 
-Exit codes: **0** all checks pass (current: **67 checks, 0 failures** — the three extra
+Exit codes: **0** all checks pass (current: **68 checks, 0 failures** — the three extra
 checks are the revision pins), **1** some expectation was missed, **2** the run is not
 usable at all and its numbers must not be read — a corpus missing, at the wrong revision
 or dirty (unless `--skip-rev-check` / `--allow-dirty` downgrade it), or `trace analyze`
