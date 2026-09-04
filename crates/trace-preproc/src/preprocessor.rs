@@ -84,6 +84,11 @@ struct PreprocessorState {
     /// and captures its suffix into `IncludeExpansion::ops`; cleared when
     /// the last frame closes.
     macro_ops: Vec<MacroOp>,
+    /// Set once a run-wide limit (output cap, token budget, include depth)
+    /// has cut an expansion short. Everything composed from here on is
+    /// missing content, so nothing further may be published to the shared
+    /// expansion cache.
+    expansion_incomplete: bool,
 }
 
 /// One level of `#if`/`#elif`/`#else` nesting. A per-level bool is not
@@ -142,6 +147,7 @@ impl PreprocessorState {
             tokens_processed: 0,
             cache_frames: Vec::new(),
             macro_ops: Vec::new(),
+            expansion_incomplete: false,
         };
         if let Some(shared) = &state.opts.shared_macros {
             if let Ok(guard) = shared.read() {
@@ -418,10 +424,24 @@ impl PreprocessorState {
         PreprocessError::Message { message: msg }
     }
 
+    /// Report something that cut this run's expansion short — a resource
+    /// limit, or a file that stopped part-way through. Nothing composed from
+    /// here on may reach the shared cache.
+    fn limit_warn(&mut self, line: u32, message: impl Into<String>) {
+        self.expansion_incomplete = true;
+        self.warn(line, message);
+    }
+
+    /// The hard-error counterpart of `limit_warn`.
+    fn limit_error(&mut self, line: u32, message: impl Into<String>) -> PreprocessError {
+        self.expansion_incomplete = true;
+        self.error(line, message)
+    }
+
     fn check_resource_limits(&mut self, line: u32) -> Result<(), PreprocessError> {
         self.tokens_processed = self.tokens_processed.saturating_add(1);
         if self.tokens_processed > self.opts.max_expanded_tokens {
-            return Err(self.error(
+            return Err(self.limit_error(
                 line,
                 format!(
                     "preprocessed token budget exceeded ({})",
@@ -430,7 +450,7 @@ impl PreprocessorState {
             ));
         }
         if self.output.len() > self.opts.max_output_bytes {
-            return Err(self.error(
+            return Err(self.limit_error(
                 line,
                 format!(
                     "preprocessed output exceeded {} bytes",
@@ -461,7 +481,7 @@ impl PreprocessorState {
             return true;
         }
         if self.output.len().saturating_add(entry.text.len()) > self.opts.max_output_bytes {
-            self.warn(
+            self.limit_warn(
                 1,
                 format!(
                     "skipping cached include {} (would exceed {}-byte output cap)",
@@ -640,7 +660,7 @@ impl PreprocessorState {
         }
 
         if self.include_stack.len() >= self.opts.max_include_depth {
-            self.warn(
+            self.limit_warn(
                 1,
                 format!(
                     "include depth exceeded ({}); skipping {}",
@@ -683,13 +703,6 @@ impl PreprocessorState {
         self.included_guard.insert(canonical.clone());
         let output_start = self.output.len();
         let pushing_frame = cache_header && !self.opts.frozen_expansion_cache;
-        if pushing_frame {
-            self.cache_frames.push(CacheFrame {
-                skips: Vec::new(),
-                diagnostics: Vec::new(),
-                diagnostic_keys: HashSet::new(),
-            });
-        }
 
         let content: Arc<str> = if let Some(cache) = &self.opts.source_cache {
             let key = canonical.clone();
@@ -712,6 +725,17 @@ impl PreprocessorState {
                 .into()
         };
 
+        // Only now that the source is in hand: reading it can fail with `?`,
+        // and a frame pushed before that would be left on the stack for the
+        // enclosing header to pop as if it were its own.
+        if pushing_frame {
+            self.cache_frames.push(CacheFrame {
+                skips: Vec::new(),
+                diagnostics: Vec::new(),
+                diagnostic_keys: HashSet::new(),
+            });
+        }
+
         let prev_file = self.current_file.clone();
         self.current_file = path.to_path_buf();
         self.include_stack.push(path.to_path_buf());
@@ -721,7 +745,7 @@ impl PreprocessorState {
             // Attribute the stop to the file being processed when it failed,
             // not the including TU — downstream consumers key fallback and
             // reporting decisions off this message.
-            self.warn(
+            self.limit_warn(
                 1,
                 format!("preprocess stopped in {}: {e}", self.current_file.display()),
             );
@@ -757,7 +781,11 @@ impl PreprocessorState {
                 .cache_frames
                 .pop()
                 .expect("cacheable header has an active cache frame");
-            if let Some(cache) = &self.opts.include_expansion_cache {
+            // An expansion composed after a run-wide limit cut this run
+            // short is missing content; publishing it would hand that
+            // truncation to every later consumer of the header.
+            let cache = self.opts.include_expansion_cache.as_ref();
+            if let Some(cache) = cache.filter(|_| !self.expansion_incomplete) {
                 let output_end = self.output.len();
                 let (composed, composed_map, extra_files) = if self.opts.inline_include_bodies {
                     self.compose_cache_text(output_start, output_end, &frame.skips)
@@ -780,11 +808,12 @@ impl PreprocessorState {
                     None => Arc::default(),
                 };
                 let diagnostics: Arc<Vec<Diagnostic>> = Arc::new(frame.diagnostics);
-                if !composed.is_empty()
-                    || !ops.is_empty()
-                    || !new_files.is_empty()
-                    || !diagnostics.is_empty()
-                {
+                // Diagnostics alone are not content. An entry holding nothing
+                // else replays as an empty expansion, and `splice_cached`
+                // reports the hit as a success, so every later consumer that
+                // reaches this header with its guard undefined silently loses
+                // the body. Leave it uncached and let those runs expand it.
+                if !composed.is_empty() || !ops.is_empty() || !new_files.is_empty() {
                     if let Ok(mut guard) = cache.write() {
                         guard.entry((canonical, self.language)).or_insert(
                             crate::IncludeExpansion {
@@ -1148,7 +1177,11 @@ impl PreprocessorState {
         };
         let live_at = self.output.len();
         if let Err(e) = self.process_file(&include_path) {
-            self.warn(
+            // The include is already in `included_guard` and contributed
+            // nothing, so this expansion — and every frame enclosing it — is
+            // missing the header's content. Publishing any of them would keep
+            // starving consumers after the underlying failure clears.
+            self.limit_warn(
                 line,
                 format!("include preprocessing failed for {path}: {e}"),
             );
@@ -6298,5 +6331,178 @@ int from_late;
             "splice flag must survive nested argument parsing: {}",
             result.output
         );
+    }
+
+    /// A header whose body was guard-skipped contributes no text, no macro
+    /// ops and no files. Caching it anyway — as happened when its own
+    /// "expanded to nothing" warning was the only thing in the entry — makes
+    /// `splice_cached` hand later translation units an empty expansion, so
+    /// the header's declarations vanish for every TU that reaches it with the
+    /// guard undefined.
+    #[test]
+    fn guard_skipped_header_is_not_cached_as_empty() {
+        let dir = unique_tmp_dir("empty_entry");
+        fs::write(
+            dir.join("guarded.h"),
+            "#ifndef G\n#define G\nint from_guarded;\n#endif\n",
+        )
+        .unwrap();
+        fs::write(dir.join("first.c"), "#define G 1\n#include \"guarded.h\"\n").unwrap();
+        fs::write(dir.join("second.c"), "#include \"guarded.h\"\n").unwrap();
+
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = || {
+            PreprocessOptions::new()
+                .with_include_expansion_cache(Arc::clone(&cache))
+                .with_include(dir.path.clone())
+        };
+
+        // G is already defined here, so guarded.h expands to nothing and
+        // warns about it.
+        let first = preprocess_file(&dir.join("first.c"), &opts()).unwrap();
+        assert!(
+            first
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("expanded to nothing")),
+            "{:?}",
+            first.diagnostics
+        );
+        assert!(
+            cache
+                .read()
+                .unwrap()
+                .get(&(dir.join("guarded.h"), Language::C))
+                .is_none(),
+            "a contentless expansion must not be cached"
+        );
+
+        // A fresh macro table: G is undefined, so the body must come through.
+        let second = preprocess_file(&dir.join("second.c"), &opts()).unwrap();
+        assert!(
+            second.output.contains("from_guarded"),
+            "starved by the cache: {:?}",
+            second.output
+        );
+    }
+
+    /// Budget and depth limits are properties of the run that hit them, not
+    /// of the header that happened to be open at the time. Publishing a
+    /// cut-short expansion handed a truncated body — and the aborting run's
+    /// own error — to every later consumer of that header.
+    #[test]
+    fn aborted_expansion_is_not_cached() {
+        let dir = unique_tmp_dir("aborted_entry");
+        let parent: String = (0..40).map(|i| format!("int p{i};\n")).collect();
+        fs::write(dir.join("parent.h"), &parent).unwrap();
+        // big.c emits ~1900 bytes of its own before reaching parent.h, so the
+        // 2000-byte cap trips while parent.h is still being expanded.
+        let mut big: String = (0..190).map(|i| format!("int b{i};\n")).collect();
+        big.push_str("#include \"parent.h\"\n");
+        fs::write(dir.join("big.c"), &big).unwrap();
+        fs::write(dir.join("small.c"), "#include \"parent.h\"\n").unwrap();
+
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let opts = |cache: Option<&Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>>>| {
+            let base = PreprocessOptions::new()
+                .with_max_output_bytes(2000)
+                .with_include(dir.path.clone());
+            match cache {
+                Some(c) => base.with_include_expansion_cache(Arc::clone(c)),
+                None => base,
+            }
+        };
+
+        let big_run = preprocess_file(&dir.join("big.c"), &opts(Some(&cache))).unwrap();
+        assert!(
+            big_run
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("exceeded")),
+            "the cap should trip in this run: {:?}",
+            big_run.diagnostics
+        );
+
+        // small.c is nowhere near the cap and must be expanded exactly as it
+        // would be with no cache at all.
+        let cached = preprocess_file(&dir.join("small.c"), &opts(Some(&cache))).unwrap();
+        let uncached = preprocess_file(&dir.join("small.c"), &opts(None)).unwrap();
+        assert_eq!(
+            cached.output, uncached.output,
+            "cached expansion of parent.h is truncated"
+        );
+        let inherited: Vec<_> = cached
+            .diagnostics
+            .iter()
+            .filter(|d| d.message.contains("exceeded") || d.message.contains("stopped in"))
+            .collect();
+        assert!(
+            inherited.is_empty(),
+            "inherited another run's budget diagnostics: {inherited:?}"
+        );
+    }
+
+    /// A nested header that resolves but cannot be read aborts `process_file`
+    /// through `?`, and `handle_include` swallows that error so the enclosing
+    /// header finishes normally. Its expansion is missing the failed
+    /// include's content, so it must not be published: once the file becomes
+    /// readable again, every consumer routed through that entry would still
+    /// be starved of it.
+    #[test]
+    #[cfg(unix)]
+    fn unreadable_include_does_not_poison_the_enclosing_header() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_tmp_dir("leaked_frame");
+        fs::write(
+            dir.join("common.h"),
+            "#ifndef COMMON_H\n#define COMMON_H\nint common_decl;\n#endif\n",
+        )
+        .unwrap();
+        fs::write(dir.join("bad.h"), "int recovered_decl;\n").unwrap();
+        fs::set_permissions(dir.join("bad.h"), fs::Permissions::from_mode(0o000)).unwrap();
+        fs::write(
+            dir.join("parent.h"),
+            "#include \"common.h\"\n#include \"bad.h\"\nint parent_decl;\n",
+        )
+        .unwrap();
+        // common.h first, so parent.h's include of it is a guard skip that
+        // has to be recorded on parent.h's own frame.
+        fs::write(
+            dir.join("main.c"),
+            "#include \"common.h\"\n#include \"parent.h\"\n",
+        )
+        .unwrap();
+        fs::write(dir.join("other.c"), "#include \"parent.h\"\n").unwrap();
+
+        let cache: Arc<RwLock<HashMap<ExpansionKey, IncludeExpansion>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let cached_opts = PreprocessOptions::new()
+            .with_include_expansion_cache(Arc::clone(&cache))
+            .with_include(dir.path.clone());
+
+        preprocess_file(&dir.join("main.c"), &cached_opts).unwrap();
+
+        // The condition clears. Comparing the two while bad.h is still
+        // unreadable would starve both sides equally and prove nothing.
+        fs::set_permissions(dir.join("bad.h"), fs::Permissions::from_mode(0o644)).unwrap();
+
+        let cached = preprocess_file(&dir.join("other.c"), &cached_opts).unwrap();
+        let uncached = preprocess_file(
+            &dir.join("other.c"),
+            &PreprocessOptions::new().with_include(dir.path.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            cached.output, uncached.output,
+            "parent.h was published while missing the unreadable include"
+        );
+        assert!(
+            cached.output.contains("recovered_decl"),
+            "{:?}",
+            cached.output
+        );
+        assert!(cached.output.contains("common_decl"), "{:?}", cached.output);
     }
 }

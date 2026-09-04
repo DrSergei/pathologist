@@ -225,6 +225,12 @@ Re-splicing the nested cached blob into **live output** on every such skip expon
 
 Entries also record which files they claim (`IncludeExpansion.files`); files whose expansion emitted nothing are not claimed, so symbol-scope registration (`headers_of`) does not attribute phantom contributions. A cached-header include whose entire body was skipped emits a visible Warning during non-frozen phases ("resolved include expanded to nothing") — silence here is how starvation bugs historically went unnoticed.
 
+Three conditions keep an entry **out of the cache entirely**, because publishing one would hand a wrong expansion to every later consumer (#33):
+
+- **Nothing but diagnostics.** A header that contributed no text, no macro ops and no claimed files is not cached — its own "expanded to nothing" warning is not content. An entry holding only that replays as an empty expansion, and `splice_cached` reports the hit as a success, so every consumer reaching the header with its guard *undefined* silently loses the body. Left uncached, those runs expand it and re-derive the same reports.
+- **A run that hit a run-wide limit.** After the output cap, token budget or include depth fires, everything composed is short of what the abort swallowed, so the run publishes nothing further. The scope is the whole remaining run, not just the aborted header: an enclosing header can finish "successfully" while missing exactly that content, so a narrower rule leaves the same starvation reachable one level up. The cost is lost caching on a run that was already degraded.
+- **A nested include that failed to preprocess.** `handle_include` swallows the error and lets the includer continue, but the include is already in the include-once set and contributed nothing, so this expansion — and every frame enclosing it — is short that header's content. The run is marked incomplete and publishes nothing further; otherwise consumers routed through those entries stay starved even *after* the underlying failure clears (an unreadable header made readable again). Comparing a cached and an uncached expansion while the failure persists starves both sides equally and proves nothing — the regression test restores readability first. Independently, the frame is opened only once the source is in hand, so a failed read cannot leave one on the stack for the enclosing header to pop as though it were its own.
+
 `index_order` itself is canonical: input files are sorted and dependents are visited in sorted order, so unordered `HashSet`/`HashMap` iteration cannot leak into processing order.
 
 ### Include-dir self-sufficiency
@@ -247,8 +253,8 @@ Manual `-I` remains appropriate only for things the tool cannot discover:
 | Missing include | Warning `include file not found, skipping: <path>`; the directive is skipped and preprocessing continues | `preprocess` / `warning`, file and line of the `#include` |
 | Unterminated `#if` | Error diagnostic at the opening `#if`/`#ifdef`/`#ifndef` (one per open group, in the file that opened it); the open groups are closed at that file's end and preprocessing continues. Output already produced is kept | `preprocess` / `error`, the file that opened the group |
 | Stray `#elif` / `#else` / `#endif` in a header | Error `… without #if`; the header stops there (its `preprocess stopped in <file>` warning follows) and the includer resumes | `preprocess` / `error` plus the `warning`, both on the header |
-| Macro-argument parse failure, malformed directive, budget exceeded | Error at the offending line, then warning `preprocess stopped in <file>: …`; the file stops, output produced so far is kept | `preprocess` / `error` at that line, plus the `warning` on line 1 of the file that stopped |
-| Resolved include expands to nothing | Warning `resolved include expanded to nothing (guard already defined?)` on the header, warm/index phases only | `preprocess` / `warning` |
+| Macro-argument parse failure, malformed directive, budget exceeded | Error at the offending line, then warning `preprocess stopped in <file>: …`; the file stops, output produced so far is kept. A run-wide limit (output cap, token budget, include depth) additionally stops the rest of the run publishing to the expansion cache | `preprocess` / `error` at that line, plus the `warning` on line 1 of the file that stopped |
+| Resolved include expands to nothing | Warning `resolved include expanded to nothing (guard already defined?)` on the header, warm/index phases only; the header is not cached | `preprocess` / `warning` |
 | Preprocess failure (hard error) | The unit's own file cannot be read: no output, the unit is dropped with an error diagnostic carrying the I/O message. For a header in the warm pass the same failure is the warning `macro warm preprocess failed for <header>` | `parse` / `error` (no file) for a unit; `preprocess` / `warning` for the warm pass |
 
 ### Diagnostics in the export
@@ -267,9 +273,10 @@ under both lexers but cached in one; what the other run reports (a `#` line insi
 string literal is an unknown directive in C) is forwarded from the warm pass so it is not lost
 with the discarded text. Include-expansion cache entries carry their diagnostics together with
 their text, line map, and macro effects, so a cache hit preserves the same reports as a live
-expansion. Nothing is filtered: on a checkout analyzed without a
-sysroot, `include file not found` for every system and toolchain header is the bulk of the table
-(see `docs/EVAL_REPORT.md`).
+expansion. A header that would contribute nothing *but* diagnostics is not cached at all, so its
+reports survive by re-expansion rather than by replay. Nothing is filtered: on a checkout
+analyzed without a sysroot, `include file not found` for every system and toolchain header is
+the bulk of the table (see `docs/EVAL_REPORT.md`).
 
 A mid-run stop inside ONE nested header must not invalidate the whole TU: indexing keeps the truncated-but-LineMap-consistent prefix rather than falling back to raw source, because raw text drops every `#include`d declaration and feeds the parser unexpanded function-like macros. The stop message names the file where processing stopped so downstream tools can report the truncation point.
 
