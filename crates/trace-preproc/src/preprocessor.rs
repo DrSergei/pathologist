@@ -2294,9 +2294,14 @@ fn has_top_level_comma(tokens: &[Token]) -> bool {
         match &token.kind {
             TokenKind::Punct(s) if s == "(" => paren += 1,
             TokenKind::Punct(s) if s == ")" => paren = paren.saturating_sub(1),
-            TokenKind::Punct(s) if s == "<" => angle += 1,
-            TokenKind::Punct(s) if s == ">" => angle -= 1,
-            TokenKind::Punct(s) if s == ">>" => angle -= 2,
+            // Only outside a parenthesis is `>` a template closer; inside one
+            // it is greater-than, and counting it would unbalance the depth
+            // for everything after the group — the comma of
+            // `std::conditional_t<(A > B), X, Y>` would read as top-level and
+            // the whole invocation would be rejected as an argument list.
+            TokenKind::Punct(s) if s == "<" && paren == 0 => angle += 1,
+            TokenKind::Punct(s) if s == ">" && paren == 0 => angle -= 1,
+            TokenKind::Punct(s) if s == ">>" && paren == 0 => angle -= 2,
             TokenKind::Punct(s) if s == "," && paren == 0 && angle <= 0 => return true,
             _ => {}
         }
@@ -4048,6 +4053,11 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "    MOCK_METHOD((MAP_T(int, double)), GetMapped, (), (override));\n",
             "    MOCK_METHOD((MAP_T(int *, char)), GetPtrMapped, (), (override));\n",
             "    MOCK_METHOD((std::function<void(int)>), GetFn, (), (override));\n",
+            // A `>` inside a parenthesis is greater-than, not a template
+            // closer: counting it would unbalance the angle depth and make
+            // the commas after it look like an argument list.
+            "    MOCK_METHOD((std::conditional_t<(A > B), X, Y>), Conditional, (),\n",
+            "        (override));\n",
             "    MOCK_METHOD0(Start, int());\n",
             "    MOCK_METHOD1(Attach, int(int value));\n",
             "    MOCK_CONST_METHOD2(Inspect, int(int left, int right));\n",
@@ -4113,6 +4123,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             // spelling a comma-containing type, keeps its spelling and is
             // expanded by the rescan like any other type.
             "std::function<void(int)>GetFn()override;",
+            "std::conditional_t<(A>B),X,Y>Conditional()override;",
             "decltype(handle_)GetHandle()const;",
             "std::map<int,double>GetMapped()override;",
             // A `*` inside that macro's arguments is a parameter's, not a
