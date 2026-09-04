@@ -135,7 +135,7 @@ mod tests {
             kinds(&cpp),
             vec![
                 TokenKind::Identifier("p".to_string()),
-                TokenKind::Punct("->*".into()),
+                TokenKind::Punct("->*"),
                 TokenKind::Identifier("m".to_string()),
             ]
         );
@@ -144,8 +144,8 @@ mod tests {
             kinds(&as_c),
             vec![
                 TokenKind::Identifier("p".to_string()),
-                TokenKind::Punct("->".into()),
-                TokenKind::Punct("*".into()),
+                TokenKind::Punct("->"),
+                TokenKind::Punct("*"),
                 TokenKind::Identifier("m".to_string()),
             ]
         );

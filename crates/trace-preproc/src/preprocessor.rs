@@ -4870,10 +4870,7 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
         assert!(
             kinds
                 .iter()
-                // `&**s` reads the spelling whichever way `Punct` holds it
-                // (owned `String` today, `&'static str` under #42), so this
-                // assertion does not have to change when that lands.
-                .any(|k| matches!(k, TokenKind::Punct(s) if &**s == "->*")),
+                .any(|k| matches!(k, TokenKind::Punct(s) if *s == "->*")),
             "{out:?} -> {kinds:?}"
         );
     }
