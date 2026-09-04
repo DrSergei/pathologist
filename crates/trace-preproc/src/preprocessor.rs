@@ -461,6 +461,30 @@ impl PreprocessorState {
         Ok(())
     }
 
+    /// Charge `n` tokens to the expansion budget at once.
+    ///
+    /// `check_resource_limits` charges one token per loop iteration, which
+    /// counts tokens *walked*. A function-like invocation walks O(1) — the
+    /// argument list is skipped wholesale — and then materializes the whole
+    /// replacement in `substitute_macro`, copying each argument once per
+    /// parameter occurrence. Nothing charged for that, so peak allocation
+    /// scaled with the source argument width no matter how small
+    /// `max_expanded_tokens` was (issue #30). Charging the replacement
+    /// before it is built makes the budget bound tokens *materialized*.
+    fn charge_tokens(&mut self, n: u64, line: u32) -> Result<(), PreprocessError> {
+        self.tokens_processed = self.tokens_processed.saturating_add(n);
+        if self.tokens_processed > self.opts.max_expanded_tokens {
+            return Err(self.limit_error(
+                line,
+                format!(
+                    "preprocessed token budget exceeded ({})",
+                    self.opts.max_expanded_tokens
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Replay a cached expansion into the output. Returns false when no
     /// entry exists for `canonical`.
     fn splice_cached(&mut self, canonical: &Path) -> bool {
@@ -1626,6 +1650,13 @@ impl PreprocessorState {
     /// self-reference; explicit step/size budgets stop pathological growth
     /// (this engine bypasses the text path's `check_resource_limits`), in
     /// which case `None` is returned and the condition evaluates false.
+    fn warn_condition_budget(&mut self, line: u32) {
+        self.warn(
+            line,
+            "macro expansion budget exceeded in #if condition; treating as false".to_string(),
+        );
+    }
+
     fn expand_condition_tokens(&mut self, toks: &[Token]) -> Option<Vec<Token>> {
         const MAX_TOKENS: usize = 1 << 16;
         const MAX_STEPS: u64 = 1 << 20;
@@ -1637,11 +1668,7 @@ impl PreprocessorState {
             steps += 1;
             if steps > MAX_STEPS || work.len() > MAX_TOKENS || out.len() > MAX_TOKENS {
                 let line = work.get(i).map(|t| t.line).unwrap_or(1);
-                self.warn(
-                    line,
-                    "macro expansion budget exceeded in #if condition; treating as false"
-                        .to_string(),
-                );
+                self.warn_condition_budget(line);
                 return None;
             }
             let tok = work[i].clone();
@@ -1683,6 +1710,26 @@ impl PreprocessorState {
                             variadic,
                         }) => {
                             if let Some((args, next)) = parse_cond_macro_args(&work, i + 1) {
+                                // Same allocate-before-charge hazard as #30,
+                                // in this engine: the cap is tested at the
+                                // top of the loop, so one splice could take
+                                // `work` far past MAX_TOKENS before the next
+                                // test saw it (a 64-way macro over a 32k
+                                // argument reached 329 MB against a 65,536
+                                // token cap). Project what the substitution
+                                // will add, against the part of `work` the
+                                // splice keeps, and refuse before building.
+                                let projected = projected_substitution_len(
+                                    replacement,
+                                    params,
+                                    &args,
+                                    *variadic,
+                                );
+                                let kept = work.len() - (next - i);
+                                if kept.saturating_add(projected as usize) > MAX_TOKENS {
+                                    self.warn_condition_budget(tok.line);
+                                    return None;
+                                }
                                 let substituted = apply_concatenation(substitute_macro(
                                     name,
                                     &tok,
@@ -1895,6 +1942,20 @@ struct MacroArgs {
 impl MacroArgs {
     /// The variadic collector's tokens from `idx` on, commas included, in
     /// source order — the one argument C11 6.10.3p12 says they form.
+    /// How many tokens `variadic_tokens(idx)` would produce, without
+    /// building them — the projection below must not allocate the very
+    /// vector it exists to bound.
+    fn variadic_len(&self, idx: usize) -> usize {
+        let mut n = 0;
+        for (ai, arg) in self.args.iter().enumerate().skip(idx) {
+            if ai > idx {
+                n += 1;
+            }
+            n += arg.len();
+        }
+        n
+    }
+
     fn variadic_tokens(&self, idx: usize) -> Vec<Token> {
         let mut out = Vec::new();
         for (ai, arg) in self.args.iter().enumerate().skip(idx) {
@@ -1921,14 +1982,25 @@ impl PreprocessorState {
                 params,
                 replacement,
                 variadic,
-            } => apply_concatenation(substitute_macro(
-                macro_name,
-                origin,
-                replacement,
-                params,
-                args,
-                *variadic,
-            )),
+            } => {
+                // Bound what this is about to allocate before allocating it
+                // (#30). The rescan charges the result again as it walks
+                // it, which is the pre-existing accounting; this charge is
+                // what makes a wide argument fail before it is copied once
+                // per parameter occurrence.
+                self.charge_tokens(
+                    projected_substitution_len(replacement, params, args, *variadic),
+                    origin.line,
+                )?;
+                apply_concatenation(substitute_macro(
+                    macro_name,
+                    origin,
+                    replacement,
+                    params,
+                    args,
+                    *variadic,
+                ))
+            }
             MacroDef::GmockMethod => {
                 let args = self.expand_gmock_args(args)?;
                 let expanded = expand_gmock_method(macro_name, origin, &args);
@@ -2428,6 +2500,35 @@ fn strip_outer_parens(tokens: &[Token]) -> &[Token] {
         Some(0) => &tokens[1..tokens.len() - 1],
         _ => tokens,
     }
+}
+
+/// How many tokens `substitute_macro` would materialize for this body and
+/// argument list, computed without building anything.
+///
+/// Deliberately an upper bound rather than an exact count: `##` pastes and
+/// placemarkers only ever remove tokens, and `#param` yields one literal
+/// where this counts the parameter's width. Over-estimating charges a
+/// little extra for those shapes; under-estimating would reopen the hole
+/// this exists to close.
+fn projected_substitution_len(
+    body: &[Token],
+    params: &[String],
+    args: &MacroArgs,
+    variadic: bool,
+) -> u64 {
+    let mut n: u64 = 0;
+    for tok in body {
+        let width = match &tok.kind {
+            TokenKind::Identifier(name) => match params.iter().position(|p| p == name) {
+                Some(idx) if is_variadic_tail(params, variadic, idx) => args.variadic_len(idx),
+                Some(idx) => args.args.get(idx).map_or(0, |a| a.len()),
+                None => 1,
+            },
+            _ => 1,
+        };
+        n = n.saturating_add(width as u64);
+    }
+    n
 }
 
 fn substitute_macro(
@@ -5594,6 +5695,110 @@ enum { PRIVATE_MESSAGE_TYPE };\n";
             "depth cap should not expand the whole chain: {}",
             r.output
         );
+    }
+
+    /// `W(x)` repeating its parameter 16 times, invoked with `width`
+    /// argument tokens.
+    fn multiplying_macro(width: usize) -> String {
+        let arg = (0..width)
+            .map(|i| format!("a{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("#define W(x) x x x x x x x x x x x x x x x x\nint y[] = {{ W({arg}) }};\n")
+    }
+
+    #[test]
+    fn wide_macro_argument_is_charged_before_it_is_materialized() {
+        // Issue #30: the budget counted tokens *walked*. A function-like
+        // invocation walks O(1) — `parse_macro_args` skips the argument
+        // list wholesale — and `substitute_macro` then copies the argument
+        // once per parameter occurrence, so peak allocation scaled with the
+        // source argument width however small `max_expanded_tokens` was: an
+        // 80k-token argument reached 397 MB under a 2,000-token budget.
+        // The budget fired in every one of those runs and still did not
+        // bound the allocation, so the diagnostic alone cannot witness this
+        // fix. What changes is *when* it fires: the invocation is now
+        // refused before the copy, so none of the argument is ever emitted.
+        let opts = PreprocessOptions::new().with_max_expanded_tokens(2_000);
+        let result = preprocess_string(&multiplying_macro(5_000), Path::new("bomb.c"), &opts);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("token budget exceeded")),
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(
+            !result.output.contains("a0"),
+            "the replacement must be refused before it is built, so no \
+             argument token reaches the output; got {} bytes starting {:?}",
+            result.output.len(),
+            &result.output[..result.output.len().min(80)]
+        );
+    }
+
+    #[test]
+    fn charging_the_replacement_still_admits_expansions_that_fit() {
+        // The charge is an upper bound on what the substitution will
+        // materialize, so it must not refuse an expansion the budget can
+        // afford — 16 x 100 tokens against a 10,000-token budget.
+        let opts = PreprocessOptions::new().with_max_expanded_tokens(10_000);
+        let result = preprocess_string(&multiplying_macro(100), Path::new("ok.c"), &opts);
+        assert!(
+            result.diagnostics.is_empty(),
+            "expansion within budget must not be refused: {:?}",
+            result.diagnostics
+        );
+        assert!(result.output.contains("a99"), "{}", result.output);
+    }
+
+    #[test]
+    fn wide_condition_argument_is_projected_before_it_is_materialized() {
+        // The `#if` engine is separate from the emitting path and caps
+        // `work` at 1<<16 tokens, tested at the top of its loop — so one
+        // `splice` of a substitution could carry it far past the cap before
+        // the next test saw it: 64 occurrences over a 32k-token argument
+        // reached 329 MB peak. The projection now refuses first (13.8 MB).
+        //
+        // Unlike the emitting path there is NO functional tell: the
+        // condition is treated as false either way, with the same warning
+        // on the same line, so this test pins the contract (refused, branch
+        // not taken) and not the allocation. The allocation is evidenced by
+        // measurement, recorded in the commit.
+        let arg = (0..2_000)
+            .map(|i| format!("a{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let body = vec!["x"; 64].join(" ");
+        let src = format!("#define W(x) {body}\n#if W({arg})\nint taken;\n#endif\nint after;\n");
+        let result = preprocess_string(&src, Path::new("cond.c"), &PreprocessOptions::new());
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("budget exceeded in #if condition")),
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(!result.output.contains("taken"), "{}", result.output);
+        assert!(result.output.contains("after"), "{}", result.output);
+    }
+
+    #[test]
+    fn projection_still_admits_conditions_that_fit() {
+        // The projection is an upper bound — it charges `#param` at the
+        // argument's width and ignores that `##` only removes tokens — so
+        // it must not start refusing conditions the cap can afford, which
+        // would silently flip branches to false.
+        let src = "#define ADD(a, b) a + b
+                   #if ADD(1, 2) == 3
+                   int taken;
+                   #endif
+";
+        let result = preprocess_string(src, Path::new("ok.c"), &PreprocessOptions::new());
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.output.contains("taken"), "{}", result.output);
     }
 
     #[test]
