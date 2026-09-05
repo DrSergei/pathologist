@@ -97,7 +97,7 @@ Lowering (`trace-parse/src/lower.rs`) walks tree-sitter ASTs and emits **flow co
 |----------|-------------|
 | `Pag` | Pointer assignment graph: nodes, constraints, abstract locations, solver adjacency index |
 | `AnalysisResult.points_to` | Optional PAG-node → location sets (`--debug-points-to` only) |
-| `AnalysisResult.call_edges` | Resolved direct + indirect call graph edges |
+| `AnalysisResult.call_edges` | Resolved direct, indirect, and synthetic IPC call graph edges; IPC edges use `SYNTHETIC_CALL_SITE`, which must not be indexed into `Program.symbols.call_sites` |
 | `AnalysisResult.arg_flow_edges` | Actual → formal mapping per call site (`actual_var` or `actual_fn` + `formal`) |
 | SQLite | Persisted subset of the above (see export modes below) |
 

@@ -23,14 +23,16 @@ flowchart TD
   WL[Worklist fixpoint]
   CG[On-the-fly call edges]
   IPC[IPC proxy/stub bridges]
+  OUT[AnalysisResult call edges]
   AF[arg_flow extraction]
 
   Flow --> PAG
   Ret --> PAG
   PAG --> Idx --> WL
   WL --> CG
-  IPC --> CG
   CG --> WL
+  CG --> OUT
+  IPC --> OUT
   CG --> AF
 ```
 
@@ -197,13 +199,20 @@ For an in-tree OpenHarmony proxy/stub pair, analysis adds a synthetic call
 edge from a proxy method that calls `SendRequest` to the corresponding stub
 handler. Classes are paired by their qualified `*Proxy`/`*Client` and `*Stub`
 names; methods match exactly, with `HandleX` and `XStub` handler fallbacks.
-Interface-only handlers are matched within the stub's namespace. The edge has
+For a stub with interface-only declarations, defined overrides in classes
+deriving from that stub are preferred; otherwise bodyless interface methods
+are matched within the stub's namespace. The latter are intentionally leaf
+targets when no concrete server implementation is indexed. The edge has
 resolution `ipc` and no source call site, and can be disabled with `--no-ipc`.
+Because v1 has no opcode or parcel-type information, overloaded handlers at
+the selected naming tier are all retained as a may-analysis result.
 
 This is deliberately name-based and does not interpret transaction opcodes or
-control flow in `OnRemoteRequest`. It also does not model parcel argument or
-return-value flow. See [IPC_ROADMAP.md](IPC_ROADMAP.md) for the pattern study,
-validation targets, and limitations.
+control flow in `OnRemoteRequest`. Synthetic IPC edges are appended after the
+points-to fixpoint and do not feed the solver worklist. The analysis also does
+not model parcel argument or return-value flow. See
+[IPC_ROADMAP.md](IPC_ROADMAP.md) for the pattern study, validation targets, and
+limitations.
 
 ## Field sensitivity
 

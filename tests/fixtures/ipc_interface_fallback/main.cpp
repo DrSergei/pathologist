@@ -38,6 +38,23 @@ public:
     int OnRemoteRequest(int code, void *data, void *reply, void *option);
 };
 
+void HasNextImpl() {}
+void GetNextImpl() {}
+
+// Concrete in-tree server: bridge targets should prefer these bodies over
+// the bodyless interface declarations above.
+class QueryResultService : public QueryResultStub {
+public:
+    bool HasNext() override {
+        HasNextImpl();
+        return true;
+    }
+    int GetNext() override {
+        GetNextImpl();
+        return 1;
+    }
+};
+
 // Proxy: methods call SendRequest.
 class QueryResultProxy {
 public:
@@ -63,6 +80,29 @@ int QueryResultProxy::GetNext() {
     IRemoteObject *remote = Remote();
     void *data = 0, *reply = 0, *option = 0;
     remote->SendRequest(2, data, reply, option);
+    return 0;
+}
+
+// A suffix-matching class with only a constructor is not sufficient evidence
+// of an IPC stub, even if a matching interface declaration exists.
+class IConstructorOnly {
+public:
+    virtual int Ping() = 0;
+};
+
+class ConstructorOnlyStub {
+public:
+    ConstructorOnlyStub() {}
+};
+
+class ConstructorOnlyProxy {
+public:
+    int Ping();
+};
+
+int ConstructorOnlyProxy::Ping() {
+    IRemoteObject *remote = Remote();
+    remote->SendRequest(3, nullptr, nullptr, nullptr);
     return 0;
 }
 

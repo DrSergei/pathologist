@@ -374,7 +374,9 @@ mutation and no `&mut` churn across the ~90 `analyze(&program)` call sites.
 
 **Stub detection** — a C++ class is a stub if its qualified class name
 ends in `Stub`. Its handler methods are all of its defined methods except
-`OnRemoteRequest`, `GetDescriptor`, and destructors.
+constructors, `OnRemoteRequest`, `GetDescriptor`, and destructors. A class
+with no handler methods is registered only when it defines `OnRemoteRequest`,
+so a constructor-only `*Stub` class does not enable interface fallback.
 
 **Proxy detection** — a C++ class is a proxy if its qualified class name
 ends in `Proxy` or `Client`. Its methods count as IPC sends if their body
@@ -392,6 +394,15 @@ containing `SendRequest`).
    - `Stub` suffix — e.g. proxy `OnFoo` → `FooStub::OnFooStub` (the
      marshalling-shim name some IDL generators use, e.g.
      `ThermalLevelCallbackStub::OnThermalLevelChangedStub`)
+
+All overloads at the first matching naming tier are retained. Without opcode
+or parcel-type analysis v1 cannot choose among them, so keeping the full set
+preserves may-analysis soundness.
+
+When a stub only declares the matched interface method, detection first looks
+for defined overrides in classes deriving from the stub. If none are indexed,
+the bridge targets the bodyless interface declaration and therefore ends at a
+leaf in call-graph reachability.
 
 #### New IR structures (in `trace-ir/src/ipc.rs`)
 
@@ -419,9 +430,10 @@ proxy_method --[CallEdge { caller: proxy_method, callee: stub_handler,
 
 This is done directly in the solver after the direct-call pass (before
 `AnalysisResult` is built). It requires **no** new `FlowConstraint` variant
-and **no** control-flow analysis. A bridge may target either a defined stub
-handler or a bodyless interface method used by a stub dispatcher. Argument
-flow across the boundary is not wired in v1 (deferred to Phase 3).
+and **no** control-flow analysis. A bridge may target a defined stub handler,
+a defined override in a class deriving from the stub, or (when neither body is
+indexed) a bodyless interface method used by a stub dispatcher. Argument flow
+across the boundary is not wired in v1 (deferred to Phase 3).
 
 Bridge edges use the dedicated `ResolutionKind::IpcBridge` (distinct from
 `Direct`), exported as `resolution = 'ipc'`, so consumers can recognize and
@@ -583,11 +595,20 @@ binary):
 | `ability_dmsfwk` | 2 | `AbilityConnectionWrapperProxy/Stub` (callback interface) |
 | `multimedia_camera_framework` | 2 | `HStreamCaptureThumbnailCallbackProxy/Stub`, `HStreamCapturePhotoCallbackProxy/Stub` (single-case switch + `Handle` prefix) |
 
-**Fixture tests** (`cargo test -p trace-cli --test ipc_tests`): 9 tests, all
+These counts are baselines for the checked source revisions, not expected
+minimums. Generated ZIDL proxy/stub translation units are often absent from a
+repository checkout (notably in the camera corpus), and detection requires
+both sides to be indexed. Because v1 is name-based, an exactly paired
+`MockFooProxy`/`MockFooStub` or `TestFooProxy`/`TestFooStub` can also match;
+exclude test sources from the analysis root or use `--no-ipc` when that is not
+desired.
+
+**Fixture tests** (`cargo test -p trace-cli --test ipc_tests`): 10 tests, all
 pass. Full `cargo test --workspace` (26 suites) remains green.
 
 **Debugging aid:** `TRACE_DEBUG_IPC=1` prints each bridge as
-`[ipc] bridge: <proxy> --> <stub>` plus a total. Disabled by default.
+`[ipc] bridge: <proxy> --> <stub>` plus a total. Debug logging is disabled by
+default; IPC detection itself is enabled unless `--no-ipc` is passed.
 
 **Remaining for full plan completion:** parameter marshalling (Phase 3), a
 dedicated SQLite `ipc_bridges` table (optional Phase 4 follow-up), and

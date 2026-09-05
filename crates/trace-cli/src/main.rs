@@ -383,6 +383,7 @@ fn run_inspect(db: PathBuf, command: InspectCommands) -> Result<()> {
     let conn = open_db(&db)?;
     match command {
         InspectCommands::Calls { from, to, file } => {
+            trace_db::require_call_edge_caller(&conn)?;
             let mut sql = String::from(
                 "SELECT caller.name, csf.path, cs.line, callee.name, callee_f.path, ce.resolution \
                  FROM call_edges ce \
@@ -390,8 +391,8 @@ fn run_inspect(db: PathBuf, command: InspectCommands) -> Result<()> {
                  LEFT JOIN files csf ON csf.id = cs.file_id \
                  JOIN functions caller ON caller.id = ce.caller_fn_id \
                  JOIN files caller_f ON caller_f.id = caller.file_id \
-                 JOIN files callee_f ON callee_f.id = callee.file_id \
-                 JOIN functions callee ON callee.id = ce.callee_fn_id WHERE 1=1",
+                 JOIN functions callee ON callee.id = ce.callee_fn_id \
+                 JOIN files callee_f ON callee_f.id = callee.file_id WHERE 1=1",
             );
             let mut params: Vec<String> = Vec::new();
             if let Some(f) = from.as_deref() {

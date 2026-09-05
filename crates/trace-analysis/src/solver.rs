@@ -56,10 +56,7 @@ pub fn analyze(program: &Program) -> (Pag, AnalysisResult) {
 }
 
 pub fn analyze_with_options(program: &Program, opts: AnalyzeOptions) -> (Pag, AnalysisResult) {
-    let mut pag = Pag::build_with_models(program, &opts.models);
-    if !opts.enable_ipc {
-        pag.ipc_bridges.clear();
-    }
+    let mut pag = Pag::build_with_models_and_ipc(program, &opts.models, opts.enable_ipc);
     let mut result = solve(
         &mut pag,
         program,

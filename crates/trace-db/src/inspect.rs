@@ -227,6 +227,17 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(n != 0)
 }
 
+/// Require the schema-v3 caller column used by synthetic call edges.
+pub fn require_call_edge_caller(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "call_edges", "caller_fn_id")? {
+        bail!(
+            "`call_edges.caller_fn_id` missing: database predates synthetic call-edge export; \
+             re-run `trace analyze` with this binary"
+        );
+    }
+    Ok(())
+}
+
 fn require_flow_tables(conn: &Connection) -> Result<()> {
     for t in ["flow_nodes", "flow_edges"] {
         if !table_exists(conn, t)? {
@@ -247,6 +258,7 @@ pub fn call_graph(
     dir: Direction,
     max_depth: u32,
 ) -> Result<QueryGraph> {
+    require_call_edge_caller(conn)?;
     let labels = load_function_labels(conn)?;
     if !labels.contains_key(&root_fn_id) {
         bail!("function id {root_fn_id} not found in database");
@@ -1032,6 +1044,16 @@ mod tests {
 
         let err = find_symbols_at(&conn, "main.c", 12, 9).unwrap_err();
         assert!(err.to_string().contains("variables.col"), "{err}");
+        assert!(err.to_string().contains("re-run"), "{err}");
+
+        conn.execute_batch(
+            "CREATE TABLE call_edges ( \
+                id INTEGER PRIMARY KEY, call_site_id INTEGER, \
+                callee_fn_id INTEGER NOT NULL, resolution TEXT NOT NULL );",
+        )
+        .unwrap();
+        let err = require_call_edge_caller(&conn).unwrap_err();
+        assert!(err.to_string().contains("call_edges.caller_fn_id"), "{err}");
         assert!(err.to_string().contains("re-run"), "{err}");
 
         let orphan = SymbolRef {

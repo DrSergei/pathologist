@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use trace_analysis::{analyze, analyze_with_options, AnalyzeOptions, ResolutionKind};
 use trace_parse::build_program;
@@ -190,6 +191,69 @@ fn ipc_stub_suffix_handler_fallback() {
 }
 
 #[test]
+fn ipc_overloads_retain_every_possible_handler() {
+    let (program, pag, analysis) = build("ipc_overloads");
+    let proxy_methods: HashSet<_> = program
+        .symbols
+        .functions
+        .iter()
+        .filter(|f| f.is_defined && f.name == "OverloadProxy::Run")
+        .map(|f| f.id)
+        .collect();
+    let stub_handlers: HashSet<_> = program
+        .symbols
+        .functions
+        .iter()
+        .filter(|f| f.is_defined && f.name == "OverloadStub::Run")
+        .map(|f| f.id)
+        .collect();
+
+    assert_eq!(
+        proxy_methods.len(),
+        2,
+        "both proxy overloads must be indexed"
+    );
+    assert_eq!(
+        stub_handlers.len(),
+        2,
+        "both stub overloads must be indexed"
+    );
+
+    let bridge_pairs: HashSet<_> = pag
+        .ipc_bridges
+        .iter()
+        .filter(|bridge| proxy_methods.contains(&bridge.proxy_method))
+        .map(|bridge| (bridge.proxy_method, bridge.stub_handler))
+        .collect();
+    let expected_pairs: HashSet<_> = proxy_methods
+        .iter()
+        .flat_map(|proxy| stub_handlers.iter().map(move |handler| (*proxy, *handler)))
+        .collect();
+    assert_eq!(bridge_pairs, expected_pairs);
+
+    let ipc_edge_pairs: HashSet<_> = analysis
+        .call_edges
+        .iter()
+        .filter(|edge| {
+            edge.resolution == ResolutionKind::IpcBridge && proxy_methods.contains(&edge.caller)
+        })
+        .map(|edge| (edge.caller, edge.callee))
+        .collect();
+    assert_eq!(ipc_edge_pairs, expected_pairs);
+
+    let downstream: HashSet<_> = analysis
+        .call_edges
+        .iter()
+        .filter(|edge| stub_handlers.contains(&edge.caller))
+        .map(|edge| fn_name(&program, edge.callee))
+        .collect();
+    assert_eq!(
+        downstream,
+        HashSet::from(["HandleInt".to_string(), "HandleDouble".to_string()])
+    );
+}
+
+#[test]
 fn no_ipc_bridges_without_proxy_stub_pair() {
     // A fixture with no *Proxy/*Stub classes should produce no bridges.
     let (_program, pag, _analysis) = build("direct_call");
@@ -197,11 +261,12 @@ fn no_ipc_bridges_without_proxy_stub_pair() {
 }
 
 #[test]
-fn ipc_interface_fallback_no_handler_methods() {
+fn ipc_interface_fallback_prefers_defined_overrides() {
     // Stub with no handler method bodies — OnRemoteRequest calls inherited
-    // interface methods directly. The fallback should detect bridges to
-    // the interface methods (even though they are external).
-    let (program, pag, _analysis) = build("ipc_interface_fallback");
+    // interface methods directly. When a derived concrete server is indexed,
+    // the fallback should bridge to its method bodies rather than dead-end at
+    // the external interface declarations.
+    let (program, pag, analysis) = build("ipc_interface_fallback");
 
     let bridge_names: Vec<_> = pag
         .ipc_bridges
@@ -217,15 +282,15 @@ fn ipc_interface_fallback_no_handler_methods() {
     assert!(
         bridge_names
             .iter()
-            .any(|(p, s)| p == "QueryResultProxy::HasNext" && s == "IQueryResult::HasNext"),
-        "expected HasNext → IQueryResult::HasNext bridge, got: {:?}",
+            .any(|(p, s)| p == "QueryResultProxy::HasNext" && s == "QueryResultService::HasNext"),
+        "expected HasNext → QueryResultService::HasNext bridge, got: {:?}",
         bridge_names
     );
     assert!(
         bridge_names
             .iter()
-            .any(|(p, s)| p == "QueryResultProxy::GetNext" && s == "IQueryResult::GetNext"),
-        "expected GetNext → IQueryResult::GetNext bridge, got: {:?}",
+            .any(|(p, s)| p == "QueryResultProxy::GetNext" && s == "QueryResultService::GetNext"),
+        "expected GetNext → QueryResultService::GetNext bridge, got: {:?}",
         bridge_names
     );
     assert_eq!(pag.ipc_bridges.len(), 2);
@@ -233,26 +298,57 @@ fn ipc_interface_fallback_no_handler_methods() {
         !bridge_names.iter().any(|(_, s)| s.starts_with("Other::")),
         "interface fallback must stay in the stub namespace: {bridge_names:?}"
     );
+    assert!(
+        !bridge_names
+            .iter()
+            .any(|(p, _)| p == "ConstructorOnlyProxy::Ping"),
+        "constructor-only classes must not register as IPC stubs: {bridge_names:?}"
+    );
+
+    let downstream: HashSet<_> = analysis
+        .call_edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                fn_name(&program, edge.caller).as_str(),
+                "QueryResultService::HasNext" | "QueryResultService::GetNext"
+            )
+        })
+        .map(|edge| fn_name(&program, edge.callee))
+        .collect();
+    assert_eq!(
+        downstream,
+        HashSet::from(["HasNextImpl".to_string(), "GetNextImpl".to_string()])
+    );
 }
 
 #[test]
 fn ipc_bridge_export_has_no_call_site_and_keeps_its_caller() {
+    type IpcRow = (Option<i64>, Option<i64>, String, String, String);
+
     let (program, pag, analysis) = build("ipc_basic");
     let db = common::export_program(&program, &pag, &analysis);
     let conn = trace_db::open_db(db.path()).expect("open exported database");
 
-    let rows: Vec<(Option<i64>, String, String, String)> = {
+    let rows: Vec<IpcRow> = {
         let mut stmt = conn
             .prepare(
-                "SELECT ce.call_site_id, caller.name, callee.name, ce.resolution \
+                "SELECT ce.call_site_id, cs.line, caller.name, callee.name, ce.resolution \
                  FROM call_edges ce \
+                 LEFT JOIN call_sites cs ON cs.id = ce.call_site_id \
                  JOIN functions caller ON caller.id = ce.caller_fn_id \
                  JOIN functions callee ON callee.id = ce.callee_fn_id \
                  WHERE ce.resolution = 'ipc' ORDER BY caller.name, callee.name",
             )
             .expect("prepare IPC edge query");
         stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })
         .expect("query IPC edges")
         .collect::<Result<_, _>>()
@@ -260,10 +356,10 @@ fn ipc_bridge_export_has_no_call_site_and_keeps_its_caller() {
     };
 
     assert_eq!(rows.len(), 2);
-    assert!(rows
-        .iter()
-        .all(|(site, _, _, resolution)| { site.is_none() && resolution == "ipc" }));
-    assert!(rows.iter().any(|(_, caller, callee, _)| {
+    assert!(rows.iter().all(|(site, line, _, _, resolution)| {
+        site.is_none() && line.is_none() && resolution == "ipc"
+    }));
+    assert!(rows.iter().any(|(_, _, caller, callee, _)| {
         caller == "IFooProxy::GetInfo" && callee == "IFooStub::HandleGetInfo"
     }));
 }
@@ -280,13 +376,14 @@ fn ipc_disabled_via_options() {
         .with_include(include_dir);
     let program = build_program(&root, &opts).expect("build program");
 
-    let (_pag, analysis) = analyze_with_options(
+    let (pag, analysis) = analyze_with_options(
         &program,
         AnalyzeOptions {
             enable_ipc: false,
             ..Default::default()
         },
     );
+    assert!(pag.ipc_bridges.is_empty());
     let has_bridge = analysis.call_edges.iter().any(|e| {
         e.resolution == ResolutionKind::IpcBridge
             && fn_name(&program, e.caller) == "IFooProxy::GetInfo"

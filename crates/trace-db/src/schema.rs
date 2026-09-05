@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS diagnostics (
 );
 
 CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_fn_id);
+CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_fn_id);
 CREATE INDEX IF NOT EXISTS idx_call_edges_callsite ON call_edges(call_site_id);
 CREATE INDEX IF NOT EXISTS idx_arg_flow_callsite ON arg_flow_edges(call_site_id);
 CREATE INDEX IF NOT EXISTS idx_functions_name ON functions(name);

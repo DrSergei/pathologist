@@ -76,6 +76,14 @@ impl Pag {
     }
 
     pub fn build_with_models(program: &Program, models: &FnModelSet) -> Self {
+        Self::build_with_models_and_ipc(program, models, true)
+    }
+
+    pub(crate) fn build_with_models_and_ipc(
+        program: &Program,
+        models: &FnModelSet,
+        enable_ipc: bool,
+    ) -> Self {
         let mut pag = Self::default();
         pag.build_variables(program);
         pag.build_function_locations(program);
@@ -83,7 +91,9 @@ impl Pag {
         pag.build_dlsym_constraints(program, models);
         pag.build_call_constraints(program);
         pag.build_indices(program);
-        pag.ipc_bridges = detect_ipc_pairs(program);
+        if enable_ipc {
+            pag.ipc_bridges = detect_ipc_pairs(program);
+        }
         pag
     }
 

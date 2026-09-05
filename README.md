@@ -531,8 +531,8 @@ including translation unit); one row per distinct `(file, line, message)`.
 ```sql
 SELECT callee.name, ce.resolution, cs.line, cs.callee_text
 FROM call_edges ce
-JOIN call_sites cs ON cs.id = ce.call_site_id
-JOIN functions caller ON caller.id = cs.caller_fn_id
+LEFT JOIN call_sites cs ON cs.id = ce.call_site_id
+JOIN functions caller ON caller.id = ce.caller_fn_id
 JOIN functions callee ON callee.id = ce.callee_fn_id
 WHERE caller.name = 'HdfSbufReadBuffer';
 ```
@@ -554,7 +554,7 @@ ORDER BY caller.name, cs.line;
 SELECT caller.name, callee.name, cs.line
 FROM call_edges ce
 JOIN call_sites cs ON cs.id = ce.call_site_id
-JOIN functions caller ON caller.id = cs.caller_fn_id
+JOIN functions caller ON caller.id = ce.caller_fn_id
 JOIN functions callee ON callee.id = ce.callee_fn_id
 WHERE ce.resolution = 'indirect'
   AND cs.callee_text LIKE '%readBuffer%';
@@ -565,8 +565,8 @@ WHERE ce.resolution = 'indirect'
 ```sql
 SELECT caller.name, ce.resolution, cs.line
 FROM call_edges ce
-JOIN call_sites cs ON cs.id = ce.call_site_id
-JOIN functions caller ON caller.id = cs.caller_fn_id
+LEFT JOIN call_sites cs ON cs.id = ce.call_site_id
+JOIN functions caller ON caller.id = ce.caller_fn_id
 JOIN functions callee ON callee.id = ce.callee_fn_id
 WHERE callee.name = 'LiteNetSetIpAddr';
 ```

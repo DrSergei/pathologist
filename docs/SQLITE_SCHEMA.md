@@ -124,7 +124,8 @@ must use `ce.caller_fn_id`, not `cs.caller_fn_id`, and treat `NULL` as a
 synthetic/bridge edge with no source location. IPC detection is enabled by
 default and disabled with the `--no-ipc` analyze flag.
 
-**Indexes:** `call_edges(callee_fn_id)`, `call_edges(call_site_id)`
+**Indexes:** `call_edges(caller_fn_id)`, `call_edges(callee_fn_id)`,
+`call_edges(call_site_id)`
 
 ### arg_flow_edges
 
@@ -258,8 +259,8 @@ in <path>`, `file_id` NULL). See `docs/PREPROCESSOR.md`, "Error recovery".
 ```sql
 SELECT callee.name, ce.resolution, cs.line, cs.callee_text
 FROM call_edges ce
-JOIN call_sites cs ON cs.id = ce.call_site_id
-JOIN functions caller ON caller.id = cs.caller_fn_id
+LEFT JOIN call_sites cs ON cs.id = ce.call_site_id
+JOIN functions caller ON caller.id = ce.caller_fn_id
 JOIN functions callee ON callee.id = ce.callee_fn_id
 WHERE caller.name = 'HdfSbufReadBuffer';
 ```
@@ -281,7 +282,7 @@ ORDER BY caller.name, cs.line;
 SELECT caller.name, callee.name, cs.callee_text, cs.line
 FROM call_edges ce
 JOIN call_sites cs ON cs.id = ce.call_site_id
-JOIN functions caller ON caller.id = cs.caller_fn_id
+JOIN functions caller ON caller.id = ce.caller_fn_id
 JOIN functions callee ON callee.id = ce.callee_fn_id
 WHERE ce.resolution = 'indirect';
 ```
@@ -291,8 +292,8 @@ WHERE ce.resolution = 'indirect';
 ```sql
 SELECT caller.name, ce.resolution, cs.line
 FROM call_edges ce
-JOIN call_sites cs ON cs.id = ce.call_site_id
-JOIN functions caller ON caller.id = cs.caller_fn_id
+LEFT JOIN call_sites cs ON cs.id = ce.call_site_id
+JOIN functions caller ON caller.id = ce.caller_fn_id
 JOIN functions callee ON callee.id = ce.callee_fn_id
 WHERE callee.name = 'LiteNetSetIpAddr';
 ```
@@ -327,7 +328,8 @@ trace inspect graph.db callgraph --file SUBSTR --line N [--depth N] [--direction
 trace inspect graph.db dataflow --file SUBSTR --line N --col C [--depth N] [--direction down|up]
 ```
 
-- `calls` lists rows from `call_edges` joined with `call_sites` / `functions`.
+- `calls` lists rows from `call_edges` joined with `functions` and left-joined
+  with `call_sites` (synthetic IPC edges have no call site).
   `--from` / `--to` match an exact `functions.name` or a C++ suffix (`%::FN`
   with `_`/`%` in `FN` escaped so they are not `LIKE` wildcards).
   Unresolved indirect sites require SQL (query above).
