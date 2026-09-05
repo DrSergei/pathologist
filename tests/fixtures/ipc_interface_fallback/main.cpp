@@ -130,6 +130,42 @@ int WrappedProxy::Fetch() {
 }
 }
 
+// A relative qualified argument also resolves from the stub's declaration
+// namespace. The global api::IRelative is deliberately unrelated.
+namespace api {
+class IRelative {
+public:
+    virtual int Run() = 0;
+};
+}
+
+namespace svc {
+namespace api {
+class IRelative {
+public:
+    virtual int Run() = 0;
+};
+}
+
+class RelativeStub : public OHOS::IRemoteStub<api::IRelative> {
+public:
+    int OnRemoteRequest(int code, void *data, void *reply, void *option) {
+        return Run();
+    }
+};
+
+class RelativeProxy {
+public:
+    int Run();
+};
+
+int RelativeProxy::Run() {
+    IRemoteObject *remote = Remote();
+    remote->SendRequest(6, nullptr, nullptr, nullptr);
+    return 0;
+}
+}
+
 // A default implementation on the interface is a reachable handler too.
 // It must not be discarded just because it is defined on an ancestor rather
 // than an override below the stub.

@@ -277,6 +277,15 @@ fn ipc_interface_fallback_prefers_defined_overrides() {
         "expected templated inheritance to survive lowering and merge, got: {:?}",
         program.template_bases
     );
+    assert!(
+        program.template_bases.iter().any(|fact| {
+            fact.derived == "svc::RelativeStub"
+                && fact.spelling == "OHOS::IRemoteStub<api::IRelative>"
+                && fact.declaration_scope == "svc"
+        }),
+        "expected relative qualified template argument and scope, got: {:?}",
+        program.template_bases
+    );
 
     let bridge_names: Vec<_> = pag
         .ipc_bridges
@@ -319,11 +328,21 @@ fn ipc_interface_fallback_prefers_defined_overrides() {
     assert!(
         bridge_names
             .iter()
+            .any(|(p, s)| { p == "svc::RelativeProxy::Run" && s == "svc::api::IRelative::Run" }),
+        "expected relative qualified interface fallback, got: {bridge_names:?}"
+    );
+    assert!(
+        !bridge_names.iter().any(|(_, s)| s == "api::IRelative::Run"),
+        "relative qualified argument must prefer the nearest declaration scope: {bridge_names:?}"
+    );
+    assert!(
+        bridge_names
+            .iter()
             .any(|(p, s)| p == "DefaultProxy::Run" && s == "IDefault::Run"),
         "expected defined ancestor fallback, got: {:?}",
         bridge_names
     );
-    assert_eq!(pag.ipc_bridges.len(), 4);
+    assert_eq!(pag.ipc_bridges.len(), 5);
     assert!(
         !bridge_names.iter().any(|(_, s)| s.starts_with("Other::")),
         "interface fallback must stay in the stub namespace: {bridge_names:?}"

@@ -15,7 +15,7 @@
 //!   method name correspondence (e.g. `FooProxy::Bar` → `FooStub::Bar`).
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use trace_ir::{FnId, IpcBridge, Program};
+use trace_ir::{FnId, IpcBridge, Program, TypeKind};
 
 /// `(qualified_class_name, handler FnIds)` for each detected stub class.
 type StubClasses = Vec<(String, Vec<FnId>)>;
@@ -227,8 +227,15 @@ fn find_interface_methods(program: &Program, stub_class: &str, method_name: &str
             }
         }
         for template_base in program.template_bases_of(&class) {
-            if let Some(interface) =
-                remote_stub_interface(&template_base.spelling, &template_base.declaration_scope)
+            let candidates = remote_stub_interface_candidates(
+                &template_base.spelling,
+                &template_base.declaration_scope,
+            );
+            if let Some(interface) = candidates
+                .iter()
+                .find(|candidate| interface_class_exists(program, candidate))
+                .or_else(|| candidates.first())
+                .cloned()
             {
                 if interface_classes.insert(interface.clone()) {
                     pending.push(interface);
@@ -255,15 +262,18 @@ fn find_interface_methods(program: &Program, stub_class: &str, method_name: &str
 }
 
 /// Recover the interface argument from an exact `IRemoteStub<Interface>`
-/// base spelling. Unqualified arguments resolve in the derived class's
-/// declaration scope, independently of the wrapper's qualification. Nested
-/// templates in the first argument are preserved; any later template
-/// arguments are ignored because v1 only needs the interface.
-fn remote_stub_interface(template_base: &str, declaration_scope: &str) -> Option<String> {
-    let open = template_base.find('<')?;
+/// base spelling, ordered by C++ lexical lookup preference. Relative names,
+/// including `api::IFoo`, search from the derived class's declaration scope
+/// outward; only a leading `::` forces global lookup. The wrapper's own
+/// qualification does not affect the argument. Nested templates in the first
+/// argument are preserved; later template arguments are ignored.
+fn remote_stub_interface_candidates(template_base: &str, declaration_scope: &str) -> Vec<String> {
+    let Some(open) = template_base.find('<') else {
+        return Vec::new();
+    };
     let wrapper = template_base[..open].trim();
     if wrapper.rsplit("::").next() != Some("IRemoteStub") {
-        return None;
+        return Vec::new();
     }
 
     let mut depth = 0_u32;
@@ -283,20 +293,54 @@ fn remote_stub_interface(template_base: &str, declaration_scope: &str) -> Option
             _ => {}
         }
     }
-    let interface = template_base[open + 1..end?].trim();
+    let Some(end) = end else {
+        return Vec::new();
+    };
+    let interface = template_base[open + 1..end].trim();
     if interface.is_empty() {
-        return None;
+        return Vec::new();
     }
     if let Some(global) = interface.strip_prefix("::") {
-        return Some(global.to_string());
+        return vec![global.to_string()];
     }
-    if interface.contains("::") {
-        return Some(interface.to_string());
+
+    let scope_segments: Vec<&str> = declaration_scope
+        .split("::")
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let mut candidates = Vec::with_capacity(scope_segments.len() + 1);
+    for len in (0..=scope_segments.len()).rev() {
+        let candidate = if len == 0 {
+            interface.to_string()
+        } else {
+            format!("{}::{interface}", scope_segments[..len].join("::"))
+        };
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
     }
-    if declaration_scope.is_empty() {
-        return Some(interface.to_string());
-    }
-    Some(format!("{declaration_scope}::{interface}"))
+    candidates
+}
+
+/// Whether a lexical interface candidate is represented in the merged IR.
+/// Types are the primary signal; the other facts keep recovery working for
+/// incomplete/error-tolerant parses where a method or inheritance edge
+/// survived but the class tag did not.
+fn interface_class_exists(program: &Program, class: &str) -> bool {
+    program
+        .types
+        .type_id_by_tag(class, TypeKind::Struct)
+        .is_some()
+        || program.symbols.functions.iter().any(|function| {
+            function
+                .name
+                .rsplit_once("::")
+                .is_some_and(|(owner, _)| owner == class)
+        })
+        || program
+            .inheritance
+            .iter()
+            .any(|(derived, base)| derived == class || base == class)
 }
 
 fn is_stub_class(class: &str) -> bool {
@@ -383,20 +427,26 @@ mod tests {
     }
 
     #[test]
-    fn remote_stub_template_preserves_qualified_interface() {
+    fn remote_stub_template_uses_lexical_interface_candidates() {
         assert_eq!(
-            remote_stub_interface("OHOS::IRemoteStub<IFoo>", "svc"),
-            Some("svc::IFoo".to_string())
+            remote_stub_interface_candidates("OHOS::IRemoteStub<IFoo>", "outer::svc"),
+            vec!["outer::svc::IFoo", "outer::IFoo", "IFoo"]
         );
         assert_eq!(
-            remote_stub_interface("OHOS::IRemoteStub<::api::IFoo, Policy>", "svc"),
-            Some("api::IFoo".to_string())
+            remote_stub_interface_candidates("OHOS::IRemoteStub<api::IFoo, Policy>", "outer::svc"),
+            vec!["outer::svc::api::IFoo", "outer::api::IFoo", "api::IFoo"]
         );
         assert_eq!(
-            remote_stub_interface("OHOS::IRemoteStub<api::IFoo, Policy>", "svc"),
-            Some("api::IFoo".to_string())
+            remote_stub_interface_candidates(
+                "OHOS::IRemoteStub<::api::IFoo, Policy>",
+                "outer::svc"
+            ),
+            vec!["api::IFoo"]
         );
-        assert_eq!(remote_stub_interface("svc::Wrapper<IFoo>", "svc"), None);
+        assert_eq!(
+            remote_stub_interface_candidates("svc::Wrapper<IFoo>", "svc"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

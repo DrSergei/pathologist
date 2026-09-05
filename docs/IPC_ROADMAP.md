@@ -412,6 +412,9 @@ argument preserved from an exact `IRemoteStub<IFoo>` base; the outer template
 base remains in the ordinary inheritance graph for CHA. The argument and the
 wrapper are resolved independently: in `svc::FooStub :
 OHOS::IRemoteStub<IFoo>`, the argument is `svc::IFoo`, not `OHOS::IFoo`.
+Relative qualified arguments use the same lexical search: in
+`svc::FooStub : OHOS::IRemoteStub<api::IFoo>`, `svc::api::IFoo` is tried
+before `::api::IFoo`; a leading `::` is required to force the latter.
 Using recorded inheritance rather than namespace/name similarity prevents
 unrelated same-namespace declarations from becoming bridge targets.
 
@@ -420,7 +423,8 @@ unrelated same-namespace declarations from becoming bridge targets.
 Lowering preserves templated inheritance in
 `Program.template_bases: Vec<TemplateBase>` (`trace-ir/src/program.rs`). Each
 fact carries the derived class, base spelling, and declaration namespace so
-analysis can resolve an unqualified interface argument in the correct scope.
+analysis can resolve relative interface arguments in the correct lexical
+scope.
 The ordinary `Program.inheritance` edge continues to use the bare outer
 template name for CHA.
 
