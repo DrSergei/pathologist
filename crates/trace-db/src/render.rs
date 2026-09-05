@@ -361,6 +361,8 @@ mod tests {
                 id: 1,
                 label: "main".into(),
                 detail: "main.c:1".into(),
+                kind: None,
+                loc_kind: None,
             },
         );
         g.nodes.insert(
@@ -369,6 +371,8 @@ mod tests {
                 id: 2,
                 label: "target".into(),
                 detail: "target.c:5".into(),
+                kind: None,
+                loc_kind: None,
             },
         );
         g.order.push((1, 0));
@@ -378,6 +382,9 @@ mod tests {
             to: 2,
             label: "indirect".into(),
             site: "target.c:5".into(),
+            path: "/proj/target.c".into(),
+            line: 5,
+            col: 2,
         });
         g
     }
@@ -413,6 +420,9 @@ mod tests {
             to: 1,
             label: "direct".into(),
             site: String::new(),
+            path: String::new(),
+            line: 0,
+            col: 0,
         });
         let out = render_graph(&g, RenderFormat::Text, &meta(), &mut label);
         assert!(out.contains("  -direct-> fn1 (see above)"), "{out}");
@@ -480,6 +490,8 @@ mod tests {
                 id: 3,
                 label: "a\"b\\c&d|e".into(),
                 detail: String::new(),
+                kind: Some(crate::inspect::FlowNodeKind::Loc),
+                loc_kind: Some(trace_analysis::LocKind::Heap),
             },
         );
         g.order.push((3, 2));
@@ -488,6 +500,9 @@ mod tests {
             to: 3,
             label: "copy".into(),
             site: "x\"y".into(),
+            path: String::new(),
+            line: 0,
+            col: 0,
         });
         let mut node_label = |id: i64, out: &mut String| {
             out.push_str(&g.nodes.get(&id).unwrap().label.clone());
