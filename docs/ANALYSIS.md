@@ -204,8 +204,10 @@ deriving from that stub are preferred; otherwise matching methods on the
 stub's transitive interface bases are retained, including default method
 bodies and bodyless declarations. Interface bases are recovered from both
 ordinary inheritance and the interface argument of an exact
-`IRemoteStub<IFoo>` base. Bodyless methods are intentionally leaf targets when
-no implementation is indexed.
+`IRemoteStub<IFoo>` base. An unqualified interface argument is resolved in the
+stub declaration namespace, independently of a qualified wrapper namespace.
+Bodyless methods are intentionally leaf targets when no implementation is
+indexed.
 The edge has resolution `ipc` and no source call site, and can be disabled
 with `--no-ipc`.
 Because v1 has no opcode or parcel-type information, overloaded handlers at

@@ -409,11 +409,22 @@ This includes inherited default method bodies, preserving their downstream
 calls, as well as bodyless declarations that end at a leaf in call-graph
 reachability. Interface bases include ordinary inheritance and the interface
 argument preserved from an exact `IRemoteStub<IFoo>` base; the outer template
-base remains in the ordinary inheritance graph for CHA. Using recorded
-inheritance rather than namespace/name similarity prevents unrelated
-same-namespace declarations from becoming bridge targets.
+base remains in the ordinary inheritance graph for CHA. The argument and the
+wrapper are resolved independently: in `svc::FooStub :
+OHOS::IRemoteStub<IFoo>`, the argument is `svc::IFoo`, not `OHOS::IFoo`.
+Using recorded inheritance rather than namespace/name similarity prevents
+unrelated same-namespace declarations from becoming bridge targets.
 
-#### New IR structures (in `trace-ir/src/ipc.rs`)
+#### IR structures
+
+Lowering preserves templated inheritance in
+`Program.template_bases: Vec<TemplateBase>` (`trace-ir/src/program.rs`). Each
+fact carries the derived class, base spelling, and declaration namespace so
+analysis can resolve an unqualified interface argument in the correct scope.
+The ordinary `Program.inheritance` edge continues to use the bare outer
+template name for CHA.
+
+Detected bridges use `trace-ir/src/ipc.rs`:
 
 ```rust
 /// A matched proxy→stub IPC bridge (proxy method → stub handler).

@@ -91,18 +91,27 @@ int QueryResultProxy::GetNext() {
     return 0;
 }
 
-// Template-wrapper inheritance used by OpenHarmony stubs. The ordinary
-// inheritance graph contains WrappedStub -> IRemoteStub, while IPC detection
-// must also preserve and recover the IWrapped template argument.
+// Template-wrapper inheritance used by OpenHarmony stubs. The wrapper and
+// stub deliberately live in different namespaces: the unqualified IWrapped
+// argument resolves where WrappedStub is declared, not in OHOS.
+namespace OHOS {
 template <typename Interface>
 class IRemoteStub : public Interface {};
 
+// An unrelated interface with the same simple name must not be selected.
+class IWrapped {
+public:
+    virtual int Fetch() = 0;
+};
+}
+
+namespace svc {
 class IWrapped {
 public:
     virtual int Fetch() = 0;
 };
 
-class WrappedStub : public IRemoteStub<IWrapped> {
+class WrappedStub : public OHOS::IRemoteStub<IWrapped> {
 public:
     int OnRemoteRequest(int code, void *data, void *reply, void *option) {
         return Fetch();
@@ -118,6 +127,7 @@ int WrappedProxy::Fetch() {
     IRemoteObject *remote = Remote();
     remote->SendRequest(4, nullptr, nullptr, nullptr);
     return 0;
+}
 }
 
 // A default implementation on the interface is a reachable handler too.

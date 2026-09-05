@@ -113,6 +113,15 @@ struct ClassCtx {
 }
 
 impl LowerContext {
+    fn namespace_scope(&self) -> String {
+        self.ns_stack
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("::")
+    }
+
     fn qualify(&self, name: &str) -> String {
         let mut parts: Vec<String> = self.ns_stack.iter().flatten().cloned().collect();
         parts.push(name.to_string());
@@ -1616,7 +1625,7 @@ fn lower_struct_specifier(
                         } else {
                             ctx.qualify(&template_spelling)
                         };
-                        program.add_template_base(&derived, &qualified);
+                        program.add_template_base(&derived, &qualified, &ctx.namespace_scope());
                     }
                     let raw = normalize_qualified(base_text);
                     let base = strip_template_args(&raw);

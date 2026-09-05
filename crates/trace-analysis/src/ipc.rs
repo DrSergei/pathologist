@@ -227,7 +227,9 @@ fn find_interface_methods(program: &Program, stub_class: &str, method_name: &str
             }
         }
         for template_base in program.template_bases_of(&class) {
-            if let Some(interface) = remote_stub_interface(&template_base) {
+            if let Some(interface) =
+                remote_stub_interface(&template_base.spelling, &template_base.declaration_scope)
+            {
                 if interface_classes.insert(interface.clone()) {
                     pending.push(interface);
                 }
@@ -253,9 +255,11 @@ fn find_interface_methods(program: &Program, stub_class: &str, method_name: &str
 }
 
 /// Recover the interface argument from an exact `IRemoteStub<Interface>`
-/// base spelling. Nested templates in the first argument are preserved; any
-/// later template arguments are ignored because v1 only needs the interface.
-fn remote_stub_interface(template_base: &str) -> Option<String> {
+/// base spelling. Unqualified arguments resolve in the derived class's
+/// declaration scope, independently of the wrapper's qualification. Nested
+/// templates in the first argument are preserved; any later template
+/// arguments are ignored because v1 only needs the interface.
+fn remote_stub_interface(template_base: &str, declaration_scope: &str) -> Option<String> {
     let open = template_base.find('<')?;
     let wrapper = template_base[..open].trim();
     if wrapper.rsplit("::").next() != Some("IRemoteStub") {
@@ -283,15 +287,16 @@ fn remote_stub_interface(template_base: &str) -> Option<String> {
     if interface.is_empty() {
         return None;
     }
-    if interface.contains("::") {
-        return Some(interface.trim_start_matches("::").to_string());
+    if let Some(global) = interface.strip_prefix("::") {
+        return Some(global.to_string());
     }
-    Some(
-        wrapper
-            .rsplit_once("::")
-            .map(|(namespace, _)| format!("{namespace}::{interface}"))
-            .unwrap_or_else(|| interface.to_string()),
-    )
+    if interface.contains("::") {
+        return Some(interface.to_string());
+    }
+    if declaration_scope.is_empty() {
+        return Some(interface.to_string());
+    }
+    Some(format!("{declaration_scope}::{interface}"))
 }
 
 fn is_stub_class(class: &str) -> bool {
@@ -380,14 +385,18 @@ mod tests {
     #[test]
     fn remote_stub_template_preserves_qualified_interface() {
         assert_eq!(
-            remote_stub_interface("svc::IRemoteStub<IFoo>"),
+            remote_stub_interface("OHOS::IRemoteStub<IFoo>", "svc"),
             Some("svc::IFoo".to_string())
         );
         assert_eq!(
-            remote_stub_interface("svc::IRemoteStub<api::IFoo, Policy>"),
+            remote_stub_interface("OHOS::IRemoteStub<::api::IFoo, Policy>", "svc"),
             Some("api::IFoo".to_string())
         );
-        assert_eq!(remote_stub_interface("svc::Wrapper<IFoo>"), None);
+        assert_eq!(
+            remote_stub_interface("OHOS::IRemoteStub<api::IFoo, Policy>", "svc"),
+            Some("api::IFoo".to_string())
+        );
+        assert_eq!(remote_stub_interface("svc::Wrapper<IFoo>", "svc"), None);
     }
 
     #[test]

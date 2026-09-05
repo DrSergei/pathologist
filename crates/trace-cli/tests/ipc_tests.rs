@@ -269,10 +269,11 @@ fn ipc_interface_fallback_prefers_defined_overrides() {
     let (program, pag, analysis) = build("ipc_interface_fallback");
 
     assert!(
-        program
-            .template_bases
-            .iter()
-            .any(|(derived, base)| { derived == "WrappedStub" && base == "IRemoteStub<IWrapped>" }),
+        program.template_bases.iter().any(|fact| {
+            fact.derived == "svc::WrappedStub"
+                && fact.spelling == "OHOS::IRemoteStub<IWrapped>"
+                && fact.declaration_scope == "svc"
+        }),
         "expected templated inheritance to survive lowering and merge, got: {:?}",
         program.template_bases
     );
@@ -305,9 +306,15 @@ fn ipc_interface_fallback_prefers_defined_overrides() {
     assert!(
         bridge_names
             .iter()
-            .any(|(p, s)| p == "WrappedProxy::Fetch" && s == "IWrapped::Fetch"),
+            .any(|(p, s)| p == "svc::WrappedProxy::Fetch" && s == "svc::IWrapped::Fetch"),
         "expected template-base interface fallback, got: {:?}",
         bridge_names
+    );
+    assert!(
+        !bridge_names
+            .iter()
+            .any(|(_, s)| s == "OHOS::IWrapped::Fetch"),
+        "template argument must resolve in the stub declaration scope: {bridge_names:?}"
     );
     assert!(
         bridge_names

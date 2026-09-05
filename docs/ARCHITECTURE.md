@@ -88,6 +88,8 @@ After merge, `Program` contains:
 | `fn_returns` | Per-function return-value summaries (`ReturnFlow`) |
 | `diagnostics` | Preprocess and parse diagnostics (stage, severity, file, line) |
 | `include_deps` | `#include` edges for debugging |
+| `inheritance` | Qualified C++ `(derived, base)` facts used by CHA |
+| `template_bases` | Templated base spellings plus the derived class declaration scope, preserved for consumers that interpret template arguments |
 
 Lowering (`trace-parse/src/lower.rs`) walks tree-sitter ASTs and emits **flow constraints** — not a full statement-level CFG.
 
