@@ -201,11 +201,14 @@ handler. Classes are paired by their qualified `*Proxy`/`*Client` and `*Stub`
 names; methods match exactly, with `HandleX` and `XStub` handler fallbacks.
 For a stub with interface-only declarations, defined overrides in classes
 deriving from that stub are preferred; otherwise bodyless interface methods
-are matched within the stub's namespace. The latter are intentionally leaf
-targets when no concrete server implementation is indexed. The edge has
-resolution `ipc` and no source call site, and can be disabled with `--no-ipc`.
+are matched only on the stub's transitive base classes. The latter are
+intentionally leaf targets when no concrete server implementation is indexed.
+The edge has resolution `ipc` and no source call site, and can be disabled
+with `--no-ipc`.
 Because v1 has no opcode or parcel-type information, overloaded handlers at
-the selected naming tier are all retained as a may-analysis result.
+the selected naming tier are all retained as a may-analysis result. With `m`
+proxy overloads and `n` handler overloads this deliberately emits the full
+`m × n` cross-product, so IPC edge counts can grow for overloaded interfaces.
 
 This is deliberately name-based and does not interpret transaction opcodes or
 control flow in `OnRemoteRequest`. Synthetic IPC edges are appended after the

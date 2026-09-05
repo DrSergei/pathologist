@@ -208,10 +208,16 @@ fn find_interface_methods(program: &Program, stub_class: &str, method_name: &str
         return concrete;
     }
 
-    // The stub base is the class name with "Stub" stripped,
-    // e.g. `OHOS::HiviewDFX::FaultLogQueryResultStub` → `FaultLogQueryResult`.
-    let stub_base = stub_class.strip_suffix("Stub").unwrap_or(stub_class);
-    let (stub_namespace, stub_simple) = stub_base.rsplit_once("::").unwrap_or(("", stub_base));
+    // Restrict bodyless fallbacks to actual base classes of the stub. A
+    // namespace/name heuristic can otherwise select an unrelated external
+    // class that happens to expose the same method.
+    let mut interface_classes = FxHashSet::default();
+    let mut pending = program.bases_of(stub_class);
+    while let Some(class) = pending.pop() {
+        if interface_classes.insert(class.clone()) {
+            pending.extend(program.bases_of(&class));
+        }
+    }
 
     program
         .symbols
@@ -220,20 +226,7 @@ fn find_interface_methods(program: &Program, stub_class: &str, method_name: &str
         .filter(|f| {
             !f.is_defined && f.name.ends_with(&format!("::{method_name}")) && {
                 let class_part = f.name.rsplit_once("::").map(|(c, _)| c).unwrap_or("");
-                if class_part == stub_class {
-                    false
-                } else {
-                    // Strip leading 'I' from the interface class name to get
-                    // the base name, e.g. `IFaultLogQueryResult` → `FaultLogQueryResult`.
-                    let (iface_namespace, iface_simple) =
-                        class_part.rsplit_once("::").unwrap_or(("", class_part));
-                    let iface_base = iface_simple.strip_prefix('I').unwrap_or(iface_simple);
-                    // Match when the base names coincide, e.g.
-                    // `FaultLogQueryResult` == `FaultLogQueryResult`.
-                    !iface_base.is_empty()
-                        && iface_namespace == stub_namespace
-                        && (iface_simple == stub_simple || iface_base == stub_simple)
-                }
+                interface_classes.contains(class_part)
             }
         })
         .map(|f| f.id)
@@ -307,7 +300,9 @@ mod tests {
             .add_file(PathBuf::from("/fixture/interface.cpp"));
         let first = add_external_method(&mut program, file, "svc::IFoo::Run");
         let second = add_external_method(&mut program, file, "svc::IFoo::Run");
+        add_external_method(&mut program, file, "svc::Foo::Run");
         add_external_method(&mut program, file, "other::IFoo::Run");
+        program.add_inheritance("svc::FooStub", "svc::IFoo");
 
         let handlers = find_interface_methods(&program, "svc::FooStub", "Run");
 

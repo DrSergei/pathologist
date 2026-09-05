@@ -21,6 +21,14 @@ public:
 };
 }
 
+// Same namespace and matching class/method spelling, but not a base of the
+// stub. The fallback must not bridge to it.
+class QueryResult {
+public:
+    virtual bool HasNext() = 0;
+    virtual int GetNext() = 0;
+};
+
 // Interface: IPC methods (declared, no body — external in symbol table).
 class IQueryResult {
 public:

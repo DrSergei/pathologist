@@ -301,6 +301,12 @@ fn ipc_interface_fallback_prefers_defined_overrides() {
     assert!(
         !bridge_names
             .iter()
+            .any(|(_, s)| s.starts_with("QueryResult::")),
+        "interface fallback must follow inheritance, not name similarity: {bridge_names:?}"
+    );
+    assert!(
+        !bridge_names
+            .iter()
             .any(|(p, _)| p == "ConstructorOnlyProxy::Ping"),
         "constructor-only classes must not register as IPC stubs: {bridge_names:?}"
     );

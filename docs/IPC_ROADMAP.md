@@ -397,12 +397,16 @@ containing `SendRequest`).
 
 All overloads at the first matching naming tier are retained. Without opcode
 or parcel-type analysis v1 cannot choose among them, so keeping the full set
-preserves may-analysis soundness.
+preserves may-analysis soundness. Each proxy overload connects to every
+retained handler overload: `m` proxy overloads and `n` handlers produce `m × n`
+bridge edges.
 
 When a stub only declares the matched interface method, detection first looks
 for defined overrides in classes deriving from the stub. If none are indexed,
-the bridge targets the bodyless interface declaration and therefore ends at a
-leaf in call-graph reachability.
+the bridge targets matching bodyless declarations on the stub's transitive
+base classes and therefore ends at a leaf in call-graph reachability. Using
+recorded inheritance rather than namespace/name similarity prevents unrelated
+same-namespace declarations from becoming bridge targets.
 
 #### New IR structures (in `trace-ir/src/ipc.rs`)
 
@@ -591,7 +595,7 @@ binary):
 | Repo | Bridges detected | Matches |
 |------|-----------------|---------|
 | `powermgr_thermal_manager` | 4 | `ThermalLevelCallbackProxy/Stub` (if/else), `ThermalTempCallback`, `ThermalActionCallback` |
-| `hiviewdfx_hiview` | 9 | `FaultLoggerServiceProxy/Stub` — `HandleX` prefix matches (`EnableGwpAsanGrayscale` → `HandleEnableGwpAsanGrayscale`), plus 5 interface-fallback bridges (`FaultLogQueryResultProxy` → `IFaultLogQueryResult`, `FaultLoggerServiceProxy::AddFaultLog/QuerySelfFaultLog/Destroy` → `IFaultLoggerService`) |
+| `hiviewdfx_hiview` | 9 | `FaultLoggerServiceProxy/Stub` — `HandleX` prefix matches (`EnableGwpAsanGrayscale` → `HandleEnableGwpAsanGrayscale`), plus 5 methods whose stubs expose interface-only handlers (defined derived overrides are preferred when indexed) |
 | `ability_dmsfwk` | 2 | `AbilityConnectionWrapperProxy/Stub` (callback interface) |
 | `multimedia_camera_framework` | 2 | `HStreamCaptureThumbnailCallbackProxy/Stub`, `HStreamCapturePhotoCallbackProxy/Stub` (single-case switch + `Handle` prefix) |
 
