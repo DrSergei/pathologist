@@ -673,12 +673,12 @@ pub fn require_symbols_at(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::SCHEMA_V2;
+    use crate::schema::SCHEMA_V3;
 
     fn test_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
-        conn.execute_batch(SCHEMA_V2).unwrap();
+        conn.execute_batch(SCHEMA_V3).unwrap();
         // files: 1 = /proj/main.c
         conn.execute(
             "INSERT INTO files (id, path, sha256) VALUES (1, '/proj/main.c', '')",

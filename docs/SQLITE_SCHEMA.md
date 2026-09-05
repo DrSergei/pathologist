@@ -1,6 +1,6 @@
 # SQLite schema
 
-Schema version: **v2**
+Schema version: **v3**
 
 See also the [README](../README.md) for CLI flags that control what is exported.
 
@@ -40,8 +40,8 @@ Unresolved indirect calls therefore appear in `call_sites` with zero `call_edges
 
 ```text
 analysis_run
-files ─┬─ functions ─┬─ call_sites ─┬─ call_edges → functions (callee)
-       │             │              └─ arg_flow_edges → variables
+files ─┬─ functions ─┬─ call_sites ─ arg_flow_edges → variables
+       │             └─ call_edges → functions (caller and callee)
        ├─ variables ─ flow_nodes ─ flow_edges → flow_nodes
        └─ variables (type_id → types when exported)
 types
@@ -58,7 +58,7 @@ diagnostics
 |--------|------|-------------|
 | `id` | INTEGER PK | Run id |
 | `trace_version` | TEXT | Full binary identity: package version, source revision, dirty state, and build date |
-| `schema_version` | INTEGER | Database layout version (currently `2`) |
+| `schema_version` | INTEGER | Database layout version (currently `3`) |
 | `target_root` | TEXT | Analyzed directory |
 | `created_at` | TEXT | Unix timestamp (seconds) |
 | `options_json` | TEXT | JSON: `include_paths`, `defines`, `include_points_to`, `full_detail` |

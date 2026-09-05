@@ -1,6 +1,6 @@
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
-pub const SCHEMA_V2: &str = r#"
+pub const SCHEMA_V3: &str = r#"
 CREATE TABLE IF NOT EXISTS analysis_run (
     id INTEGER PRIMARY KEY,
     trace_version TEXT NOT NULL,

@@ -86,7 +86,7 @@ def main():
     ap.add_argument("--expected", default="scripts/eval_expected.json")
     ap.add_argument("--update", action="store_true",
                     help="move an existing checkout to the pinned revision")
-    ap.add_argument("corpora", nargs="*", help="subset of {hdf,hiview,dmsfwk,camera}; default all")
+    ap.add_argument("corpora", nargs="*", help="subset of {hdf,hiview,camera}; default all")
     args = ap.parse_args()
 
     with open(args.expected) as fh:

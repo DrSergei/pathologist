@@ -1,4 +1,4 @@
-use crate::schema::{SCHEMA_V2, SCHEMA_VERSION};
+use crate::schema::{SCHEMA_V3, SCHEMA_VERSION};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use rustc_hash::FxHashSet;
@@ -53,7 +53,7 @@ pub fn export_to_sqlite(
             "PRAGMA foreign_keys = OFF; PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY;",
         )?;
         conn.execute_batch("BEGIN IMMEDIATE;")?;
-        conn.execute_batch(SCHEMA_V2)?;
+        conn.execute_batch(SCHEMA_V3)?;
 
         let options_json = serde_json::json!({
             "include_paths": program.include_paths,

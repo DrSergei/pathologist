@@ -11,6 +11,16 @@ public:
 
 IRemoteObject *Remote();
 
+// An unrelated same-named interface in another namespace must not be chosen
+// by the fallback merely because it was indexed first.
+namespace Other {
+class IQueryResult {
+public:
+    virtual bool HasNext() = 0;
+    virtual int GetNext() = 0;
+};
+}
+
 // Interface: IPC methods (declared, no body — external in symbol table).
 class IQueryResult {
 public:

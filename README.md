@@ -336,14 +336,14 @@ So unresolved indirect sites (e.g. `sbuf->impl->readBuffer` before a fix) still 
 
 ## SQLite database schema
 
-Schema version: **v2**. Foreign keys are declared in DDL; exports temporarily disable FK enforcement for bulk load speed.
+Schema version: **v3**. Foreign keys are declared in DDL; exports temporarily disable FK enforcement for bulk load speed.
 
 ### Entity relationship (overview)
 
 ```text
 analysis_run
-files ─┬─ functions ─┬─ call_sites ─┬─ call_edges → functions (callee)
-       │             │              └─ arg_flow_edges → variables
+files ─┬─ functions ─┬─ call_sites ─ arg_flow_edges → variables
+       │             └─ call_edges → functions (caller and callee)
        └─ variables ─ flow_nodes ─ flow_edges → flow_nodes
                     (fn_id → functions, type_id → types)
 types
@@ -360,7 +360,7 @@ Metadata for one `trace analyze` invocation.
 |--------|------|-------------|
 | `id` | INTEGER PK | Run id (always `1` per file). |
 | `trace_version` | TEXT | Full binary identity: package version, source revision, dirty state, and build date. |
-| `schema_version` | INTEGER | Database layout version (currently `2`). |
+| `schema_version` | INTEGER | Database layout version (currently `3`). |
 | `target_root` | TEXT | Absolute or normalized `<TARGET>` path. |
 | `created_at` | TEXT | Unix timestamp (seconds). |
 | `options_json` | TEXT | JSON: `include_paths`, `defines`, `include_points_to`, `full_detail`. |

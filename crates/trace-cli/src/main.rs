@@ -389,6 +389,7 @@ fn run_inspect(db: PathBuf, command: InspectCommands) -> Result<()> {
                  LEFT JOIN call_sites cs ON cs.id = ce.call_site_id \
                  LEFT JOIN files csf ON csf.id = cs.file_id \
                  JOIN functions caller ON caller.id = ce.caller_fn_id \
+                 JOIN files caller_f ON caller_f.id = caller.file_id \
                  JOIN files callee_f ON callee_f.id = callee.file_id \
                  JOIN functions callee ON callee.id = ce.callee_fn_id WHERE 1=1",
             );
@@ -403,7 +404,7 @@ fn run_inspect(db: PathBuf, command: InspectCommands) -> Result<()> {
                 params.push(format!("%{}%", like_escape(p)));
                 let n = params.len();
                 sql.push_str(&format!(
-                    " AND (csf.path LIKE ?{n} ESCAPE '!' OR callee_f.path LIKE ?{n} ESCAPE '!')"
+                    " AND (caller_f.path LIKE ?{n} ESCAPE '!' OR csf.path LIKE ?{n} ESCAPE '!' OR callee_f.path LIKE ?{n} ESCAPE '!')"
                 ));
             }
             // Sort real call sites first; synthetic (IPC bridge) edges have a

@@ -154,30 +154,33 @@ fn find_interface_method(program: &Program, stub_class: &str, method_name: &str)
     // The stub base is the class name with "Stub" stripped,
     // e.g. `OHOS::HiviewDFX::FaultLogQueryResultStub` → `FaultLogQueryResult`.
     let stub_base = stub_class.strip_suffix("Stub").unwrap_or(stub_class);
-    let stub_simple = stub_base.rsplit_once("::").map(|(_, s)| s).unwrap_or(stub_base);
+    let (stub_namespace, stub_simple) = stub_base.rsplit_once("::").unwrap_or(("", stub_base));
+    let stub_interface_base = stub_simple.strip_prefix('I').unwrap_or(stub_simple);
 
-    program.symbols.functions.iter().find(|f| {
-        !f.is_defined
-            && f.name.ends_with(&format!("::{method_name}"))
-            && {
+    program
+        .symbols
+        .functions
+        .iter()
+        .find(|f| {
+            !f.is_defined && f.name.ends_with(&format!("::{method_name}")) && {
                 let class_part = f.name.rsplit_once("::").map(|(c, _)| c).unwrap_or("");
                 if class_part == stub_class {
                     false
                 } else {
                     // Strip leading 'I' from the interface class name to get
                     // the base name, e.g. `IFaultLogQueryResult` → `FaultLogQueryResult`.
-                    let iface_simple = class_part
-                        .rsplit_once("::")
-                        .map(|(_, s)| s)
-                        .unwrap_or(class_part);
+                    let (iface_namespace, iface_simple) =
+                        class_part.rsplit_once("::").unwrap_or(("", class_part));
                     let iface_base = iface_simple.strip_prefix('I').unwrap_or(iface_simple);
                     // Match when the base names coincide, e.g.
                     // `FaultLogQueryResult` == `FaultLogQueryResult`.
-                    !iface_base.is_empty() && iface_base == stub_simple
+                    !iface_base.is_empty()
+                        && iface_namespace == stub_namespace
+                        && iface_base == stub_interface_base
                 }
             }
-    })
-    .map(|f| f.id)
+        })
+        .map(|f| f.id)
 }
 
 fn is_stub_class(class: &str) -> bool {

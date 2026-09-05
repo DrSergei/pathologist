@@ -419,9 +419,9 @@ proxy_method --[CallEdge { caller: proxy_method, callee: stub_handler,
 
 This is done directly in the solver after the direct-call pass (before
 `AnalysisResult` is built). It requires **no** new `FlowConstraint` variant
-and **no** control-flow analysis. Only bridges whose stub handler is
-`is_defined` produce an edge. Argument flow across the boundary is not wired
-in v1 (deferred to Phase 3).
+and **no** control-flow analysis. A bridge may target either a defined stub
+handler or a bodyless interface method used by a stub dispatcher. Argument
+flow across the boundary is not wired in v1 (deferred to Phase 3).
 
 Bridge edges use the dedicated `ResolutionKind::IpcBridge` (distinct from
 `Direct`), exported as `resolution = 'ipc'`, so consumers can recognize and
@@ -552,10 +552,10 @@ Phase 3: Parameter marshalling (optional enhancement)
   → PAG builds Copy constraints for positional mapping
   → Fixture: ipc_arg_flow/
 
-Phase 4: Export + CLI
-  → ipc_bridges SQLite table
-  → --ipc flag
-  → docs/ANALYSIS.md update
+Phase 4: Export + CLI                                      [PARTIAL]
+  → call_edges export (`resolution = ipc`, NULL call_site_id) [DONE]
+  → --no-ipc flag and docs                                  [DONE]
+  → dedicated ipc_bridges SQLite table                      [DEFERRED]
 
 Phase 5: IDL-aware matching (optional, v2)
   → Parse .idl files for exact interface definitions
@@ -583,15 +583,15 @@ binary):
 | `ability_dmsfwk` | 2 | `AbilityConnectionWrapperProxy/Stub` (callback interface) |
 | `multimedia_camera_framework` | 2 | `HStreamCaptureThumbnailCallbackProxy/Stub`, `HStreamCapturePhotoCallbackProxy/Stub` (single-case switch + `Handle` prefix) |
 
-**Fixture tests** (`cargo test -p trace-cli --test ipc_tests`): 7 tests, all
+**Fixture tests** (`cargo test -p trace-cli --test ipc_tests`): 9 tests, all
 pass. Full `cargo test --workspace` (26 suites) remains green.
 
 **Debugging aid:** `TRACE_DEBUG_IPC=1` prints each bridge as
 `[ipc] bridge: <proxy> --> <stub>` plus a total. Disabled by default.
 
-**Remaining for full plan completion:** parameter marshalling (Phase 3),
-SQLite `ipc_bridges` export + `--ipc` flag (Phase 4), IDL-aware matching
-(Phase 5).
+**Remaining for full plan completion:** parameter marshalling (Phase 3), a
+dedicated SQLite `ipc_bridges` table (optional Phase 4 follow-up), and
+IDL-aware matching (Phase 5).
 
 ## AGENTS.md updates
 

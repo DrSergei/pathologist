@@ -12,12 +12,14 @@ class IFooStub {
 public:
     int HandleGetInfo(int key) { (void)key; return 1; }
     int HandleSetInfo(int key, int val) { (void)key; (void)val; return 2; }
+    int LocalOnly() { return 3; }
 };
 
 class IFooProxy {
 public:
     int GetInfo(int key);
     int SetInfo(int key, int val);
+    int LocalOnly();
 };
 
 int IFooProxy::GetInfo(int key) {
@@ -32,6 +34,10 @@ int IFooProxy::SetInfo(int key, int val) {
     void *data = 0, *reply = 0, *option = 0;
     remote->SendRequest(2, data, reply, option); // opcode 2 = SET_INFO
     return val;
+}
+
+int IFooProxy::LocalOnly() {
+    return 3; // Same-named stub method, but no IPC send.
 }
 
 int main() {
