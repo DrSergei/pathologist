@@ -7,6 +7,7 @@ public:
 };
 
 IRemoteObject *Remote();
+void LogSendRequestResult() {}
 
 class IFooStub {
 public:
@@ -37,6 +38,7 @@ int IFooProxy::SetInfo(int key, int val) {
 }
 
 int IFooProxy::LocalOnly() {
+    LogSendRequestResult(); // Contains the substring, but is not an IPC send.
     return 3; // Same-named stub method, but no IPC send.
 }
 

@@ -79,8 +79,8 @@ enum InspectCommands {
         /// Filter edges whose callee name equals FN or ends with `::FN`.
         #[arg(long)]
         to: Option<String>,
-        /// Only edges whose caller or callee file path contains this substring
-        /// (disambiguates same-name functions defined in different files).
+        /// Only edges whose call-site or callee file path contains this substring.
+        /// For a synthetic edge with no call site, match its caller definition file.
         #[arg(long)]
         file: Option<String>,
     },
@@ -405,7 +405,7 @@ fn run_inspect(db: PathBuf, command: InspectCommands) -> Result<()> {
                 params.push(format!("%{}%", like_escape(p)));
                 let n = params.len();
                 sql.push_str(&format!(
-                    " AND (caller_f.path LIKE ?{n} ESCAPE '!' OR csf.path LIKE ?{n} ESCAPE '!' OR callee_f.path LIKE ?{n} ESCAPE '!')"
+                    " AND (csf.path LIKE ?{n} ESCAPE '!' OR callee_f.path LIKE ?{n} ESCAPE '!' OR (ce.call_site_id IS NULL AND caller_f.path LIKE ?{n} ESCAPE '!'))"
                 ));
             }
             // Sort real call sites first; synthetic (IPC bridge) edges have a

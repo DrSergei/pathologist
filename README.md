@@ -112,8 +112,9 @@ trace inspect <DB> calls [--from FN] [--to FN] [--file SUBSTR]
 
 Edges print as `caller (file:line) -> callee [deffile] (resolution)` — the
 `[deffile]` bracket distinguishes same-name (e.g. `static`) functions defined
-in different files; `--file` filters edges whose caller or callee file path
-contains the substring.
+in different files; `--file` filters ordinary edges by call-site or callee
+file. A synthetic edge has no call site, so its caller definition file is used
+instead.
 ```
 
 | Option | Description |
@@ -121,6 +122,7 @@ contains the substring.
 | `<DB>` | Path to SQLite file produced by `trace analyze`. |
 | `--from <FN>` | Filter edges where the **caller** name equals `FN` or ends with `::FN` (C++ qualified methods). `_` and `%` in `FN` are literal, not `LIKE` wildcards. |
 | `--to <FN>` | Filter edges where the **callee** name equals `FN` or ends with `::FN`. Same escaping as `--from`. |
+| `--file <SUBSTR>` | Filter ordinary edges by call-site or callee file; synthetic edges by caller or callee definition file. |
 
 Both filters may be combined. Output format:
 

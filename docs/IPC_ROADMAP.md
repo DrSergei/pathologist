@@ -380,8 +380,8 @@ so a constructor-only `*Stub` class does not enable interface fallback.
 
 **Proxy detection** — a C++ class is a proxy if its qualified class name
 ends in `Proxy` or `Client`. Its methods count as IPC sends if their body
-calls a `SendRequest`-family function (detected via call-site `callee_name`
-containing `SendRequest`).
+calls a function whose final qualified name segment is exactly `SendRequest`
+(unqualified `SendRequest` also matches).
 
 **Matching** — proxy methods are matched to stub handlers by:
 1. **Interface name**: strip `Proxy`/`Client` suffix from proxy class →

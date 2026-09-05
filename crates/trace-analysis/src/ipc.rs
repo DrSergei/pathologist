@@ -10,7 +10,7 @@
 //!
 //! - A **stub** class is identified by its name ending in `Stub`.
 //! - A **proxy** class is identified by its name ending in `Proxy` or `Client` plus
-//!   the presence of a `SendRequest`-family call in the method body.
+//!   the presence of a call whose final qualified segment is `SendRequest`.
 //! - Bridges pair proxy methods to stub handlers by interface class name +
 //!   method name correspondence (e.g. `FooProxy::Bar` → `FooStub::Bar`).
 
@@ -76,7 +76,7 @@ fn scan(program: &Program) -> (StubClasses, ProxyMethods) {
         .symbols
         .call_sites
         .iter()
-        .filter(|cs| cs.callee_name.contains("SendRequest"))
+        .filter(|cs| cs.callee_name.rsplit("::").next() == Some("SendRequest"))
         .map(|cs| cs.caller)
         .collect();
 
@@ -162,7 +162,8 @@ fn find_handlers(program: &Program, handlers: &[FnId], method_name: &str) -> Vec
                     .symbols
                     .function(id)
                     .name
-                    .ends_with(&format!("::{name}"))
+                    .rsplit_once("::")
+                    .is_some_and(|(_, method)| method == name)
             })
             .collect();
         let mut seen = FxHashSet::default();
@@ -224,10 +225,14 @@ fn find_interface_methods(program: &Program, stub_class: &str, method_name: &str
         .functions
         .iter()
         .filter(|f| {
-            !f.is_defined && f.name.ends_with(&format!("::{method_name}")) && {
-                let class_part = f.name.rsplit_once("::").map(|(c, _)| c).unwrap_or("");
-                interface_classes.contains(class_part)
-            }
+            !f.is_defined
+                && f.name
+                    .rsplit_once("::")
+                    .is_some_and(|(_, method)| method == method_name)
+                && {
+                    let class_part = f.name.rsplit_once("::").map(|(c, _)| c).unwrap_or("");
+                    interface_classes.contains(class_part)
+                }
         })
         .map(|f| f.id)
         .collect()

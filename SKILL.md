@@ -86,8 +86,9 @@ trace inspect <DB> calls [--from FN] [--to FN] [--file SUBSTR]
 - `--from`/`--to` match **exactly** or by C++ qualified suffix
   (`--from OnEventProxy` matches `ns::Plugin::OnEventProxy`). `_` and `%` are
   literal, not LIKE wildcards.
-- `--file` keeps edges whose caller **or** callee file path contains the
-  substring (disambiguates same-name `static` functions in different files).
+- `--file` keeps ordinary edges whose call-site or callee file path contains
+  the substring. Synthetic edges have no call site, so their caller definition
+  file is used instead.
 
 Line format:
 

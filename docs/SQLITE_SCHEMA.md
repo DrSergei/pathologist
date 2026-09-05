@@ -332,6 +332,8 @@ trace inspect graph.db dataflow --file SUBSTR --line N --col C [--depth N] [--di
   with `call_sites` (synthetic IPC edges have no call site).
   `--from` / `--to` match an exact `functions.name` or a C++ suffix (`%::FN`
   with `_`/`%` in `FN` escaped so they are not `LIKE` wildcards).
+  `--file` matches ordinary edges by call-site or callee file. For synthetic
+  edges it matches the caller or callee definition file.
   Unresolved indirect sites require SQL (query above).
 - `callgraph` finds the function whose `[line_start, line_end]` contains the
   given line and prints its transitive callees (`down`) or callers (`up`),
