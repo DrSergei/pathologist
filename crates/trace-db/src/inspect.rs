@@ -7,6 +7,8 @@ use anyhow::{bail, Result};
 use rusqlite::Connection;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+pub use trace_analysis::LocKind;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     /// Forward: callees (call graph) / where a value flows to (dataflow).
@@ -50,6 +52,46 @@ impl std::fmt::Display for FunctionRef {
     }
 }
 
+/// Node kind of a `flow_nodes` row, as categorized for value-flow graphs.
+/// Call graphs have no PAG node kinds (their nodes are functions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowNodeKind {
+    Var,
+    Loc,
+    CallTarget,
+    Terminator,
+}
+
+impl FlowNodeKind {
+    fn from_schema_str(s: &str) -> Option<Self> {
+        match s {
+            "var" => Some(Self::Var),
+            "loc" => Some(Self::Loc),
+            "call_target" => Some(Self::CallTarget),
+            "terminator" => Some(Self::Terminator),
+            _ => None,
+        }
+    }
+}
+
+/// Map the schema's `flow_nodes.detail` string for `loc` nodes back to the
+/// abstract-location kind it was exported from (`LocKind`).
+pub fn loc_kind_from_schema_str(s: &str) -> Option<LocKind> {
+    match s {
+        "global" => Some(LocKind::Global),
+        "file_static" => Some(LocKind::FileStatic),
+        "fn_static" => Some(LocKind::FnStatic),
+        "local" => Some(LocKind::Local),
+        "heap" => Some(LocKind::Heap),
+        "field" => Some(LocKind::Field),
+        "field_summary" => Some(LocKind::FieldSummary),
+        "array_summary" => Some(LocKind::ArraySummary),
+        "function" => Some(LocKind::Function),
+        "string_lit" => Some(LocKind::StringLit),
+        _ => None,
+    }
+}
+
 /// A graph query result: flat node/edge sets plus BFS discovery order so the
 /// CLI can print an indented view without re-traversing.
 #[derive(Debug, Default)]
@@ -70,6 +112,12 @@ pub struct GraphNode {
     pub id: i64,
     pub label: String,
     pub detail: String,
+    /// PAG node kind for value-flow graphs; `None` for call graphs (whose
+    /// nodes are functions, not PAG nodes).
+    pub kind: Option<FlowNodeKind>,
+    /// Abstract-location category for `kind == Some(FlowNodeKind::Loc)`,
+    /// e.g. `Heap` / `Field`; `None` otherwise.
+    pub loc_kind: Option<LocKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,7 +125,38 @@ pub struct GraphEdge {
     pub from: i64,
     pub to: i64,
     pub label: String,
+    /// Display form used by the renderers: `basename:line` (empty when the
+    /// edge has no source site, e.g. value-flow edges).
     pub site: String,
+    /// Call-site source path (full path, not basename). Empty when the edge
+    /// has no site.
+    pub path: String,
+    /// 1-based line; 0 when `path.is_empty()`.
+    pub line: i64,
+    /// 1-based column; 0 when `path.is_empty()`.
+    pub col: i64,
+}
+
+/// Call/flow source site attached to a graph edge: full source path plus
+/// 1-based line/col (both 0 when there is no site).
+#[derive(Debug, Clone, Default)]
+pub struct EdgeSite {
+    pub path: String,
+    pub line: i64,
+    pub col: i64,
+}
+
+impl EdgeSite {
+    /// The display form used by the renderers: `basename:line` (empty when
+    /// there is no site).
+    pub fn display(&self) -> String {
+        if self.path.is_empty() {
+            String::new()
+        } else {
+            let base = self.path.rsplit('/').next().unwrap_or(&self.path);
+            format!("{base}:{}", self.line)
+        }
+    }
 }
 
 /// Functions whose `[line_start, line_end]` range contains `line` in files
@@ -141,6 +220,8 @@ fn load_function_labels(conn: &Connection) -> Result<FxHashMap<i64, GraphNode>> 
                 } else {
                     format!("{file_name}:{line} [external]")
                 },
+                kind: None,
+                loc_kind: None,
             },
         ))
     })?;
@@ -152,11 +233,11 @@ fn load_function_labels(conn: &Connection) -> Result<FxHashMap<i64, GraphNode>> 
     Ok(map)
 }
 
-type Adjacency = FxHashMap<i64, Vec<(i64, &'static str, String)>>;
+type Adjacency = FxHashMap<i64, Vec<(i64, &'static str, EdgeSite)>>;
 
 fn load_call_adjacency(conn: &Connection, dir: Direction) -> Result<Adjacency> {
     let mut stmt = conn.prepare(
-        "SELECT cs.caller_fn_id, ce.callee_fn_id, ce.resolution, p.path, cs.line \
+        "SELECT cs.caller_fn_id, ce.callee_fn_id, ce.resolution, p.path, cs.line, cs.col \
          FROM call_edges ce \
          JOIN call_sites cs ON cs.id = ce.call_site_id \
          JOIN files p ON p.id = cs.file_id",
@@ -169,11 +250,12 @@ fn load_call_adjacency(conn: &Connection, dir: Direction) -> Result<Adjacency> {
             row.get::<_, String>(2)?,
             row.get::<_, String>(3)?,
             row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
         ))
     })?;
     for r in rows {
-        let (caller, callee, resolution, path, line) = r?;
-        let site = format!("{}:{}", path.rsplit('/').next().unwrap_or(&path), line);
+        let (caller, callee, resolution, path, line, col) = r?;
+        let site = EdgeSite { path, line, col };
         match dir {
             Direction::Down => {
                 adj.entry(caller)
@@ -276,7 +358,10 @@ pub fn call_graph(
                     from: id,
                     to: *to,
                     label: (*label).to_string(),
-                    site: site.clone(),
+                    site: site.display(),
+                    path: site.path.clone(),
+                    line: site.line,
+                    col: site.col,
                 });
                 if visited.insert(*to) {
                     queue.push_back(Entry {
@@ -494,10 +579,10 @@ pub fn dataflow_graph(
             };
             fwd.entry(src)
                 .or_default()
-                .push((dst, kind_static, String::new()));
+                .push((dst, kind_static, EdgeSite::default()));
             rev.entry(dst)
                 .or_default()
-                .push((src, kind_static, String::new()));
+                .push((src, kind_static, EdgeSite::default()));
         }
     }
 
@@ -510,6 +595,7 @@ pub fn dataflow_graph(
             let kind: String = row.get(1)?;
             let label: String = row.get(2)?;
             let detail: String = row.get(3)?;
+            let kind_enum = FlowNodeKind::from_schema_str(&kind);
             let tag = match kind.as_str() {
                 "loc" => "loc",
                 "call_target" => "target",
@@ -521,12 +607,18 @@ pub fn dataflow_graph(
             } else {
                 format!("{tag}:{label}")
             };
+            let loc_kind = match kind_enum {
+                Some(FlowNodeKind::Loc) => loc_kind_from_schema_str(&detail),
+                _ => None,
+            };
             Ok((
                 id,
                 GraphNode {
                     id,
                     label: shown,
                     detail,
+                    kind: kind_enum,
+                    loc_kind,
                 },
             ))
         })?;
@@ -563,6 +655,8 @@ pub fn dataflow_graph(
                     id,
                     label: format!("node{id}"),
                     detail: String::new(),
+                    kind: None,
+                    loc_kind: None,
                 },
             );
         }
@@ -584,6 +678,9 @@ pub fn dataflow_graph(
                     to: *to,
                     label: (*kind).to_string(),
                     site: String::new(),
+                    path: String::new(),
+                    line: 0,
+                    col: 0,
                 });
                 if visited.insert(*to) {
                     queue.push_back(Entry {
@@ -787,13 +884,17 @@ mod tests {
         let g = call_graph(&conn, 10, Direction::Down, 5).unwrap();
         assert_eq!(g.order.len(), 3);
         assert!(!g.truncated);
-        // Edge annotations carry resolution + call site.
+        // Edge annotations carry resolution + call site (display form, full
+        // path, and the 1-based line/col).
         let e = format!("{:?}", g.edges);
         assert!(
             g.edges.iter().any(|e| e.from == 10
                 && e.to == 11
                 && e.label == "direct"
-                && e.site == "main.c:15"),
+                && e.site == "main.c:15"
+                && e.path == "/proj/main.c"
+                && e.line == 15
+                && e.col == 5),
             "edges: {e}"
         );
     }
