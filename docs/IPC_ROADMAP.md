@@ -380,8 +380,9 @@ so a constructor-only `*Stub` class does not enable interface fallback.
 
 **Proxy detection** — a C++ class is a proxy if its qualified class name
 ends in `Proxy` or `Client`. Its methods count as IPC sends if their body
-calls a function whose final qualified name segment is exactly `SendRequest`
-(unqualified `SendRequest` also matches).
+calls a function whose final callable name segment is exactly `SendRequest`;
+qualified, `remote->SendRequest`, `remote.SendRequest`, and unqualified
+spellings all match without admitting `SendRequest*` family names.
 
 **Matching** — proxy methods are matched to stub handlers by:
 1. **Interface name**: strip `Proxy`/`Client` suffix from proxy class →
@@ -403,9 +404,13 @@ bridge edges.
 
 When a stub only declares the matched interface method, detection first looks
 for defined overrides in classes deriving from the stub. If none are indexed,
-the bridge targets matching bodyless declarations on the stub's transitive
-base classes and therefore ends at a leaf in call-graph reachability. Using
-recorded inheritance rather than namespace/name similarity prevents unrelated
+the bridge targets matching methods on the stub's transitive interface bases.
+This includes inherited default method bodies, preserving their downstream
+calls, as well as bodyless declarations that end at a leaf in call-graph
+reachability. Interface bases include ordinary inheritance and the interface
+argument preserved from an exact `IRemoteStub<IFoo>` base; the outer template
+base remains in the ordinary inheritance graph for CHA. Using recorded
+inheritance rather than namespace/name similarity prevents unrelated
 same-namespace declarations from becoming bridge targets.
 
 #### New IR structures (in `trace-ir/src/ipc.rs`)
@@ -435,8 +440,9 @@ proxy_method --[CallEdge { caller: proxy_method, callee: stub_handler,
 This is done directly in the solver after the direct-call pass (before
 `AnalysisResult` is built). It requires **no** new `FlowConstraint` variant
 and **no** control-flow analysis. A bridge may target a defined stub handler,
-a defined override in a class deriving from the stub, or (when neither body is
-indexed) a bodyless interface method used by a stub dispatcher. Argument flow
+a defined override in a class deriving from the stub, an inherited default
+implementation, or (when no body is indexed) a bodyless interface method used
+by a stub dispatcher. Argument flow
 across the boundary is not wired in v1 (deferred to Phase 3).
 
 Bridge edges use the dedicated `ResolutionKind::IpcBridge` (distinct from

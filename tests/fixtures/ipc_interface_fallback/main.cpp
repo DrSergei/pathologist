@@ -91,6 +91,66 @@ int QueryResultProxy::GetNext() {
     return 0;
 }
 
+// Template-wrapper inheritance used by OpenHarmony stubs. The ordinary
+// inheritance graph contains WrappedStub -> IRemoteStub, while IPC detection
+// must also preserve and recover the IWrapped template argument.
+template <typename Interface>
+class IRemoteStub : public Interface {};
+
+class IWrapped {
+public:
+    virtual int Fetch() = 0;
+};
+
+class WrappedStub : public IRemoteStub<IWrapped> {
+public:
+    int OnRemoteRequest(int code, void *data, void *reply, void *option) {
+        return Fetch();
+    }
+};
+
+class WrappedProxy {
+public:
+    int Fetch();
+};
+
+int WrappedProxy::Fetch() {
+    IRemoteObject *remote = Remote();
+    remote->SendRequest(4, nullptr, nullptr, nullptr);
+    return 0;
+}
+
+// A default implementation on the interface is a reachable handler too.
+// It must not be discarded just because it is defined on an ancestor rather
+// than an override below the stub.
+void DefaultRunImpl() {}
+
+class IDefault {
+public:
+    virtual int Run() {
+        DefaultRunImpl();
+        return 1;
+    }
+};
+
+class DefaultStub : public IDefault {
+public:
+    int OnRemoteRequest(int code, void *data, void *reply, void *option) {
+        return Run();
+    }
+};
+
+class DefaultProxy {
+public:
+    int Run();
+};
+
+int DefaultProxy::Run() {
+    IRemoteObject *remote = Remote();
+    remote->SendRequest(5, nullptr, nullptr, nullptr);
+    return 0;
+}
+
 // A suffix-matching class with only a constructor is not sufficient evidence
 // of an IPC stub, even if a matching interface declaration exists.
 class IConstructorOnly {

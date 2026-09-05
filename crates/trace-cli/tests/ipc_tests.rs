@@ -268,6 +268,15 @@ fn ipc_interface_fallback_prefers_defined_overrides() {
     // the external interface declarations.
     let (program, pag, analysis) = build("ipc_interface_fallback");
 
+    assert!(
+        program
+            .template_bases
+            .iter()
+            .any(|(derived, base)| { derived == "WrappedStub" && base == "IRemoteStub<IWrapped>" }),
+        "expected templated inheritance to survive lowering and merge, got: {:?}",
+        program.template_bases
+    );
+
     let bridge_names: Vec<_> = pag
         .ipc_bridges
         .iter()
@@ -293,7 +302,21 @@ fn ipc_interface_fallback_prefers_defined_overrides() {
         "expected GetNext → QueryResultService::GetNext bridge, got: {:?}",
         bridge_names
     );
-    assert_eq!(pag.ipc_bridges.len(), 2);
+    assert!(
+        bridge_names
+            .iter()
+            .any(|(p, s)| p == "WrappedProxy::Fetch" && s == "IWrapped::Fetch"),
+        "expected template-base interface fallback, got: {:?}",
+        bridge_names
+    );
+    assert!(
+        bridge_names
+            .iter()
+            .any(|(p, s)| p == "DefaultProxy::Run" && s == "IDefault::Run"),
+        "expected defined ancestor fallback, got: {:?}",
+        bridge_names
+    );
+    assert_eq!(pag.ipc_bridges.len(), 4);
     assert!(
         !bridge_names.iter().any(|(_, s)| s.starts_with("Other::")),
         "interface fallback must stay in the stub namespace: {bridge_names:?}"
@@ -317,14 +340,18 @@ fn ipc_interface_fallback_prefers_defined_overrides() {
         .filter(|edge| {
             matches!(
                 fn_name(&program, edge.caller).as_str(),
-                "QueryResultService::HasNext" | "QueryResultService::GetNext"
+                "QueryResultService::HasNext" | "QueryResultService::GetNext" | "IDefault::Run"
             )
         })
         .map(|edge| fn_name(&program, edge.callee))
         .collect();
     assert_eq!(
         downstream,
-        HashSet::from(["HasNextImpl".to_string(), "GetNextImpl".to_string()])
+        HashSet::from([
+            "HasNextImpl".to_string(),
+            "GetNextImpl".to_string(),
+            "DefaultRunImpl".to_string()
+        ])
     );
 }
 

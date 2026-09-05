@@ -10,7 +10,7 @@
 //!
 //! - A **stub** class is identified by its name ending in `Stub`.
 //! - A **proxy** class is identified by its name ending in `Proxy` or `Client` plus
-//!   the presence of a call whose final qualified segment is `SendRequest`.
+//!   the presence of a call whose final callable segment is `SendRequest`.
 //! - Bridges pair proxy methods to stub handlers by interface class name +
 //!   method name correspondence (e.g. `FooProxy::Bar` → `FooStub::Bar`).
 
@@ -76,7 +76,7 @@ fn scan(program: &Program) -> (StubClasses, ProxyMethods) {
         .symbols
         .call_sites
         .iter()
-        .filter(|cs| cs.callee_name.rsplit("::").next() == Some("SendRequest"))
+        .filter(|cs| final_callable_segment(&cs.callee_name) == "SendRequest")
         .map(|cs| cs.caller)
         .collect();
 
@@ -187,7 +187,7 @@ fn find_handlers(program: &Program, handlers: &[FnId], method_name: &str) -> Vec
     Vec::new()
 }
 
-/// Fallback for stubs with no handler methods: find an external (interface)
+/// Fallback for stubs with no handler methods: find an inherited interface
 /// function whose simple name matches the proxy method. The stub's
 /// `OnRemoteRequest` switch calls these interface methods directly on `this`
 /// (inherited from the parent interface class).
@@ -209,14 +209,29 @@ fn find_interface_methods(program: &Program, stub_class: &str, method_name: &str
         return concrete;
     }
 
-    // Restrict bodyless fallbacks to actual base classes of the stub. A
-    // namespace/name heuristic can otherwise select an unrelated external
-    // class that happens to expose the same method.
+    // Restrict ancestor fallbacks to actual base classes of the stub. A
+    // namespace/name heuristic can otherwise select an unrelated class that
+    // happens to expose the same method. `IRemoteStub<IFoo>` is represented
+    // by the ordinary `IRemoteStub` inheritance edge plus a preserved
+    // template-base spelling, from which we recover `IFoo`.
     let mut interface_classes = FxHashSet::default();
-    let mut pending = program.bases_of(stub_class);
+    let mut pending = vec![stub_class.to_string()];
+    let mut expanded = FxHashSet::default();
     while let Some(class) = pending.pop() {
-        if interface_classes.insert(class.clone()) {
-            pending.extend(program.bases_of(&class));
+        if !expanded.insert(class.clone()) {
+            continue;
+        }
+        for base in program.bases_of(&class) {
+            if interface_classes.insert(base.clone()) {
+                pending.push(base);
+            }
+        }
+        for template_base in program.template_bases_of(&class) {
+            if let Some(interface) = remote_stub_interface(&template_base) {
+                if interface_classes.insert(interface.clone()) {
+                    pending.push(interface);
+                }
+            }
         }
     }
 
@@ -225,10 +240,9 @@ fn find_interface_methods(program: &Program, stub_class: &str, method_name: &str
         .functions
         .iter()
         .filter(|f| {
-            !f.is_defined
-                && f.name
-                    .rsplit_once("::")
-                    .is_some_and(|(_, method)| method == method_name)
+            f.name
+                .rsplit_once("::")
+                .is_some_and(|(_, method)| method == method_name)
                 && {
                     let class_part = f.name.rsplit_once("::").map(|(c, _)| c).unwrap_or("");
                     interface_classes.contains(class_part)
@@ -236,6 +250,48 @@ fn find_interface_methods(program: &Program, stub_class: &str, method_name: &str
         })
         .map(|f| f.id)
         .collect()
+}
+
+/// Recover the interface argument from an exact `IRemoteStub<Interface>`
+/// base spelling. Nested templates in the first argument are preserved; any
+/// later template arguments are ignored because v1 only needs the interface.
+fn remote_stub_interface(template_base: &str) -> Option<String> {
+    let open = template_base.find('<')?;
+    let wrapper = template_base[..open].trim();
+    if wrapper.rsplit("::").next() != Some("IRemoteStub") {
+        return None;
+    }
+
+    let mut depth = 0_u32;
+    let mut end = None;
+    for (offset, ch) in template_base[open + 1..].char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' if depth == 0 => {
+                end = Some(open + 1 + offset);
+                break;
+            }
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                end = Some(open + 1 + offset);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let interface = template_base[open + 1..end?].trim();
+    if interface.is_empty() {
+        return None;
+    }
+    if interface.contains("::") {
+        return Some(interface.trim_start_matches("::").to_string());
+    }
+    Some(
+        wrapper
+            .rsplit_once("::")
+            .map(|(namespace, _)| format!("{namespace}::{interface}"))
+            .unwrap_or_else(|| interface.to_string()),
+    )
 }
 
 fn is_stub_class(class: &str) -> bool {
@@ -253,6 +309,13 @@ fn is_boilerplate(class: &str, method: &str) -> bool {
 
 fn is_proxy_class(class: &str) -> bool {
     class.ends_with("Proxy") || class.ends_with("Client")
+}
+
+/// Final callable segment of either a qualified name or a member expression.
+/// Lowering may retain `remote->` / `remote.` when the receiver type cannot
+/// be resolved, so those separators have to be handled alongside `::`.
+fn final_callable_segment(name: &str) -> &str {
+    name.rsplit([':', '>', '.']).next().unwrap_or(name)
 }
 
 /// Split a qualified C++ function name into `(class, method)`.
@@ -312,5 +375,29 @@ mod tests {
         let handlers = find_interface_methods(&program, "svc::FooStub", "Run");
 
         assert_eq!(handlers, vec![first, second]);
+    }
+
+    #[test]
+    fn remote_stub_template_preserves_qualified_interface() {
+        assert_eq!(
+            remote_stub_interface("svc::IRemoteStub<IFoo>"),
+            Some("svc::IFoo".to_string())
+        );
+        assert_eq!(
+            remote_stub_interface("svc::IRemoteStub<api::IFoo, Policy>"),
+            Some("api::IFoo".to_string())
+        );
+        assert_eq!(remote_stub_interface("svc::Wrapper<IFoo>"), None);
+    }
+
+    #[test]
+    fn send_request_match_uses_exact_member_name() {
+        assert_eq!(final_callable_segment("remote->SendRequest"), "SendRequest");
+        assert_eq!(final_callable_segment("Remote::SendRequest"), "SendRequest");
+        assert_eq!(final_callable_segment("remote.SendRequest"), "SendRequest");
+        assert_ne!(
+            final_callable_segment("remote->SendRequestAsync"),
+            "SendRequest"
+        );
     }
 }

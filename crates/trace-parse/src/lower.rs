@@ -1269,6 +1269,7 @@ fn program_into_unit(path: PathBuf, mut program: Program) -> UnitIndex {
         diagnostics: program.diagnostics,
         anon_type_counter: program.anon_type_counter,
         inheritance: std::mem::take(&mut program.inheritance),
+        template_bases: std::mem::take(&mut program.template_bases),
         final_classes: std::mem::take(&mut program.final_classes),
     }
 }
@@ -1607,7 +1608,17 @@ fn lower_struct_specifier(
                         | "template_type"
                         | "namespace_identifier"
                 ) {
-                    let raw = normalize_qualified(node_text(source, &base));
+                    let base_text = node_text(source, &base);
+                    let template_spelling = normalize_template_spelling(base_text);
+                    if template_spelling.contains('<') {
+                        let qualified = if template_spelling.contains("::") {
+                            template_spelling
+                        } else {
+                            ctx.qualify(&template_spelling)
+                        };
+                        program.add_template_base(&derived, &qualified);
+                    }
+                    let raw = normalize_qualified(base_text);
                     let base = strip_template_args(&raw);
                     let base = if base.contains("::") {
                         base
@@ -5489,6 +5500,14 @@ fn normalize_qualified(text: &str) -> String {
         }
     }
     out
+}
+
+/// Collapse whitespace in a template-base spelling without discarding its
+/// arguments. The ordinary qualified-name normalizer intentionally strips
+/// `<...>`; IPC analysis needs the preserved argument from bases such as
+/// `IRemoteStub < IFoo >`.
+fn normalize_template_spelling(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
 /// Strip a trailing balanced `<...>` argument list from a type/function

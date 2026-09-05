@@ -23,6 +23,8 @@ pub struct UnitIndex {
     pub anon_type_counter: u32,
     /// Per-unit `(derived, base)` class edges (C++).
     pub inheritance: Vec<(String, String)>,
+    /// Per-unit `(derived, templated base spelling)` facts (C++).
+    pub template_bases: Vec<(String, String)>,
     /// Classes declared `final` in this unit.
     pub final_classes: Vec<String>,
 }
@@ -54,6 +56,9 @@ fn merge_unit(program: &mut Program, unit: &UnitIndex, mode: MergeMode) {
     program.anon_type_counter = program.anon_type_counter.max(unit.anon_type_counter);
     for (derived, base) in &unit.inheritance {
         program.add_inheritance(derived, base);
+    }
+    for (derived, base) in &unit.template_bases {
+        program.add_template_base(derived, base);
     }
     for cls in &unit.final_classes {
         program.mark_class_final(cls);

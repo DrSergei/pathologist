@@ -110,6 +110,13 @@ pub struct Program {
     /// (`ns::Cls`). Populated at lowering, consumed post-merge by virtual
     /// dispatch expansion.
     pub inheritance: Vec<(String, String)>,
+    /// C++ template-base facts: `(derived, qualified base spelling)`.
+    ///
+    /// The ordinary inheritance graph stores the bare template name for CHA
+    /// (for example, `IRemoteStub`), while consumers that understand a
+    /// particular template can inspect the preserved spelling
+    /// (`IRemoteStub<IFoo>`).
+    pub template_bases: Vec<(String, String)>,
     /// Classes declared `final` — CHA does not walk into their subclasses.
     pub final_classes: Vec<String>,
 }
@@ -131,6 +138,26 @@ impl Program {
         if !self.inheritance.contains(&edge) {
             self.inheritance.push(edge);
         }
+    }
+
+    /// Preserve a templated base-class spelling once.
+    pub fn add_template_base(&mut self, derived: &str, base: &str) {
+        if derived.is_empty() || base.is_empty() {
+            return;
+        }
+        let edge = (derived.to_string(), base.to_string());
+        if !self.template_bases.contains(&edge) {
+            self.template_bases.push(edge);
+        }
+    }
+
+    /// Templated base-class spellings declared directly on `cls`.
+    pub fn template_bases_of(&self, cls: &str) -> Vec<String> {
+        self.template_bases
+            .iter()
+            .filter(|(derived, _)| derived == cls)
+            .map(|(_, base)| base.clone())
+            .collect()
     }
 
     /// Record that `cls` is a `final` class.

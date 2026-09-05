@@ -200,9 +200,12 @@ edge from a proxy method that calls `SendRequest` to the corresponding stub
 handler. Classes are paired by their qualified `*Proxy`/`*Client` and `*Stub`
 names; methods match exactly, with `HandleX` and `XStub` handler fallbacks.
 For a stub with interface-only declarations, defined overrides in classes
-deriving from that stub are preferred; otherwise bodyless interface methods
-are matched only on the stub's transitive base classes. The latter are
-intentionally leaf targets when no concrete server implementation is indexed.
+deriving from that stub are preferred; otherwise matching methods on the
+stub's transitive interface bases are retained, including default method
+bodies and bodyless declarations. Interface bases are recovered from both
+ordinary inheritance and the interface argument of an exact
+`IRemoteStub<IFoo>` base. Bodyless methods are intentionally leaf targets when
+no implementation is indexed.
 The edge has resolution `ipc` and no source call site, and can be disabled
 with `--no-ipc`.
 Because v1 has no opcode or parcel-type information, overloaded handlers at
